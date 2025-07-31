@@ -117,7 +117,7 @@ impl<R: FusionRuntime> FusionTensor<R> {
         }
     }
 
-    pub(crate) fn into_data<B>(self) -> impl Future<Output = TensorData>
+    pub fn into_data<B>(self) -> impl Future<Output = TensorData>
     where
         B: FusionBackend<FusionRuntime = R>,
     {

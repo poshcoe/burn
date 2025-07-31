@@ -99,6 +99,11 @@ where
         self.primitive
     }
 
+    /// Converts the tensor into a primitive tensor.
+    pub fn as_primitive(&self) -> &K::Primitive {
+        &self.primitive
+    }
+
     /// Converts from a primitive tensor into a tensor.
     pub fn from_primitive(tensor: K::Primitive) -> Self {
         Self::new(tensor)

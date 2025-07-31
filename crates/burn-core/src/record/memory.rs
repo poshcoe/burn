@@ -36,7 +36,7 @@ impl<S: PrecisionSettings, B: Backend> Recorder<B> for BinBytesRecorder<S> {
         Ok(bincode::serde::encode_to_vec(item, bin_config()).unwrap())
     }
     fn load_item<I: DeserializeOwned>(&self, args: Self::LoadArgs) -> Result<I, RecorderError> {
-        let state = bincode::serde::decode_borrowed_from_slice(&args, bin_config()).unwrap();
+        let (state, _) = bincode::serde::borrow_decode_from_slice(&args, bin_config()).unwrap();
         Ok(state)
     }
 }

@@ -29,6 +29,14 @@ impl<B: Backend> TensorPrimitive<B> {
             Self::Float(tensor) => tensor,
         }
     }
+
+    /// Returns the full tensor representation.
+    pub fn as_tensor(&self) -> &B::FloatTensorPrimitive {
+        match self {
+            Self::Float(tensor) => tensor,
+            _ => unimplemented!()
+        }
+    }
 }
 
 impl<B: Backend> TensorMetadata for TensorPrimitive<B> {

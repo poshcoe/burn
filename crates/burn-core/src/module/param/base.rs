@@ -126,6 +126,21 @@ impl<T: Parameter> Param<T> {
             .clone()
     }
 
+    /// Gets the parameter value.
+    pub fn as_val(&self) -> &T {
+        &self.state
+            .get_or_init(|| {
+                let mut result = self
+                    .initialization
+                    .as_ref()
+                    .expect("Should have an initialization when no state provided.")
+                    .write()
+                    .unwrap();
+                let state = result.take().expect("Should exist when not initialized");
+                state.initialize()
+            })
+    }
+
     /// Gets the parameter's value while consuming the parameter.
     pub fn into_value(self) -> T {
         self.consume().1

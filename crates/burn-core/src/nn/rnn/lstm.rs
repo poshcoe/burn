@@ -6,7 +6,7 @@ use crate::tensor::backend::Backend;
 use crate::tensor::{Tensor, s};
 
 /// An LstmState is used to store cell state and hidden state in LSTM.
-#[derive(Module, Debug)]
+#[derive(new, Module, Debug)]
 pub struct LstmState<B: Backend> {
     /// The hidden state `[1, d_batch, d_hidden]`
     pub hidden: Tensor<B, 3>,
@@ -328,8 +328,11 @@ mod tests {
     #[test]
     fn test_lstm_against_known_values() {
         // create tensors from known values
-        let input = Tensor::<B, 3>::from_data(TensorData::from(INPUT), &Default::default());
-        let input_rev = input.clone().flip([0]);
+        let input =
+            Tensor::<B, 3>::from_data(TensorData::from(INPUT), &Default::default()).require_grad();
+        let input_rev =
+            Tensor::<B, 3>::from_data(TensorData::from([INPUT[1], INPUT[0]]), &Default::default())
+                .require_grad();
         let input_weights =
             Tensor::<B, 3>::from_data(TensorData::from(INPUT_WEIGHTS_T), &Default::default())
                 .transpose();
@@ -440,8 +443,9 @@ mod tests {
             [d_sequence, d_batch, d_input],
             Distribution::Normal(0., 1.),
             &Default::default(),
-        );
-        let (output, _) = bilstm.forward(input, None);
+        )
+        .require_grad();
+        let (output, _) = bilstm.forward(input.clone(), None);
         assert_eq!(output.shape().dims(), [d_sequence, d_batch, d_hidden * 2]);
         // test backprop
         #[cfg(feature = "std")]
@@ -455,7 +459,7 @@ mod tests {
                     .grad(&grads)
                     .unwrap()
                     .equal_elem(0.)
-                    .any()
+                    .all()
                     .into_scalar()
                     .to_bool()
                     != true
@@ -467,7 +471,7 @@ mod tests {
                     .grad(&grads)
                     .unwrap()
                     .equal_elem(0.)
-                    .any()
+                    .all()
                     .into_scalar()
                     .to_bool()
                     != true

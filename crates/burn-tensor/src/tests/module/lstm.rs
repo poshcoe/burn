@@ -79,8 +79,8 @@ mod tests {
         let input_weights = TestTensor::<3>::from(INPUT_WEIGHTS_T).transpose();
         let recurrent_weights = TestTensor::<3>::from(RECURRENT_WEIGHTS_T).transpose();
         let biases = Some(TestTensor::<3>::from(BIASES));
-        let cell = TestTensor::<3>::from([[0.; HID_D]; BAT_D]);
-        let hidden = TestTensor::<3>::from([[0.; HID_D]; BAT_D]);
+        let cell = TestTensor::<3>::from([[[0.; HID_D]; BAT_D]; 1]);
+        let hidden = TestTensor::<3>::from([[[0.; HID_D]; BAT_D]; 1]);
         let expected_output = TensorData::from(OUT);
         let expected_cell = TensorData::from(CELL);
         let expected_hidden = TensorData::from(HIDDEN);

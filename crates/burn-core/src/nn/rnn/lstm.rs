@@ -1,30 +1,20 @@
 use crate as burn;
-
 use crate::config::Config;
-use crate::module::Module;
-use crate::module::{Content, DisplaySettings, ModuleDisplay};
+use crate::module::{Module, Param};
 use crate::nn::Initializer;
-use crate::nn::rnn::gate_controller::GateController;
-use crate::tensor::Tensor;
-use crate::tensor::activation;
 use crate::tensor::backend::Backend;
+use crate::tensor::{Tensor, s};
 
-/// A LstmState is used to store cell state and hidden state in LSTM.
-pub struct LstmState<B: Backend, const D: usize> {
-    /// The cell state.
-    pub cell: Tensor<B, D>,
-    /// The hidden state.
-    pub hidden: Tensor<B, D>,
+/// An LstmState is used to store cell state and hidden state in LSTM.
+#[derive(Module, Debug)]
+pub struct LstmState<B: Backend> {
+    /// The hidden state `[1, d_batch, d_hidden]`
+    pub hidden: Tensor<B, 3>,
+    /// The cell state `[1, d_batch, d_hidden]`
+    pub cell: Tensor<B, 3>,
 }
 
-impl<B: Backend, const D: usize> LstmState<B, D> {
-    /// Initialize a new [LSTM State](LstmState).
-    pub fn new(cell: Tensor<B, D>, hidden: Tensor<B, D>) -> Self {
-        Self { cell, hidden }
-    }
-}
-
-/// Configuration to create a [Lstm](Lstm) module using the [init function](LstmConfig::init).
+/// Configuration to create a [LSTM](Lstm) module using the [init function](LstmConfig::init).
 #[derive(Config)]
 pub struct LstmConfig {
     /// The size of the input features.
@@ -33,9 +23,74 @@ pub struct LstmConfig {
     pub d_hidden: usize,
     /// If a bias should be applied during the Lstm transformation.
     pub bias: bool,
-    /// Lstm initializer
+    /// Initializer for input weights
     #[config(default = "Initializer::XavierNormal{gain:1.0}")]
-    pub initializer: Initializer,
+    pub input_weight_init: Initializer,
+    /// Initializer for recurrent weights
+    #[config(default = "Initializer::Orthogonal{gain:1.0}")]
+    pub recurrent_weight_init: Initializer,
+    /// Initializer for biases
+    #[config(default = "Initializer::Zeros")]
+    pub bias_init: Initializer,
+    /// Forget gate bias override
+    #[config(default = "Initializer::Ones")]
+    pub forget_bias_init: Initializer,
+}
+
+impl LstmConfig {
+    /// Initialize a new [LSTM](Lstm) module
+    pub fn init<B: Backend>(&self, device: &B::Device) -> Lstm<B> {
+        // init input weight params
+        let input_weights = self.input_weight_init.init_with(
+            [1, self.d_input, self.d_hidden * 4],
+            Some(self.d_input),
+            Some(self.d_hidden * 4),
+            device,
+        );
+        // init recurrent weight params
+        let recurrent_weights = self.recurrent_weight_init.init_with(
+            [1, self.d_hidden, self.d_hidden * 4],
+            Some(self.d_hidden),
+            Some(self.d_hidden * 4),
+            device,
+        );
+        // init bias params if configured
+        let biases = self.bias.then_some(self.bias_init.init_with(
+            [1, 1, self.d_hidden * 4],
+            Some(self.d_input),
+            Some(self.d_hidden * 4),
+            device,
+        ));
+        // override forget gate initialization
+        let biases = biases.map(|b_param| {
+            let forget_bias = self
+                .forget_bias_init
+                .init_with(
+                    [1, 1, self.d_hidden],
+                    Some(self.d_input),
+                    Some(self.d_hidden),
+                    device,
+                )
+                .val();
+            b_param.map(|b| {
+                b.slice_assign([0..1, 0..1, self.d_hidden..self.d_hidden * 2], forget_bias)
+            })
+        });
+        Lstm {
+            input_weights,
+            recurrent_weights,
+            biases,
+            d_hidden: self.d_hidden,
+        }
+    }
+
+    /// Initialize a new [Bidirectional LSTM](BiLstm) module
+    pub fn init_bilstm<B: Backend>(&self, device: &B::Device) -> BiLstm<B> {
+        BiLstm {
+            forward: self.init(device),
+            reverse: self.init(device),
+        }
+    }
 }
 
 /// The Lstm module. This implementation is for a unidirectional, stateless, Lstm.
@@ -43,736 +98,380 @@ pub struct LstmConfig {
 /// Introduced in the paper: [Long Short-Term Memory](https://www.researchgate.net/publication/13853244).
 ///
 /// Should be created with [LstmConfig].
+///
+/// # Details
+///
+/// The combined-gate weights are flattened in `(input, forget, cell, output)` gate order.
 #[derive(Module, Debug)]
-#[module(custom_display)]
 pub struct Lstm<B: Backend> {
-    /// The input gate regulates which information to update and store in the cell state at each time step.
-    pub input_gate: GateController<B>,
-    /// The forget gate is used to control which information to discard or keep in the memory cell at each time step.
-    pub forget_gate: GateController<B>,
-    /// The output gate determines which information from the cell state to output at each time step.
-    pub output_gate: GateController<B>,
-    /// The cell gate is used to compute the cell state that stores and carries information through time.
-    pub cell_gate: GateController<B>,
-    /// The hidden state of the LSTM.
+    /// Combined-gate input weights (W) ``[1, d_input, d_hidden * 4]``
+    pub input_weights: Param<Tensor<B, 3>>,
+    /// Combined-gate recurrent weights (R) ``[1, d_hidden, d_hidden * 4]``
+    pub recurrent_weights: Param<Tensor<B, 3>>,
+    /// Combined-gate biases (b) ``[1, 1, d_hidden * 4]``
+    pub biases: Option<Param<Tensor<B, 3>>>,
+    /// The hidden dimension of the LSTM
     pub d_hidden: usize,
-}
-
-impl<B: Backend> ModuleDisplay for Lstm<B> {
-    fn custom_settings(&self) -> Option<DisplaySettings> {
-        DisplaySettings::new()
-            .with_new_line_after_attribute(false)
-            .optional()
-    }
-
-    fn custom_content(&self, content: Content) -> Option<Content> {
-        let [d_input, _] = self.input_gate.input_transform.weight.shape().dims();
-        let bias = self.input_gate.input_transform.bias.is_some();
-
-        content
-            .add("d_input", &d_input)
-            .add("d_hidden", &self.d_hidden)
-            .add("bias", &bias)
-            .optional()
-    }
-}
-
-impl LstmConfig {
-    /// Initialize a new [lstm](Lstm) module.
-    pub fn init<B: Backend>(&self, device: &B::Device) -> Lstm<B> {
-        let d_output = self.d_hidden;
-
-        let new_gate = || {
-            GateController::new(
-                self.d_input,
-                d_output,
-                self.bias,
-                self.initializer.clone(),
-                device,
-            )
-        };
-
-        Lstm {
-            input_gate: new_gate(),
-            forget_gate: new_gate(),
-            output_gate: new_gate(),
-            cell_gate: new_gate(),
-            d_hidden: self.d_hidden,
-        }
-    }
 }
 
 impl<B: Backend> Lstm<B> {
     /// Applies the forward pass on the input tensor. This LSTM implementation
-    /// returns the state for each element in a sequence (i.e., across seq_length) and a final state.
+    /// returns the state for each element in a sequence (i.e., across d_sequence) and a final state.
     ///
     /// ## Parameters:
-    /// - batched_input: The input tensor of shape `[batch_size, sequence_length, input_size]`.
+    /// - input: The input tensor of shape `[d_sequence, d_batch, d_input]`.
     /// - state: An optional `LstmState` representing the initial cell state and hidden state.
-    ///   Each state tensor has shape `[batch_size, hidden_size]`.
+    ///   Each state tensor has shape `[1, d_batch, d_hidden]`.
     ///   If no initial state is provided, these tensors are initialized to zeros.
     ///
     /// ## Returns:
-    /// - output: A tensor represents the output features of LSTM. Shape: `[batch_size, sequence_length, hidden_size]`
+    /// - output: A tensor representing the output features of LSTM. Shape: `[d_sequence, d_batch, d_hidden]`
     /// - state: A `LstmState` represents the final states. Both `state.cell` and `state.hidden` have the shape
-    ///   `[batch_size, hidden_size]`.
+    ///   `[1, d_batch, d_hidden]`.
     pub fn forward(
         &self,
-        batched_input: Tensor<B, 3>,
-        state: Option<LstmState<B, 2>>,
-    ) -> (Tensor<B, 3>, LstmState<B, 2>) {
-        let device = batched_input.device();
-        let [batch_size, seq_length, _] = batched_input.dims();
-
-        self.forward_iter(
-            batched_input.iter_dim(1).zip(0..seq_length),
-            state,
-            batch_size,
-            seq_length,
-            &device,
-        )
-    }
-
-    fn forward_iter<I: Iterator<Item = (Tensor<B, 3>, usize)>>(
-        &self,
-        input_timestep_iter: I,
-        state: Option<LstmState<B, 2>>,
-        batch_size: usize,
-        seq_length: usize,
-        device: &B::Device,
-    ) -> (Tensor<B, 3>, LstmState<B, 2>) {
-        let mut batched_hidden_state =
-            Tensor::empty([batch_size, seq_length, self.d_hidden], device);
-
-        let (mut cell_state, mut hidden_state) = match state {
-            Some(state) => (state.cell, state.hidden),
-            None => (
-                Tensor::zeros([batch_size, self.d_hidden], device),
-                Tensor::zeros([batch_size, self.d_hidden], device),
-            ),
-        };
-
-        for (input_t, t) in input_timestep_iter {
-            let input_t = input_t.squeeze(1);
-            // f(orget)g(ate) tensors
-            let biased_fg_input_sum = self
-                .forget_gate
-                .gate_product(input_t.clone(), hidden_state.clone());
-            let forget_values = activation::sigmoid(biased_fg_input_sum); // to multiply with cell state
-
-            // i(nput)g(ate) tensors
-            let biased_ig_input_sum = self
-                .input_gate
-                .gate_product(input_t.clone(), hidden_state.clone());
-            let add_values = activation::sigmoid(biased_ig_input_sum);
-
-            // o(output)g(ate) tensors
-            let biased_og_input_sum = self
-                .output_gate
-                .gate_product(input_t.clone(), hidden_state.clone());
-            let output_values = activation::sigmoid(biased_og_input_sum);
-
-            // c(ell)g(ate) tensors
-            let biased_cg_input_sum = self
-                .cell_gate
-                .gate_product(input_t.clone(), hidden_state.clone());
-            let candidate_cell_values = biased_cg_input_sum.tanh();
-
-            cell_state = forget_values * cell_state.clone() + add_values * candidate_cell_values;
-            hidden_state = output_values * cell_state.clone().tanh();
-
-            let unsqueezed_hidden_state = hidden_state.clone().unsqueeze_dim(1);
-
-            // store the hidden state for this timestep
-            batched_hidden_state = batched_hidden_state.slice_assign(
-                [0..batch_size, t..(t + 1), 0..self.d_hidden],
-                unsqueezed_hidden_state.clone(),
-            );
-        }
-
-        (
-            batched_hidden_state,
-            LstmState::new(cell_state, hidden_state),
-        )
+        input: Tensor<B, 3>,
+        state: Option<LstmState<B>>,
+    ) -> (Tensor<B, 3>, LstmState<B>) {
+        // unwrap or initialize state
+        let state = state.unwrap_or_else(|| {
+            let d_batch = input.shape().dims[1];
+            let device = input.device();
+            LstmState {
+                hidden: Tensor::zeros([1, d_batch, self.d_hidden], &device),
+                cell: Tensor::zeros([1, d_batch, self.d_hidden], &device),
+            }
+        });
+        // forward
+        let (hidden_states, cell_states) = crate::tensor::module::lstm(
+            input,
+            state.hidden,
+            state.cell,
+            self.input_weights.val(),
+            self.recurrent_weights.val(),
+            self.biases.as_ref().map(|b| b.val()),
+        );
+        let out = hidden_states.clone().slice(s![1.., .., ..]);
+        let hidden = hidden_states.slice(s![-1, .., ..]);
+        let cell = cell_states.slice(s![-1, .., ..]);
+        (out, LstmState { hidden, cell })
     }
 }
 
-/// Configuration to create a [BiLstm](BiLstm) module using the [init function](BiLstmConfig::init).
-#[derive(Config)]
-pub struct BiLstmConfig {
-    /// The size of the input features.
-    pub d_input: usize,
-    /// The size of the hidden state.
-    pub d_hidden: usize,
-    /// If a bias should be applied during the BiLstm transformation.
-    pub bias: bool,
-    /// BiLstm initializer
-    #[config(default = "Initializer::XavierNormal{gain:1.0}")]
-    pub initializer: Initializer,
+/// An LstmState is used to store cell state and hidden state in LSTM.
+#[derive(Module, Debug)]
+pub struct BiLstmState<B: Backend> {
+    /// The forward LSTM state
+    pub forward: LstmState<B>,
+    /// The reverse LSTM state
+    pub reverse: LstmState<B>,
 }
 
 /// The BiLstm module. This implementation is for Bidirectional LSTM.
 ///
 /// Introduced in the paper: [Framewise phoneme classification with bidirectional LSTM and other neural network architectures](https://www.cs.toronto.edu/~graves/ijcnn_2005.pdf).
 ///
-/// Should be created with [BiLstmConfig].
+/// Wraps [Lstm] modules
 #[derive(Module, Debug)]
-#[module(custom_display)]
 pub struct BiLstm<B: Backend> {
     /// LSTM for the forward direction.
     pub forward: Lstm<B>,
     /// LSTM for the reverse direction.
     pub reverse: Lstm<B>,
-    /// The size of the hidden state.
-    pub d_hidden: usize,
-}
-
-impl<B: Backend> ModuleDisplay for BiLstm<B> {
-    fn custom_settings(&self) -> Option<DisplaySettings> {
-        DisplaySettings::new()
-            .with_new_line_after_attribute(false)
-            .optional()
-    }
-
-    fn custom_content(&self, content: Content) -> Option<Content> {
-        let [d_input, _] = self
-            .forward
-            .input_gate
-            .input_transform
-            .weight
-            .shape()
-            .dims();
-        let bias = self.forward.input_gate.input_transform.bias.is_some();
-
-        content
-            .add("d_input", &d_input)
-            .add("d_hidden", &self.d_hidden)
-            .add("bias", &bias)
-            .optional()
-    }
-}
-
-impl BiLstmConfig {
-    /// Initialize a new [Bidirectional LSTM](BiLstm) module.
-    pub fn init<B: Backend>(&self, device: &B::Device) -> BiLstm<B> {
-        BiLstm {
-            forward: LstmConfig::new(self.d_input, self.d_hidden, self.bias)
-                .with_initializer(self.initializer.clone())
-                .init(device),
-            reverse: LstmConfig::new(self.d_input, self.d_hidden, self.bias)
-                .with_initializer(self.initializer.clone())
-                .init(device),
-            d_hidden: self.d_hidden,
-        }
-    }
 }
 
 impl<B: Backend> BiLstm<B> {
     /// Applies the forward pass on the input tensor. This Bidirectional LSTM implementation
-    /// returns the state for each element in a sequence (i.e., across seq_length) and a final state.
+    /// returns the state for each element in a sequence (i.e., across d_sequence) and a final state.
     ///
     /// ## Parameters:
-    /// - batched_input: The input tensor of shape `[batch_size, sequence_length, input_size]`.
-    /// - state: An optional `LstmState` representing the initial cell state and hidden state.
-    ///   Each state tensor has shape `[2, batch_size, hidden_size]`.
+    /// - input: The input tensor of shape `[d_sequence, d_batch, d_input]`.
+    /// - state: An optional `BiLstmState`, representing the initial cell state and hidden state of each LSTM.
+    ///   Each state tensor has shape `[1, d_batch, d_hidden]`.
     ///   If no initial state is provided, these tensors are initialized to zeros.
     ///
     /// ## Returns:
-    /// - output: A tensor represents the output features of LSTM. Shape: `[batch_size, sequence_length, hidden_size * 2]`
-    /// - state: A `LstmState` represents the final forward and reverse states. Both `state.cell` and
-    ///   `state.hidden` have the shape `[2, batch_size, hidden_size]`.
+    /// - output: A tensor represents the output features of LSTM. Shape: `[d_sequence, d_batch, d_hidden * 2]`
+    /// - state: A `BiLstmState` represents the final forward and reverse hidden & cell states. All states
+    ///   have the shape `[1, d_batch, d_hidden]`.
     pub fn forward(
         &self,
-        batched_input: Tensor<B, 3>,
-        state: Option<LstmState<B, 3>>,
-    ) -> (Tensor<B, 3>, LstmState<B, 3>) {
-        let device = batched_input.clone().device();
-        let [batch_size, seq_length, _] = batched_input.shape().dims();
-
-        let [init_state_forward, init_state_reverse] = match state {
-            Some(state) => {
-                let cell_state_forward = state
-                    .cell
-                    .clone()
-                    .slice([0..1, 0..batch_size, 0..self.d_hidden])
-                    .squeeze(0);
-                let hidden_state_forward = state
-                    .hidden
-                    .clone()
-                    .slice([0..1, 0..batch_size, 0..self.d_hidden])
-                    .squeeze(0);
-                let cell_state_reverse = state
-                    .cell
-                    .slice([1..2, 0..batch_size, 0..self.d_hidden])
-                    .squeeze(0);
-                let hidden_state_reverse = state
-                    .hidden
-                    .slice([1..2, 0..batch_size, 0..self.d_hidden])
-                    .squeeze(0);
-
-                [
-                    Some(LstmState::new(cell_state_forward, hidden_state_forward)),
-                    Some(LstmState::new(cell_state_reverse, hidden_state_reverse)),
-                ]
-            }
-            None => [None, None],
+        input: Tensor<B, 3>,
+        state: Option<BiLstmState<B>>,
+    ) -> (Tensor<B, 3>, BiLstmState<B>) {
+        // split states
+        let (forward_state, reverse_state) = if let Some(state) = state {
+            (Some(state.forward), Some(state.reverse))
+        } else {
+            (None, None)
         };
-
         // forward direction
-        let (batched_hidden_state_forward, final_state_forward) = self
-            .forward
-            .forward(batched_input.clone(), init_state_forward);
-
+        let (forward_output, forward_state) = self.forward.forward(input.clone(), forward_state);
         // reverse direction
-        let (batched_hidden_state_reverse, final_state_reverse) = self.reverse.forward_iter(
-            batched_input.iter_dim(1).rev().zip((0..seq_length).rev()),
-            init_state_reverse,
-            batch_size,
-            seq_length,
-            &device,
-        );
-
-        let output = Tensor::cat(
-            [batched_hidden_state_forward, batched_hidden_state_reverse].to_vec(),
-            2,
-        );
-
-        let state = LstmState::new(
-            Tensor::stack(
-                [final_state_forward.cell, final_state_reverse.cell].to_vec(),
-                0,
-            ),
-            Tensor::stack(
-                [final_state_forward.hidden, final_state_reverse.hidden].to_vec(),
-                0,
-            ),
-        );
-
+        let (reverse_output, reverse_state) = self.reverse.forward(input.flip([0]), reverse_state);
+        let reverse_output = reverse_output.flip([0]);
+        // build combined output and state
+        let output = Tensor::cat(vec![forward_output, reverse_output], 2);
+        let state = BiLstmState {
+            forward: forward_state,
+            reverse: reverse_state,
+        };
         (output, state)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use burn_tensor::cast::ToElement;
+
     use super::*;
-    use crate::tensor::{Device, Distribution, TensorData};
-    use crate::{TestBackend, module::Param, nn::LinearRecord};
-    use burn_tensor::{ElementConversion, Tolerance, ops::FloatElem};
-    type FT = FloatElem<TestBackend>;
+    use crate::tensor::ops::FloatElem;
+    use crate::tensor::{Distribution, TensorData, Tolerance};
 
     #[cfg(feature = "std")]
-    use crate::TestAutodiffBackend;
+    type B = crate::TestAutodiffBackend;
+    #[cfg(not(feature = "std"))]
+    type B = crate::TestBackend;
+
+    type E = FloatElem<B>;
+
+    const SEQ_D: usize = 2;
+    const BAT_D: usize = 4;
+    const INP_D: usize = 3;
+    const HID_D: usize = 2;
+    // known values sourced from PyTorch LSTM with zero-init state
+    const INPUT: [[[f32; INP_D]; BAT_D]; SEQ_D] = [
+        [
+            [6.1599e-2, 1.4434e-1, 5.0515e-1],
+            [4.5327e-1, 9.6461e-2, 9.4723e-1],
+            [6.5902e-1, 8.3846e-1, 8.5444e-1],
+            [7.3353e-1, 7.8060e-1, 2.7181e-1],
+        ],
+        [
+            [4.5411e-1, 7.2665e-1, 4.0610e-1],
+            [2.4880e-4, 2.0886e-1, 5.9652e-1],
+            [4.7231e-1, 2.0873e-1, 8.2748e-1],
+            [3.4535e-2, 8.7611e-2, 8.1984e-1],
+        ],
+    ];
+    const INPUT_WEIGHTS_T: [[[f32; INP_D]; HID_D * 4]; 1] = [[
+        [0.5515, -1.0005, -0.9981],
+        [-0.3744, -0.6567, -0.8902],
+        [-0.7804, 0.5981, -0.9637],
+        [0.9862, -0.1910, 0.1298],
+        [-0.5881, -0.6989, 0.5698],
+        [-0.5157, -0.5139, 0.8493],
+        [0.3309, -0.5226, -0.1362],
+        [0.3765, 0.5327, 0.7626],
+    ]];
+    const RECURRENT_WEIGHTS_T: [[[f32; HID_D]; HID_D * 4]; 1] = [[
+        [-0.4148, -0.1351],
+        [0.2090, 0.4742],
+        [-0.6913, 0.0456],
+        [0.2024, 0.6486],
+        [0.1362, -0.0956],
+        [0.3370, -0.3085],
+        [-0.2517, 0.0471],
+        [-0.2644, 0.4771],
+    ]];
+    const BIASES: [[[f32; HID_D * 4]; 1]; 1] = [[[0., 0., 1., 1., 0., 0., 0., 0.]]];
+    const OUT: [[[f32; HID_D]; BAT_D]; SEQ_D] = [
+        [
+            [0.0246, 0.0696],
+            [0.0311, 0.0872],
+            [-0.0393, -0.0062],
+            [-0.1026, -0.0929],
+        ],
+        [
+            [-0.0465, 0.0120],
+            [0.0436, 0.1391],
+            [-0.0161, 0.0557],
+            [-0.01095, 0.0446],
+        ],
+    ];
+    const HIDDEN: [[[f32; HID_D]; BAT_D]; 1] = [[
+        [-0.0465, 0.0120],
+        [0.0436, 0.1391],
+        [-0.0161, 0.0557],
+        [-0.01095, 0.0446],
+    ]];
+    const CELL: [[[f32; HID_D]; BAT_D]; 1] = [[
+        [-0.1090, 0.0169],
+        [0.0968, 0.2190],
+        [-0.0332, 0.0779],
+        [-0.0234, 0.0676],
+    ]];
+    const INPUT_WEIGHTS_G_T: [[[f32; INP_D]; HID_D * 4]; 1] = [[
+        [-7.1392e-3, -9.1484e-3, -8.3713e-5],
+        [-1.8330e-3, -4.6515e-3, 1.3608e-2],
+        [-2.5509e-4, 1.6488e-5, -1.5846e-3],
+        [2.9855e-4, 6.5486e-4, -5.2864e-5],
+        [2.6259e-2, 2.5132e-2, 5.2782e-2],
+        [3.8327e-2, 4.1747e-2, 6.8519e-2],
+        [-4.2946e-3, -5.0783e-3, -1.4337e-3],
+        [1.2592e-4, 1.1887e-4, 5.2137e-3],
+    ]];
+    const RECURRENT_WEIGHTS_G_T: [[[f32; HID_D]; HID_D * 4]; 1] = [[
+        [-2.7388e-4, -3.0253e-4],
+        [-5.5798e-4, -3.4758e-4],
+        [2.1925e-4, 2.1652e-4],
+        [1.5562e-4, 2.2855e-4],
+        [-7.7453e-4, 3.3847e-4],
+        [-6.2271e-4, 9.5916e-4],
+        [6.3325e-5, 5.1526e-5],
+        [-3.4406e-5, 1.8998e-4],
+    ]];
+    const BIASES_G: [[[f32; HID_D * 4]; 1]; 1] = [[[
+        -0.0054, 0.0125, -0.0017, 0.0006, 0.0790, 0.1081, -0.0045, 0.0066,
+    ]]];
 
     #[test]
-    fn test_with_uniform_initializer() {
-        TestBackend::seed(0);
-
-        let config = LstmConfig::new(5, 5, false)
-            .with_initializer(Initializer::Uniform { min: 0.0, max: 1.0 });
-        let lstm = config.init::<TestBackend>(&Default::default());
-
-        let gate_to_data =
-            |gate: GateController<TestBackend>| gate.input_transform.weight.val().to_data();
-
-        gate_to_data(lstm.input_gate).assert_within_range::<FT>(0.elem()..1.elem());
-        gate_to_data(lstm.forget_gate).assert_within_range::<FT>(0.elem()..1.elem());
-        gate_to_data(lstm.output_gate).assert_within_range::<FT>(0.elem()..1.elem());
-        gate_to_data(lstm.cell_gate).assert_within_range::<FT>(0.elem()..1.elem());
-    }
-
-    /// Test forward pass with simple input vector.
-    ///
-    /// f_t = sigmoid(0.7*0.1 + 0.7*0) = sigmoid(0.07) = 0.5173928
-    /// i_t = sigmoid(0.5*0.1 + 0.5*0) = sigmoid(0.05) = 0.5123725
-    /// o_t = sigmoid(1.1*0.1 + 1.1*0) = sigmoid(0.11) = 0.5274723
-    /// c_t = tanh(0.9*0.1 + 0.9*0) = tanh(0.09) = 0.0892937
-    /// C_t = f_t * 0 + i_t * c_t = 0 + 0.5123725 * 0.0892937 = 0.04575243
-    /// h_t = o_t * tanh(C_t) = 0.5274723 * tanh(0.04575243) = 0.5274723 * 0.04568173 = 0.024083648
-    #[test]
-    fn test_forward_single_input_single_feature() {
-        TestBackend::seed(0);
-        let config = LstmConfig::new(1, 1, false);
-        let device = Default::default();
-        let mut lstm = config.init::<TestBackend>(&device);
-
-        fn create_gate_controller(
-            weights: f32,
-            biases: f32,
-            d_input: usize,
-            d_output: usize,
-            bias: bool,
-            initializer: Initializer,
-            device: &Device<TestBackend>,
-        ) -> GateController<TestBackend> {
-            let record_1 = LinearRecord {
-                weight: Param::from_data(TensorData::from([[weights]]), device),
-                bias: Some(Param::from_data(TensorData::from([biases]), device)),
-            };
-            let record_2 = LinearRecord {
-                weight: Param::from_data(TensorData::from([[weights]]), device),
-                bias: Some(Param::from_data(TensorData::from([biases]), device)),
-            };
-            GateController::create_with_weights(
-                d_input,
-                d_output,
-                bias,
-                initializer,
-                record_1,
-                record_2,
-            )
-        }
-
-        lstm.input_gate = create_gate_controller(
-            0.5,
-            0.0,
-            1,
-            1,
-            false,
-            Initializer::XavierUniform { gain: 1.0 },
-            &device,
-        );
-        lstm.forget_gate = create_gate_controller(
-            0.7,
-            0.0,
-            1,
-            1,
-            false,
-            Initializer::XavierUniform { gain: 1.0 },
-            &device,
-        );
-        lstm.cell_gate = create_gate_controller(
-            0.9,
-            0.0,
-            1,
-            1,
-            false,
-            Initializer::XavierUniform { gain: 1.0 },
-            &device,
-        );
-        lstm.output_gate = create_gate_controller(
-            1.1,
-            0.0,
-            1,
-            1,
-            false,
-            Initializer::XavierUniform { gain: 1.0 },
-            &device,
-        );
-
-        // single timestep with single feature
-        let input = Tensor::<TestBackend, 3>::from_data(TensorData::from([[[0.1]]]), &device);
-
+    fn test_lstm_against_known_values() {
+        // create tensors from known values
+        let input = Tensor::<B, 3>::from_data(TensorData::from(INPUT), &Default::default());
+        let input_rev = input.clone().flip([0]);
+        let input_weights =
+            Tensor::<B, 3>::from_data(TensorData::from(INPUT_WEIGHTS_T), &Default::default())
+                .transpose();
+        let recurrent_weights =
+            Tensor::<B, 3>::from_data(TensorData::from(RECURRENT_WEIGHTS_T), &Default::default())
+                .transpose();
+        let biases = Tensor::<B, 3>::from_data(TensorData::from(BIASES), &Default::default());
+        let expected_output = TensorData::from(OUT);
+        let expected_output_rev = TensorData::from([OUT[1], OUT[0]]);
+        let expected_hidden = TensorData::from(HIDDEN);
+        let expected_cell = TensorData::from(CELL);
+        let expected_input_weights_grad =
+            Tensor::<B, 3>::from_data(TensorData::from(INPUT_WEIGHTS_G_T), &Default::default())
+                .transpose()
+                .to_data();
+        let expected_recurrent_weights_grad =
+            Tensor::<B, 3>::from_data(TensorData::from(RECURRENT_WEIGHTS_G_T), &Default::default())
+                .transpose()
+                .to_data();
+        let expected_biases_grad = TensorData::from(BIASES_G);
+        // create lstm under test
+        let lstm = Lstm {
+            input_weights: Param::from_tensor(input_weights.clone()),
+            recurrent_weights: Param::from_tensor(recurrent_weights.clone()),
+            biases: Some(Param::from_tensor(biases.clone())),
+            d_hidden: HID_D,
+        };
         let (output, state) = lstm.forward(input, None);
-
-        let expected = TensorData::from([[0.046]]);
-        let tolerance = Tolerance::default();
-        state
-            .cell
-            .to_data()
-            .assert_approx_eq::<FT>(&expected, tolerance);
-
-        let expected = TensorData::from([[0.0242]]);
-        state
-            .hidden
-            .to_data()
-            .assert_approx_eq::<FT>(&expected, tolerance);
-
-        output
-            .select(0, Tensor::arange(0..1, &device))
-            .squeeze::<2>(0)
-            .to_data()
-            .assert_approx_eq::<FT>(&state.hidden.to_data(), tolerance);
-    }
-
-    #[test]
-    fn test_batched_forward_pass() {
-        let device = Default::default();
-        let lstm = LstmConfig::new(64, 1024, true).init(&device);
-        let batched_input =
-            Tensor::<TestBackend, 3>::random([8, 10, 64], Distribution::Default, &device);
-
-        let (output, state) = lstm.forward(batched_input, None);
-
-        assert_eq!(output.dims(), [8, 10, 1024]);
-        assert_eq!(state.cell.dims(), [8, 1024]);
-        assert_eq!(state.hidden.dims(), [8, 1024]);
-    }
-
-    #[test]
-    fn test_batched_forward_pass_batch_of_one() {
-        let device = Default::default();
-        let lstm = LstmConfig::new(64, 1024, true).init(&device);
-        let batched_input =
-            Tensor::<TestBackend, 3>::random([1, 2, 64], Distribution::Default, &device);
-
-        let (output, state) = lstm.forward(batched_input, None);
-
-        assert_eq!(output.dims(), [1, 2, 1024]);
-        assert_eq!(state.cell.dims(), [1, 1024]);
-        assert_eq!(state.hidden.dims(), [1, 1024]);
-    }
-
-    #[test]
-    #[cfg(feature = "std")]
-    fn test_batched_backward_pass() {
-        use crate::tensor::Shape;
-        let device = Default::default();
-        let lstm = LstmConfig::new(64, 32, true).init(&device);
-        let shape: Shape = [8, 10, 64].into();
-        let batched_input =
-            Tensor::<TestAutodiffBackend, 3>::random(shape, Distribution::Default, &device);
-
-        let (output, _) = lstm.forward(batched_input.clone(), None);
-        let fake_loss = output;
-        let grads = fake_loss.backward();
-
-        let some_gradient = lstm
-            .output_gate
-            .hidden_transform
-            .weight
-            .grad(&grads)
-            .unwrap();
-
-        // Asserts that the gradients exist and are non-zero
-        assert!(
-            some_gradient
-                .any()
-                .into_data()
-                .iter::<f32>()
-                .next()
-                .unwrap()
-                != 0.0
-        );
-    }
-
-    #[test]
-    fn test_bidirectional() {
-        TestBackend::seed(0);
-        let config = BiLstmConfig::new(2, 3, true);
-        let device = Default::default();
-        let mut lstm = config.init(&device);
-
-        fn create_gate_controller<const D1: usize, const D2: usize>(
-            input_weights: [[f32; D1]; D2],
-            input_biases: [f32; D1],
-            hidden_weights: [[f32; D1]; D1],
-            hidden_biases: [f32; D1],
-            device: &Device<TestBackend>,
-        ) -> GateController<TestBackend> {
-            let d_input = input_weights[0].len();
-            let d_output = input_weights.len();
-
-            let input_record = LinearRecord {
-                weight: Param::from_data(TensorData::from(input_weights), device),
-                bias: Some(Param::from_data(TensorData::from(input_biases), device)),
-            };
-            let hidden_record = LinearRecord {
-                weight: Param::from_data(TensorData::from(hidden_weights), device),
-                bias: Some(Param::from_data(TensorData::from(hidden_biases), device)),
-            };
-            GateController::create_with_weights(
-                d_input,
-                d_output,
-                true,
-                Initializer::XavierUniform { gain: 1.0 },
-                input_record,
-                hidden_record,
-            )
+        // create bilstm under test with identical forward & reverse weights
+        let bilstm = BiLstm {
+            forward: lstm.clone(),
+            reverse: lstm.clone(),
+        };
+        let (output_bi, state_bi) = bilstm.forward(input_rev, None);
+        let output_rev = output_bi
+            .clone()
+            .slice([0..SEQ_D, 0..BAT_D, HID_D..HID_D * 2]);
+        let state_rev = state_bi.reverse;
+        // check lstm and bilstm
+        for (output, state, expected_output, lstm, msg) in [
+            (output, state, expected_output, &lstm, "LSTM"),
+            (
+                output_rev,
+                state_rev,
+                expected_output_rev,
+                &bilstm.reverse,
+                "BILSTM",
+            ),
+        ] {
+            println!("Checking {msg} outputs");
+            // check outputs
+            output
+                .to_data()
+                .assert_approx_eq::<E>(&expected_output, Default::default());
+            state
+                .hidden
+                .to_data()
+                .assert_approx_eq::<E>(&expected_hidden, Default::default());
+            state
+                .cell
+                .to_data()
+                .assert_approx_eq::<E>(&expected_cell, Default::default());
+            // check backprop
+            #[cfg(feature = "std")]
+            {
+                println!("Checking {msg} backprop");
+                // backprop with dummy loss
+                let grads = output.mean().backward();
+                let input_weights_grad = lstm.input_weights.grad(&grads).unwrap();
+                let recurrent_weights_grad = lstm.recurrent_weights.grad(&grads).unwrap();
+                let biases_grad = lstm.biases.as_ref().unwrap().grad(&grads).unwrap();
+                // check backprop results
+                input_weights_grad
+                    .to_data()
+                    .assert_approx_eq::<E>(&expected_input_weights_grad, Default::default());
+                recurrent_weights_grad
+                    .to_data()
+                    .assert_approx_eq::<E>(&expected_recurrent_weights_grad, Default::default());
+                biases_grad
+                    .to_data()
+                    .assert_approx_eq::<E>(&expected_biases_grad, Tolerance::permissive());
+            }
         }
-
-        let input = Tensor::<TestBackend, 3>::from_data(
-            TensorData::from([[
-                [0.949, -0.861],
-                [0.892, 0.927],
-                [-0.173, -0.301],
-                [-0.081, 0.992],
-            ]]),
-            &device,
-        );
-        let h0 = Tensor::<TestBackend, 3>::from_data(
-            TensorData::from([[[0.280, 0.360, -1.242]], [[-0.588, 0.729, -0.788]]]),
-            &device,
-        );
-        let c0 = Tensor::<TestBackend, 3>::from_data(
-            TensorData::from([[[0.723, 0.397, -0.262]], [[0.471, 0.613, 1.885]]]),
-            &device,
-        );
-
-        lstm.forward.input_gate = create_gate_controller(
-            [[0.367, 0.091, 0.342], [0.322, 0.533, 0.059]],
-            [-0.196, 0.354, 0.209],
-            [
-                [-0.320, 0.232, -0.165],
-                [0.093, -0.572, -0.315],
-                [-0.467, 0.325, 0.046],
-            ],
-            [0.181, -0.190, -0.245],
-            &device,
-        );
-
-        lstm.forward.forget_gate = create_gate_controller(
-            [[-0.342, -0.084, -0.420], [-0.432, 0.119, 0.191]],
-            [0.315, -0.413, -0.041],
-            [
-                [0.453, 0.063, 0.561],
-                [0.211, 0.149, 0.213],
-                [-0.499, -0.158, 0.068],
-            ],
-            [-0.431, -0.535, 0.125],
-            &device,
-        );
-
-        lstm.forward.cell_gate = create_gate_controller(
-            [[-0.046, -0.382, 0.321], [-0.533, 0.558, 0.004]],
-            [-0.358, 0.282, -0.078],
-            [
-                [-0.358, 0.109, 0.139],
-                [-0.345, 0.091, -0.368],
-                [-0.508, 0.221, -0.507],
-            ],
-            [0.502, -0.509, -0.247],
-            &device,
-        );
-
-        lstm.forward.output_gate = create_gate_controller(
-            [[-0.577, -0.359, 0.216], [-0.550, 0.268, 0.243]],
-            [-0.227, -0.274, 0.039],
-            [
-                [-0.383, 0.449, 0.222],
-                [-0.357, -0.093, 0.449],
-                [-0.106, 0.236, 0.360],
-            ],
-            [-0.361, -0.209, -0.454],
-            &device,
-        );
-
-        lstm.reverse.input_gate = create_gate_controller(
-            [[-0.055, 0.506, 0.247], [-0.369, 0.178, -0.258]],
-            [0.540, -0.164, 0.033],
-            [
-                [0.159, 0.180, -0.037],
-                [-0.443, 0.485, -0.488],
-                [0.098, -0.085, -0.140],
-            ],
-            [-0.510, 0.105, 0.114],
-            &device,
-        );
-
-        lstm.reverse.forget_gate = create_gate_controller(
-            [[-0.154, -0.432, -0.547], [-0.369, -0.310, -0.175]],
-            [0.141, 0.004, 0.055],
-            [
-                [-0.005, -0.277, -0.515],
-                [-0.011, -0.101, -0.365],
-                [0.426, 0.379, 0.337],
-            ],
-            [-0.382, 0.331, -0.176],
-            &device,
-        );
-
-        lstm.reverse.cell_gate = create_gate_controller(
-            [[-0.571, 0.228, -0.287], [-0.331, 0.110, 0.219]],
-            [-0.206, -0.546, 0.462],
-            [
-                [0.449, -0.240, 0.071],
-                [-0.045, 0.131, 0.124],
-                [0.138, -0.201, 0.191],
-            ],
-            [-0.030, 0.211, -0.352],
-            &device,
-        );
-
-        lstm.reverse.output_gate = create_gate_controller(
-            [[0.491, -0.442, 0.333], [0.313, -0.121, -0.070]],
-            [-0.387, -0.250, 0.066],
-            [
-                [-0.030, 0.268, 0.299],
-                [-0.019, -0.280, -0.314],
-                [0.466, -0.365, -0.248],
-            ],
-            [-0.398, -0.199, -0.566],
-            &device,
-        );
-
-        let expected_output_with_init_state = TensorData::from([[
-            [0.23764, -0.03442, 0.04414, -0.15635, -0.03366, -0.05798],
-            [0.00473, -0.02254, 0.02988, -0.16510, -0.00306, 0.08742],
-            [0.06210, -0.06509, -0.05339, -0.01710, 0.02091, 0.16012],
-            [-0.03420, 0.07774, -0.09774, -0.02604, 0.12584, 0.20872],
-        ]]);
-        let expected_output_without_init_state = TensorData::from([[
-            [0.08679, -0.08776, -0.00528, -0.15969, -0.05322, -0.08863],
-            [-0.02577, -0.05057, 0.00033, -0.17558, -0.03679, 0.03142],
-            [0.02942, -0.07411, -0.06044, -0.03601, -0.09998, 0.04846],
-            [-0.04026, 0.07178, -0.10189, -0.07349, -0.04576, 0.05550],
-        ]]);
-        let expected_hn_with_init_state = TensorData::from([
-            [[-0.03420, 0.07774, -0.09774]],
-            [[-0.15635, -0.03366, -0.05798]],
-        ]);
-        let expected_cn_with_init_state = TensorData::from([
-            [[-0.13593, 0.17125, -0.22395]],
-            [[-0.45425, -0.11206, -0.12908]],
-        ]);
-        let expected_hn_without_init_state = TensorData::from([
-            [[-0.04026, 0.07178, -0.10189]],
-            [[-0.15969, -0.05322, -0.08863]],
-        ]);
-        let expected_cn_without_init_state = TensorData::from([
-            [[-0.15839, 0.15923, -0.23569]],
-            [[-0.47407, -0.17493, -0.19643]],
-        ]);
-
-        let (output_with_init_state, state_with_init_state) =
-            lstm.forward(input.clone(), Some(LstmState::new(c0, h0)));
-        let (output_without_init_state, state_without_init_state) = lstm.forward(input, None);
-
-        let tolerance = Tolerance::permissive();
-        output_with_init_state
-            .to_data()
-            .assert_approx_eq::<FT>(&expected_output_with_init_state, tolerance);
-        output_without_init_state
-            .to_data()
-            .assert_approx_eq::<FT>(&expected_output_without_init_state, tolerance);
-        state_with_init_state
-            .hidden
-            .to_data()
-            .assert_approx_eq::<FT>(&expected_hn_with_init_state, tolerance);
-        state_with_init_state
-            .cell
-            .to_data()
-            .assert_approx_eq::<FT>(&expected_cn_with_init_state, tolerance);
-        state_without_init_state
-            .hidden
-            .to_data()
-            .assert_approx_eq::<FT>(&expected_hn_without_init_state, tolerance);
-        state_without_init_state
-            .cell
-            .to_data()
-            .assert_approx_eq::<FT>(&expected_cn_without_init_state, tolerance);
     }
 
     #[test]
-    fn display_lstm() {
-        let config = LstmConfig::new(2, 3, true);
-
-        let layer = config.init::<TestBackend>(&Default::default());
-
-        assert_eq!(
-            alloc::format!("{layer}"),
-            "Lstm {d_input: 2, d_hidden: 3, bias: true, params: 84}"
+    fn test_lstm_init() {
+        let [d_input, d_hidden, d_sequence, d_batch] = [2, 3, 4, 5];
+        let bilstm = LstmConfig::new(d_input, d_hidden, true).init_bilstm::<B>(&Default::default());
+        // check biases are properly initialized
+        assert!(
+            bilstm
+                .forward
+                .biases
+                .as_ref()
+                .unwrap()
+                .val()
+                .equal(Tensor::<B, 3>::from_floats(
+                    [[[0., 0., 0., 1., 1., 1., 0., 0., 0., 0., 0., 0.]]],
+                    &Default::default()
+                ))
+                .all()
+                .into_scalar()
+                .to_bool()
         );
-    }
-
-    #[test]
-    fn display_bilstm() {
-        let config = BiLstmConfig::new(2, 3, true);
-
-        let layer = config.init::<TestBackend>(&Default::default());
-
-        assert_eq!(
-            alloc::format!("{layer}"),
-            "BiLstm {d_input: 2, d_hidden: 3, bias: true, params: 168}"
+        // prepare random input and run
+        let input = Tensor::<B, 3>::random(
+            [d_sequence, d_batch, d_input],
+            Distribution::Normal(0., 1.),
+            &Default::default(),
         );
+        let (output, _) = bilstm.forward(input, None);
+        assert_eq!(output.shape().dims(), [d_sequence, d_batch, d_hidden * 2]);
+        // test backprop
+        #[cfg(feature = "std")]
+        {
+            let grads = output.mean().backward();
+            // check grads exist on both LSTM
+            assert!(
+                bilstm
+                    .forward
+                    .input_weights
+                    .grad(&grads)
+                    .unwrap()
+                    .equal_elem(0.)
+                    .any()
+                    .into_scalar()
+                    .to_bool()
+                    != true
+            );
+            assert!(
+                bilstm
+                    .reverse
+                    .input_weights
+                    .grad(&grads)
+                    .unwrap()
+                    .equal_elem(0.)
+                    .any()
+                    .into_scalar()
+                    .to_bool()
+                    != true
+            );
+        }
     }
 }

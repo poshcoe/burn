@@ -16,6 +16,12 @@ pub struct ChannelClient {
     sender: Sender<Message>,
 }
 
+impl Default for ChannelClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 enum Message {
     Register {
         node_id: NodeRefCount,

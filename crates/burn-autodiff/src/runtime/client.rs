@@ -7,7 +7,7 @@ use crate::{
 use burn_tensor::backend::Backend;
 
 /// Client used to communicate with the autodiff server.
-pub trait AutodiffClient: Send + Clone {
+pub trait AutodiffClient: Send + Clone + Default {
     /// Register a new step.
     fn register(&self, node_id: NodeRefCount, step: StepBoxed, actions: CheckpointerBuilder);
     /// Call backpropagation from the given tensor.

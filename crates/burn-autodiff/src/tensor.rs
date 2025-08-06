@@ -119,7 +119,7 @@ impl<B: Backend> AutodiffTensor<B> {
         let client = parent_nodes
             .first()
             .map(|node| node.client.clone())
-            .unwrap_or_else(AutodiffClientImpl::new);
+            .unwrap_or_default();
 
         let node: NodeRef = Node::new(
             parent_nodes

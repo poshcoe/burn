@@ -7,6 +7,7 @@ use crate::ops::{Backward, Ops, unary};
 use crate::tensor::AutodiffTensor;
 
 use burn_tensor::backend::Backend;
+use burn_tensor::ops::rnn::lstm::{LstmOut, LstmStateGrads};
 use burn_tensor::ops::*;
 
 use super::OpsKind;
@@ -1661,6 +1662,172 @@ impl<B: Backend, C: CheckpointStrategy> ModuleOps<Autodiff<B, C>> for Autodiff<B
         _options: InterpolateOptions,
     ) -> <Autodiff<B> as Backend>::FloatTensorPrimitive {
         panic!("Can't differentiate interpolate backward.");
+    }
+
+    fn lstm(
+        input: FloatTensor<Autodiff<B, C>>,
+        hidden_state: FloatTensor<Autodiff<B, C>>,
+        cell_state: FloatTensor<Autodiff<B, C>>,
+        input_weights: FloatTensor<Autodiff<B, C>>,
+        recurrent_weights: FloatTensor<Autodiff<B, C>>,
+        biases: Option<FloatTensor<Autodiff<B, C>>>,
+        _tracked: bool,
+    ) -> LstmOut<Autodiff<B, C>> {
+        #[derive(Debug)]
+        struct Lstm;
+
+        impl<B: Backend> Backward<B, 6> for Lstm {
+            type State = ([NodeID; 3], LstmOut<B>);
+
+            fn backward(
+                self,
+                ops: Ops<Self::State, 6>,
+                grads: &mut Gradients,
+                checkpointer: &mut Checkpointer,
+            ) {
+                let [
+                    input_node,
+                    hidden_state_node,
+                    cell_state_node,
+                    input_weights_node,
+                    recurrent_weights_node,
+                    biases_node,
+                ] = ops.parents;
+                // get output hidden states grad
+                let out_hidden_states_grad = grads.consume::<B>(&ops.node);
+                let ([i, w, r], out) = ops.state;
+                // calculate gradients for states and cache
+                let recurrent_weights =
+                    checkpointer.retrieve_node_output::<B::FloatTensorPrimitive>(r);
+                let LstmStateGrads {
+                    hidden_state_grad,
+                    cell_state_grad,
+                    cache_grad,
+                } = B::lstm_states_backward(
+                    recurrent_weights,
+                    out.cell_states,
+                    out.cache.unwrap(),
+                    out_hidden_states_grad,
+                );
+                // finalize input gradient
+                if let Some(node) = input_node {
+                    let input_weights =
+                        checkpointer.retrieve_node_output::<B::FloatTensorPrimitive>(w);
+                    let input_grad = B::lstm_input_backward(input_weights, cache_grad.clone());
+                    grads.register::<B>(node.id, input_grad);
+                }
+                if let Some(node) = hidden_state_node {
+                    grads.register::<B>(node.id, hidden_state_grad);
+                }
+                if let Some(node) = cell_state_node {
+                    grads.register::<B>(node.id, cell_state_grad);
+                }
+                // finalize input weights gradient
+                if let Some(node) = input_weights_node {
+                    let input = checkpointer.retrieve_node_output::<B::FloatTensorPrimitive>(i);
+                    let input_weights_grad =
+                        B::lstm_input_weights_backward(input, cache_grad.clone());
+                    grads.register::<B>(node.id, input_weights_grad)
+                }
+                // finalize recurrent weights gradient
+                if let Some(node) = recurrent_weights_node {
+                    let recurrent_weights_grad =
+                        B::lstm_recurrent_weights_backward(out.hidden_states, cache_grad.clone());
+                    grads.register::<B>(node.id, recurrent_weights_grad);
+                }
+                // finalize biases gradient
+                if let Some(node) = biases_node {
+                    let biases_grad = B::lstm_biases_backward(cache_grad);
+                    grads.register::<B>(node.id, biases_grad);
+                }
+            }
+        }
+
+        let cell_states;
+        let hidden_states = match Lstm
+            .prepare::<C>([
+                input.node.clone(),
+                hidden_state.node.clone(),
+                cell_state.node.clone(),
+                input_weights.node.clone(),
+                recurrent_weights.node.clone(),
+                biases.as_ref().map(|b| b.node.clone()).unwrap_or_default(),
+            ])
+            .compute_bound()
+            .stateful()
+        {
+            OpsKind::Tracked(mut prep) => {
+                // checkpoint inputs
+                let i = prep.checkpoint(&input);
+                let w = prep.checkpoint(&input_weights);
+                let r = prep.checkpoint(&recurrent_weights);
+                // run forward with tracking
+                let out = B::lstm(
+                    input.primitive,
+                    hidden_state.primitive,
+                    cell_state.primitive,
+                    input_weights.primitive,
+                    recurrent_weights.primitive,
+                    biases.map(|b| b.primitive),
+                    true,
+                );
+                // collect checkpoints and outputs to backprop state
+                let state = ([i, w, r], out.clone());
+                // output cell states are not included in the graph
+                cell_states = AutodiffTensor::new(out.cell_states);
+                prep.finish(state, out.hidden_states)
+            }
+            OpsKind::UnTracked(prep) => {
+                // run forward without tracking
+                let out = B::lstm(
+                    input.primitive,
+                    hidden_state.primitive,
+                    cell_state.primitive,
+                    input_weights.primitive,
+                    recurrent_weights.primitive,
+                    biases.map(|b| b.primitive),
+                    false,
+                );
+                cell_states = AutodiffTensor::new(out.cell_states);
+                prep.finish(out.hidden_states)
+            }
+        };
+        LstmOut {
+            hidden_states,
+            cell_states,
+            cache: None,
+        }
+    }
+    fn lstm_states_backward(
+        _recurrent_weights: FloatTensor<Autodiff<B, C>>,
+        _cell_states: FloatTensor<Autodiff<B, C>>,
+        _cache: FloatTensor<Autodiff<B, C>>,
+        _hidden_states_grad: FloatTensor<Autodiff<B, C>>,
+    ) -> LstmStateGrads<Autodiff<B, C>> {
+        panic!("Cannot differentiate lstm states backward");
+    }
+    fn lstm_input_backward(
+        _input_weights: FloatTensor<Autodiff<B, C>>,
+        _cache_grad: FloatTensor<Autodiff<B, C>>,
+    ) -> FloatTensor<Autodiff<B, C>> {
+        panic!("Cannot differentiate lstm input backward");
+    }
+    fn lstm_input_weights_backward(
+        _input: FloatTensor<Autodiff<B, C>>,
+        _cache_grad: FloatTensor<Autodiff<B, C>>,
+    ) -> FloatTensor<Autodiff<B, C>> {
+        panic!("Cannot differentiate lstm input weights backward");
+    }
+    fn lstm_recurrent_weights_backward(
+        _hidden_states: FloatTensor<Autodiff<B, C>>,
+        _cache_grad: FloatTensor<Autodiff<B, C>>,
+    ) -> FloatTensor<Autodiff<B, C>> {
+        panic!("Cannot differentiate lstm recurrent weights backward");
+    }
+    fn lstm_biases_backward(
+        _cache_grad: FloatTensor<Autodiff<B, C>>,
+    ) -> FloatTensor<Autodiff<B, C>> {
+        panic!("Cannot differentiate lstm biases backward");
     }
 }
 

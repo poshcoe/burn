@@ -35,6 +35,7 @@ mod gradients;
 mod log;
 mod log1p;
 mod log_sigmoid;
+mod lstm;
 mod mask;
 mod matmul;
 mod maxmin;
@@ -181,6 +182,7 @@ macro_rules! testgen_with_float_param {
         burn_autodiff::testgen_ad_adaptive_avg_pool2d!();
         burn_autodiff::testgen_module_backward!();
         burn_autodiff::testgen_ad_nearest_interpolate!();
+        burn_autodiff::testgen_ad_lstm!();
 
         // Tensor
         burn_autodiff::testgen_ad_complex!();

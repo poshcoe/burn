@@ -7,7 +7,7 @@ use crate::{
 };
 use burn_tensor::backend::Backend;
 
-#[derive(Clone, new)]
+#[derive(Default, Clone, new)]
 pub struct MutexClient;
 
 impl core::fmt::Debug for MutexClient {

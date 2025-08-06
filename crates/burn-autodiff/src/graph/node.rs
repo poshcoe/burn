@@ -10,12 +10,13 @@ use crate::runtime::AutodiffClientImpl;
 
 use super::Requirement;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Default, Clone)]
 pub enum ComputingProperty {
     ComputeBound,
     MemoryBound {
         retro_forward: Arc<dyn RetroForward>,
     },
+    #[default]
     Ambiguous, // Maybe autotune someday
 }
 
@@ -29,7 +30,7 @@ unsafe impl Send for ComputingProperty {}
 unsafe impl Sync for ComputingProperty {}
 
 /// A node contains graph metadata and should be used wrapped in an Arc for cheap cloning.
-#[derive(new, Debug)]
+#[derive(new, Debug, Default)]
 pub struct Node {
     pub parents: Vec<NodeID>,
     pub order: usize,

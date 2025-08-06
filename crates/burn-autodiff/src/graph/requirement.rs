@@ -1,13 +1,14 @@
 use super::NodeRef;
 
 /// Requirement for each tensor in the graph.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum Requirement {
     /// Operations that require gradients.
     Grad,
     /// Operations that require gradients only for backprop.
     GradInBackward,
     /// Operations that don't need gradients, therefore not to be included in the graph.
+    #[default]
     None,
 }
 

@@ -11,6 +11,9 @@ pub(crate) mod unfold;
 /// Module with pooling operations.
 pub mod pool;
 
+/// Module with recurrent neural network operations.
+pub mod rnn;
+
 mod base;
 
 pub use base::*;

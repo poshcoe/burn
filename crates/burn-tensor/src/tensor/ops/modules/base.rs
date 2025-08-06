@@ -5,7 +5,10 @@ use super::{conv, pool, unfold::unfold4d_using_conv2d};
 use crate::{
     Shape, TensorMetadata,
     backend::Backend,
-    ops::{FloatTensor, IntTensor},
+    ops::{
+        FloatTensor, IntTensor,
+        rnn::lstm::{LstmOut, LstmStateGrads},
+    },
 };
 
 /// Gradient computed during the backward pass for each tensor used by [conv2d](ModuleOps::conv2d).
@@ -811,6 +814,85 @@ pub trait ModuleOps<B: Backend> {
             Some(bias) => B::float_add(output, unsqueeze::<B>(bias, ndims_in)),
             None => output,
         }
+    }
+
+    /// Run an LSTM over the input sequence using the given weights, biases and state.
+    ///
+    /// # Arguments:
+    ///
+    /// - `input` input tensor (x) ``[d_sequence, d_batch, d_input]``
+    /// - `hidden_state` initial hidden state (h) ``[1, d_batch, d_hidden]``
+    /// - `cell_state` initial cell state (c) ``[1, d_batch, d_hidden]``
+    /// - `input_weights` combined-gate input weight matrix (W) ``[1, d_input, d_hidden * 4]``
+    /// - `recurrent_weights` combined-gate recurrent weight matrix (R) ``[1, d_hidden, d_hidden * 4]``
+    /// - `biases` optional combined gate bias matrix (b) ``[1, 1, d_hidden * 4]``
+    /// - `reverse` whether to run the input sequence in reverse
+    ///
+    /// # Returns:
+    ///
+    /// An [LstmOut](super::rnn::LstmOut) struct
+    ///
+    /// # Details
+    ///
+    /// - The combined-gate weights must be flattened in `(input, forget, cell, output)` order.
+    /// - The arguments are expected in 'unsqueezed' form to simplify internal operations.
+    fn lstm(
+        input: FloatTensor<B>,
+        hidden_state: FloatTensor<B>,
+        cell_state: FloatTensor<B>,
+        input_weights: FloatTensor<B>,
+        recurrent_weights: FloatTensor<B>,
+        biases: Option<FloatTensor<B>>,
+        tracked: bool,
+    ) -> LstmOut<B> {
+        super::rnn::lstm::lstm(
+            input,
+            hidden_state,
+            cell_state,
+            input_weights,
+            recurrent_weights,
+            biases,
+            tracked,
+        )
+    }
+    /// Backwards pass for the [lstm](ModuleOps::lstm) operation, returning the [gradients for the states and cache](LstmStateGrads)
+    fn lstm_states_backward(
+        recurrent_weights: FloatTensor<B>,
+        cell_states: FloatTensor<B>,
+        cache: FloatTensor<B>,
+        hidden_states_grad: FloatTensor<B>,
+    ) -> LstmStateGrads<B> {
+        super::rnn::lstm::lstm_states_backward(
+            recurrent_weights,
+            cell_states,
+            cache,
+            hidden_states_grad,
+        )
+    }
+    /// Backwards pass for the [lstm](ModuleOps::lstm) operation, returning the gradient for the input
+    fn lstm_input_backward(
+        input_weights: FloatTensor<B>,
+        cache_grad: FloatTensor<B>,
+    ) -> FloatTensor<B> {
+        super::rnn::lstm::lstm_input_backward::<B>(input_weights, cache_grad)
+    }
+    /// Backwards pass for the [lstm](ModuleOps::lstm) operation, returning the gradient for the input weights
+    fn lstm_input_weights_backward(
+        input: FloatTensor<B>,
+        cache_grad: FloatTensor<B>,
+    ) -> FloatTensor<B> {
+        super::rnn::lstm::lstm_input_weights_backward::<B>(input, cache_grad)
+    }
+    /// Backwards pass for the [lstm](ModuleOps::lstm) operation, returning the gradient for the recurrent weights
+    fn lstm_recurrent_weights_backward(
+        hidden_states: FloatTensor<B>,
+        cache_grad: FloatTensor<B>,
+    ) -> FloatTensor<B> {
+        super::rnn::lstm::lstm_recurrent_weights_backward::<B>(hidden_states, cache_grad)
+    }
+    /// Backwards pass for the [lstm](ModuleOps::lstm) operation, returning the gradient for the biases
+    fn lstm_biases_backward(cache_grad: FloatTensor<B>) -> FloatTensor<B> {
+        super::rnn::lstm::lstm_biases_backward::<B>(cache_grad)
     }
 }
 

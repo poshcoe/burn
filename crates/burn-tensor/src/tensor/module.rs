@@ -394,3 +394,27 @@ pub fn linear<B: Backend, const D: usize>(
         bias.map(|b| b.primitive.tensor()),
     )))
 }
+
+/// Run an [LSTM forward](crate::ops::ModuleOps::lstm)
+pub fn lstm<B: Backend>(
+    input: Tensor<B, 3>,
+    hidden_state: Tensor<B, 3>,
+    cell_state: Tensor<B, 3>,
+    input_weights: Tensor<B, 3>,
+    recurrent_weights: Tensor<B, 3>,
+    biases: Option<Tensor<B, 3>>,
+) -> (Tensor<B, 3>, Tensor<B, 3>) {
+    let out = B::lstm(
+        input.primitive.tensor(),
+        hidden_state.primitive.tensor(),
+        cell_state.primitive.tensor(),
+        input_weights.primitive.tensor(),
+        recurrent_weights.primitive.tensor(),
+        biases.map(|b| b.primitive.tensor()),
+        false,
+    );
+    (
+        Tensor::new(TensorPrimitive::Float(out.hidden_states)),
+        Tensor::new(TensorPrimitive::Float(out.cell_states)),
+    )
+}

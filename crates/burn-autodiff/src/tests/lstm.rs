@@ -2,7 +2,7 @@
 mod tests {
     use super::*;
     use burn_tensor::ops::FloatElem;
-    use burn_tensor::{TensorData, Tolerance};
+    use burn_tensor::{TensorData, Tolerance, s};
 
     type FT = FloatElem<TestBackend>;
 
@@ -80,8 +80,8 @@ mod tests {
             .transpose()
             .require_grad();
         let biases = Some(TestAutodiffTensor::<3>::from(BIASES).require_grad());
-        let hidden = TestAutodiffTensor::<3>::from([[0.; HID_D]; BAT_D]);
-        let cell = TestAutodiffTensor::<3>::from([[0.; HID_D]; BAT_D]);
+        let hidden = TestAutodiffTensor::<3>::from([[[0.; HID_D]; BAT_D]; 1]);
+        let cell = TestAutodiffTensor::<3>::from([[[0.; HID_D]; BAT_D]; 1]);
         let expected_input_weights_grad = TestTensor::<3>::from(INPUT_WEIGHTS_G_T)
             .transpose()
             .to_data();
@@ -98,8 +98,9 @@ mod tests {
             recurrent_weights.clone(),
             biases.clone(),
         );
+        let out = hidden_states.slice(s![1.., .., ..]);
         // backprop with dummy loss
-        let grads = hidden_states.mean().backward();
+        let grads = out.mean().backward();
         let input_weights_grad = input_weights.grad(&grads).unwrap();
         let recurrent_weights_grad = recurrent_weights.grad(&grads).unwrap();
         let biases_grad = biases.as_ref().unwrap().grad(&grads).unwrap();

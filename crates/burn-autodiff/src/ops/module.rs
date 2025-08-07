@@ -1695,10 +1695,10 @@ impl<B: Backend, C: CheckpointStrategy> ModuleOps<Autodiff<B, C>> for Autodiff<B
                 ] = ops.parents;
                 // get output hidden states grad
                 let out_hidden_states_grad = grads.consume::<B>(&ops.node);
-                let ([i, w, r], out) = ops.state;
+                let ([x, iw, rw], out) = ops.state;
                 // calculate gradients for states and cache
                 let recurrent_weights =
-                    checkpointer.retrieve_node_output::<B::FloatTensorPrimitive>(r);
+                    checkpointer.retrieve_node_output::<B::FloatTensorPrimitive>(rw);
                 let LstmStateGrads {
                     hidden_state_grad,
                     cell_state_grad,
@@ -1712,7 +1712,7 @@ impl<B: Backend, C: CheckpointStrategy> ModuleOps<Autodiff<B, C>> for Autodiff<B
                 // finalize input gradient
                 if let Some(node) = input_node {
                     let input_weights =
-                        checkpointer.retrieve_node_output::<B::FloatTensorPrimitive>(w);
+                        checkpointer.retrieve_node_output::<B::FloatTensorPrimitive>(iw);
                     let input_grad = B::lstm_input_backward(input_weights, cache_grad.clone());
                     grads.register::<B>(node.id, input_grad);
                 }
@@ -1724,7 +1724,7 @@ impl<B: Backend, C: CheckpointStrategy> ModuleOps<Autodiff<B, C>> for Autodiff<B
                 }
                 // finalize input weights gradient
                 if let Some(node) = input_weights_node {
-                    let input = checkpointer.retrieve_node_output::<B::FloatTensorPrimitive>(i);
+                    let input = checkpointer.retrieve_node_output::<B::FloatTensorPrimitive>(x);
                     let input_weights_grad =
                         B::lstm_input_weights_backward(input, cache_grad.clone());
                     grads.register::<B>(node.id, input_weights_grad)
@@ -1758,9 +1758,9 @@ impl<B: Backend, C: CheckpointStrategy> ModuleOps<Autodiff<B, C>> for Autodiff<B
         {
             OpsKind::Tracked(mut prep) => {
                 // checkpoint inputs
-                let i = prep.checkpoint(&input);
-                let w = prep.checkpoint(&input_weights);
-                let r = prep.checkpoint(&recurrent_weights);
+                let x = prep.checkpoint(&input);
+                let iw = prep.checkpoint(&input_weights);
+                let rw = prep.checkpoint(&recurrent_weights);
                 // run forward with tracking
                 let out = B::lstm(
                     input.primitive,
@@ -1772,7 +1772,7 @@ impl<B: Backend, C: CheckpointStrategy> ModuleOps<Autodiff<B, C>> for Autodiff<B
                     true,
                 );
                 // collect checkpoints and outputs to backprop state
-                let state = ([i, w, r], out.clone());
+                let state = ([x, iw, rw], out.clone());
                 // output cell states are not included in the graph
                 cell_states = AutodiffTensor::new(out.cell_states);
                 prep.finish(state, out.hidden_states)

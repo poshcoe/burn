@@ -6,6 +6,7 @@ use crate::{
         conv::{ConvStrategy, ConvTranspose2dStrategy},
     },
 };
+use burn_tensor::ops::rnn::lstm::{LstmOut, LstmStateGrads};
 use burn_tensor::ops::{
     ConvOptions, ConvTransposeOptions, DeformConv2dBackward, DeformConvOptions, InterpolateOptions,
     MaxPool2dBackward, MaxPool2dWithIndices, ModuleOps,
@@ -205,5 +206,52 @@ where
         options: InterpolateOptions,
     ) -> FloatTensor<Self> {
         kernel::interpolate::interpolate_backward::<R, F>(x, grad, output_size, options)
+    }
+
+    fn lstm(
+        input: FloatTensor<Self>,
+        hidden_state: FloatTensor<Self>,
+        cell_state: FloatTensor<Self>,
+        input_weights: FloatTensor<Self>,
+        recurrent_weights: FloatTensor<Self>,
+        biases: Option<FloatTensor<Self>>,
+        tracked: bool,
+    ) -> LstmOut<Self> {
+        let ([hidden_states, cell_states], cache) = kernel::rnn::lstm::lstm::<R, F>(
+            input,
+            hidden_state,
+            cell_state,
+            input_weights,
+            recurrent_weights,
+            biases,
+            tracked,
+        )
+        .unwrap();
+        LstmOut {
+            hidden_states,
+            cell_states,
+            cache,
+        }
+    }
+
+    fn lstm_states_backward(
+        recurrent_weights: FloatTensor<Self>,
+        cell_states: FloatTensor<Self>,
+        cache: FloatTensor<Self>,
+        hidden_states_grad: FloatTensor<Self>,
+    ) -> burn_tensor::ops::rnn::lstm::LstmStateGrads<Self> {
+        let [hidden_state_grad, cell_state_grad, cache_grad] =
+            kernel::rnn::lstm::lstm_states_backward::<R, F>(
+                recurrent_weights,
+                cell_states,
+                cache,
+                hidden_states_grad,
+            )
+            .unwrap();
+        LstmStateGrads {
+            hidden_state_grad,
+            cell_state_grad,
+            cache_grad,
+        }
     }
 }

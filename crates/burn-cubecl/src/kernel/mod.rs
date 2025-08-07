@@ -36,6 +36,8 @@ pub mod prng;
 pub mod quantization;
 /// Reduction algorithms
 pub mod reduce;
+/// Recurrent neural network kernels
+pub mod rnn;
 
 pub(crate) use clamp::*;
 pub(crate) use comparison::*;

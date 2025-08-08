@@ -1671,13 +1671,14 @@ impl<B: Backend, C: CheckpointStrategy> ModuleOps<Autodiff<B, C>> for Autodiff<B
         input_weights: FloatTensor<Autodiff<B, C>>,
         recurrent_weights: FloatTensor<Autodiff<B, C>>,
         biases: Option<FloatTensor<Autodiff<B, C>>>,
+        size: [usize; 4],
         _tracked: bool,
     ) -> LstmOut<Autodiff<B, C>> {
         #[derive(Debug)]
         struct Lstm;
 
         impl<B: Backend> Backward<B, 6> for Lstm {
-            type State = ([NodeID; 3], LstmOut<B>);
+            type State = ([NodeID; 3], [usize; 4], LstmOut<B>);
 
             fn backward(
                 self,
@@ -1695,7 +1696,7 @@ impl<B: Backend, C: CheckpointStrategy> ModuleOps<Autodiff<B, C>> for Autodiff<B
                 ] = ops.parents;
                 // get output hidden states grad
                 let out_hidden_states_grad = grads.consume::<B>(&ops.node);
-                let ([x, iw, rw], out) = ops.state;
+                let ([x, iw, rw], size, out) = ops.state;
                 // calculate gradients for states and cache
                 let recurrent_weights =
                     checkpointer.retrieve_node_output::<B::FloatTensorPrimitive>(rw);
@@ -1708,6 +1709,7 @@ impl<B: Backend, C: CheckpointStrategy> ModuleOps<Autodiff<B, C>> for Autodiff<B
                     out.cell_states,
                     out.cache.unwrap(),
                     out_hidden_states_grad,
+                    size,
                 );
                 // finalize input gradient
                 if let Some(node) = input_node {
@@ -1726,13 +1728,16 @@ impl<B: Backend, C: CheckpointStrategy> ModuleOps<Autodiff<B, C>> for Autodiff<B
                 if let Some(node) = input_weights_node {
                     let input = checkpointer.retrieve_node_output::<B::FloatTensorPrimitive>(x);
                     let input_weights_grad =
-                        B::lstm_input_weights_backward(input, cache_grad.clone());
+                        B::lstm_input_weights_backward(input, cache_grad.clone(), size);
                     grads.register::<B>(node.id, input_weights_grad)
                 }
                 // finalize recurrent weights gradient
                 if let Some(node) = recurrent_weights_node {
-                    let recurrent_weights_grad =
-                        B::lstm_recurrent_weights_backward(out.hidden_states, cache_grad.clone());
+                    let recurrent_weights_grad = B::lstm_recurrent_weights_backward(
+                        out.hidden_states,
+                        cache_grad.clone(),
+                        size,
+                    );
                     grads.register::<B>(node.id, recurrent_weights_grad);
                 }
                 // finalize biases gradient
@@ -1769,10 +1774,11 @@ impl<B: Backend, C: CheckpointStrategy> ModuleOps<Autodiff<B, C>> for Autodiff<B
                     input_weights.primitive,
                     recurrent_weights.primitive,
                     biases.map(|b| b.primitive),
+                    size,
                     true,
                 );
                 // collect checkpoints and outputs to backprop state
-                let state = ([x, iw, rw], out.clone());
+                let state = ([x, iw, rw], size, out.clone());
                 // output cell states are not included in the graph
                 cell_states = AutodiffTensor::new(out.cell_states);
                 prep.finish(state, out.hidden_states)
@@ -1786,6 +1792,7 @@ impl<B: Backend, C: CheckpointStrategy> ModuleOps<Autodiff<B, C>> for Autodiff<B
                     input_weights.primitive,
                     recurrent_weights.primitive,
                     biases.map(|b| b.primitive),
+                    size,
                     false,
                 );
                 cell_states = AutodiffTensor::new(out.cell_states);
@@ -1803,6 +1810,7 @@ impl<B: Backend, C: CheckpointStrategy> ModuleOps<Autodiff<B, C>> for Autodiff<B
         _cell_states: FloatTensor<Autodiff<B, C>>,
         _cache: FloatTensor<Autodiff<B, C>>,
         _hidden_states_grad: FloatTensor<Autodiff<B, C>>,
+        _size: [usize; 4],
     ) -> LstmStateGrads<Autodiff<B, C>> {
         panic!("Cannot differentiate lstm states backward");
     }
@@ -1815,12 +1823,14 @@ impl<B: Backend, C: CheckpointStrategy> ModuleOps<Autodiff<B, C>> for Autodiff<B
     fn lstm_input_weights_backward(
         _input: FloatTensor<Autodiff<B, C>>,
         _cache_grad: FloatTensor<Autodiff<B, C>>,
+        _size: [usize; 4],
     ) -> FloatTensor<Autodiff<B, C>> {
         panic!("Cannot differentiate lstm input weights backward");
     }
     fn lstm_recurrent_weights_backward(
         _hidden_states: FloatTensor<Autodiff<B, C>>,
         _cache_grad: FloatTensor<Autodiff<B, C>>,
+        _size: [usize; 4],
     ) -> FloatTensor<Autodiff<B, C>> {
         panic!("Cannot differentiate lstm recurrent weights backward");
     }

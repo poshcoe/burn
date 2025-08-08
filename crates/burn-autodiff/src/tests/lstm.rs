@@ -97,6 +97,7 @@ mod tests {
             input_weights.clone(),
             recurrent_weights.clone(),
             biases.clone(),
+            [SEQ_D, BAT_D, INP_D, HID_D],
         );
         let out = hidden_states.slice(s![1.., .., ..]);
         // backprop with dummy loss

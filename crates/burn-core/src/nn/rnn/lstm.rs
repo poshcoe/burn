@@ -80,6 +80,7 @@ impl LstmConfig {
             input_weights,
             recurrent_weights,
             biases,
+            d_input: self.d_input,
             d_hidden: self.d_hidden,
         }
     }
@@ -110,6 +111,8 @@ pub struct Lstm<B: Backend> {
     pub recurrent_weights: Param<Tensor<B, 3>>,
     /// Combined-gate biases (b) ``[1, 1, d_hidden * 4]``
     pub biases: Option<Param<Tensor<B, 3>>>,
+    /// The input dimension of the LSTM
+    pub d_input: usize,
     /// The hidden dimension of the LSTM
     pub d_hidden: usize,
 }
@@ -142,6 +145,13 @@ impl<B: Backend> Lstm<B> {
                 cell: Tensor::zeros([1, d_batch, self.d_hidden], &device),
             }
         });
+        // check input shape
+        let [seq_d, bat_d, inp_d] = input.shape().dims();
+        assert_eq!(
+            inp_d, self.d_input,
+            "input tensor must be of shape [.., .., d_input]"
+        );
+        let size = [seq_d, bat_d, inp_d, self.d_hidden];
         // forward
         let (hidden_states, cell_states) = crate::tensor::module::lstm(
             input,
@@ -150,6 +160,7 @@ impl<B: Backend> Lstm<B> {
             self.input_weights.val(),
             self.recurrent_weights.val(),
             self.biases.as_ref().map(|b| b.val()),
+            size,
         );
         let out = hidden_states.clone().slice(s![1.., .., ..]);
         let hidden = hidden_states.slice(s![-1, .., ..]);
@@ -358,6 +369,7 @@ mod tests {
             input_weights: Param::from_tensor(input_weights.clone()),
             recurrent_weights: Param::from_tensor(recurrent_weights.clone()),
             biases: Some(Param::from_tensor(biases.clone())),
+            d_input: INP_D,
             d_hidden: HID_D,
         };
         let (output, state) = lstm.forward(input, None);

@@ -215,6 +215,7 @@ where
         input_weights: FloatTensor<Self>,
         recurrent_weights: FloatTensor<Self>,
         biases: Option<FloatTensor<Self>>,
+        size: [usize; 4],
         tracked: bool,
     ) -> LstmOut<Self> {
         let ([hidden_states, cell_states], cache) = kernel::rnn::lstm::lstm::<R, F>(
@@ -224,6 +225,7 @@ where
             input_weights,
             recurrent_weights,
             biases,
+            size,
             tracked,
         )
         .unwrap();
@@ -239,6 +241,7 @@ where
         cell_states: FloatTensor<Self>,
         cache: FloatTensor<Self>,
         hidden_states_grad: FloatTensor<Self>,
+        size: [usize; 4],
     ) -> burn_tensor::ops::rnn::lstm::LstmStateGrads<Self> {
         let [hidden_state_grad, cell_state_grad, cache_grad] =
             kernel::rnn::lstm::lstm_states_backward::<R, F>(
@@ -246,6 +249,7 @@ where
                 cell_states,
                 cache,
                 hidden_states_grad,
+                size,
             )
             .unwrap();
         LstmStateGrads {

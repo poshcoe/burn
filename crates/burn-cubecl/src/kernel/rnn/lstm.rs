@@ -105,12 +105,10 @@ pub fn lstm<R: CubeRuntime, E: FloatElement>(
     iw: CubeTensor<R>,
     rw: CubeTensor<R>,
     b: Option<CubeTensor<R>>,
+    size: [usize; 4],
     tracked: bool,
 ) -> Result<CubeLstmOut<R>, MatmulSetupError> {
-    // infer dimensions from x & iw
-    let [seq_d, bat_d, _inp_d] = x.shape.dims();
-    let [_, _inp_d, hid_d_4] = iw.shape.dims();
-    let hid_d = hid_d_4 / 4;
+    let [seq_d, bat_d, _, hid_d] = size;
     // prepare output tensors (modified inplace by elemwise kernel)
     let h_out = crate::ops::base::expand(h, [seq_d + 1, bat_d, hid_d].into()).copy();
     let c_out = crate::ops::base::expand(c, [seq_d + 1, bat_d, hid_d].into()).copy();
@@ -210,11 +208,10 @@ pub fn lstm_states_backward<R: CubeRuntime, E: FloatElement>(
     c_out: CubeTensor<R>,
     cache: CubeTensor<R>,
     h_out_grad: CubeTensor<R>,
+    size: [usize; 4],
 ) -> Result<[CubeTensor<R>; 3], MatmulSetupError> {
-    // infer dimensions from cache
     let device = &rw.device;
-    let [seq_d, bat_d, hid_d_4] = cache.shape.dims();
-    let hid_d = hid_d_4 / 4;
+    let [seq_d, bat_d, _, hid_d] = size;
     // init storage for hidden and cell gradients
     let mut h_grad = crate::ops::numeric::zeros::<R, E>([1, bat_d, hid_d].into(), device);
     let c_grad = crate::ops::numeric::zeros::<R, E>([1, bat_d, hid_d].into(), device);
@@ -245,11 +242,11 @@ pub fn lstm_states_backward<R: CubeRuntime, E: FloatElement>(
         }
         // calculate hidden state grad
         let s_cache =
-            crate::kernel::slice::<R, E>(cache.clone(), &[i..i + 1, 0..bat_d, 0..hid_d_4]);
+            crate::kernel::slice::<R, E>(cache.clone(), &[i..i + 1, 0..bat_d, 0..hid_d * 4]);
         h_grad =
             crate::kernel::matmul::matmul::<R, E>(s_cache, rw_t.clone(), None, Default::default())?;
     }
     // reshape cache for downstream grad cacls
-    let cache_grad = crate::ops::reshape(cache, [1, seq_d * bat_d, hid_d_4].into());
+    let cache_grad = crate::ops::reshape(cache, [1, seq_d * bat_d, hid_d * 4].into());
     Ok([h_grad, c_grad, cache_grad])
 }

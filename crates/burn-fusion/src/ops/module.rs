@@ -14,6 +14,7 @@ use burn_tensor::{
             calculate_conv_output_size, calculate_conv_transpose_output_size,
             calculate_pool_output_size,
         },
+        rnn::lstm::{LstmOut, LstmStateGrads},
     },
 };
 use std::marker::PhantomData;
@@ -1399,5 +1400,162 @@ impl<B: FusionBackend> ModuleOps<Fusion<B>> for Fusion<B> {
             InterpolateBackwardOps::<B>::new(desc),
         );
         out
+    }
+
+    fn lstm(
+        input: FloatTensor<Self>,
+        hidden_state: FloatTensor<Self>,
+        cell_state: FloatTensor<Self>,
+        input_weights: FloatTensor<Self>,
+        recurrent_weights: FloatTensor<Self>,
+        biases: Option<FloatTensor<Self>>,
+        size: [usize; 4],
+        tracked: bool,
+    ) -> LstmOut<Self> {
+        #[rustfmt::skip]
+        make_ops!(
+            LstmOps,
+            LstmOpIr,
+            |args: &LstmOpIr, handles: &mut HandleContainer<B::Handle>| {
+            let input = handles.get_float_tensor::<B>(&args.input);
+            let hidden_state = handles.get_float_tensor::<B>(&args.hidden_state);
+            let cell_state = handles.get_float_tensor::<B>(&args.cell_state);
+            let input_weights = handles.get_float_tensor::<B>(&args.input_weights);
+            let recurrent_weights = handles.get_float_tensor::<B>(&args.recurrent_weights);
+            let biases = args
+                .biases
+                .as_ref()
+                .map(|b| handles.get_float_tensor::<B>(b));
+            let out = B::lstm(
+                input,
+                hidden_state,
+                cell_state,
+                input_weights,
+                recurrent_weights,
+                biases,
+                args.size,
+                args.tracked,
+            );
+            handles.register_float_tensor::<B>(&args.hidden_states.id, out.hidden_states);
+            handles.register_float_tensor::<B>(&args.cell_states.id, out.cell_states);
+            args.cache.as_ref().map(|c| {
+                handles.register_float_tensor::<B>(
+                    &c.id,
+                    out.cache
+                        .expect("lstm was tracked but did not return cache"),
+                )
+            });
+        });
+
+        // register inputs
+        let mut streams = OperationStreams::default();
+        streams.tensor(&input);
+        streams.tensor(&hidden_state);
+        streams.tensor(&cell_state);
+        streams.tensor(&input_weights);
+        streams.tensor(&recurrent_weights);
+        biases.as_ref().map(|b| streams.tensor(b));
+        // prep uninit outputs
+        let client = &input.client;
+        let [seq_d, bat_d, _, hid_d] = size;
+        let hidden_states =
+            client.tensor_uninitialized(vec![seq_d + 1, bat_d, hid_d], B::FloatElem::dtype());
+        let cell_states =
+            client.tensor_uninitialized(vec![seq_d + 1, bat_d, hid_d], B::FloatElem::dtype());
+        let cache = tracked.then_some(
+            client.tensor_uninitialized(vec![seq_d, bat_d, hid_d * 4], B::FloatElem::dtype()),
+        );
+        // build desc
+        let desc = LstmOpIr {
+            input: input.into_ir(),
+            hidden_state: hidden_state.into_ir(),
+            cell_state: cell_state.into_ir(),
+            input_weights: input_weights.into_ir(),
+            recurrent_weights: recurrent_weights.into_ir(),
+            biases: biases.map(|b| b.into_ir()),
+            size,
+            tracked,
+            hidden_states: hidden_states.to_ir_out(),
+            cell_states: cell_states.to_ir_out(),
+            cache: cache.as_ref().map(|c| c.to_ir_out()),
+        };
+        // register op
+        hidden_states.client.register(
+            streams,
+            OperationIr::Module(ModuleOperationIr::Lstm(desc.clone())),
+            LstmOps::<B>::new(desc),
+        );
+        LstmOut {
+            hidden_states,
+            cell_states,
+            cache,
+        }
+    }
+
+    fn lstm_states_backward(
+        recurrent_weights: FloatTensor<Self>,
+        cell_states: FloatTensor<Self>,
+        cache: FloatTensor<Self>,
+        hidden_states_grad: FloatTensor<Self>,
+        size: [usize; 4],
+    ) -> LstmStateGrads<Self> {
+        #[rustfmt::skip]
+        make_ops!(
+            LstmStatesBackwardOps,
+            LstmStatesBackwardOpIr,
+            |args: &LstmStatesBackwardOpIr, handles: &mut HandleContainer<B::Handle>| {
+            let recurrent_weights = handles.get_float_tensor::<B>(&args.recurrent_weights);
+            let cell_states = handles.get_float_tensor::<B>(&args.cell_states);
+            let cache = handles.get_float_tensor::<B>(&args.cache);
+            let hidden_states_grad = handles.get_float_tensor::<B>(&args.hidden_states_grad);
+            let out = B::lstm_states_backward(
+                recurrent_weights,
+                cell_states,
+                cache,
+                hidden_states_grad,
+                args.size,
+            );
+            handles.register_float_tensor::<B>(&args.hidden_state_grad.id, out.hidden_state_grad);
+            handles.register_float_tensor::<B>(&args.cell_state_grad.id, out.cell_state_grad);
+            handles.register_float_tensor::<B>(&args.cache_grad.id, out.cache_grad);
+        });
+
+        // register inputs
+        let mut streams = OperationStreams::default();
+        streams.tensor(&recurrent_weights);
+        streams.tensor(&cell_states);
+        streams.tensor(&cache);
+        streams.tensor(&hidden_states_grad);
+        // prep uninit outputs
+        let client = &recurrent_weights.client;
+        let [seq_d, bat_d, _, hid_d] = size;
+        let hidden_state_grad =
+            client.tensor_uninitialized(vec![1, bat_d, hid_d], B::FloatElem::dtype());
+        let cell_state_grad =
+            client.tensor_uninitialized(vec![1, bat_d, hid_d], B::FloatElem::dtype());
+        let cache_grad =
+            client.tensor_uninitialized(vec![1, seq_d * bat_d, hid_d * 4], B::FloatElem::dtype());
+        // build desc
+        let desc = LstmStatesBackwardOpIr {
+            recurrent_weights: recurrent_weights.into_ir(),
+            cell_states: cell_states.into_ir(),
+            cache: cache.into_ir(),
+            hidden_states_grad: hidden_states_grad.into_ir(),
+            size,
+            hidden_state_grad: hidden_state_grad.to_ir_out(),
+            cell_state_grad: cell_state_grad.to_ir_out(),
+            cache_grad: cache_grad.to_ir_out(),
+        };
+        // register op
+        hidden_state_grad.client.register(
+            streams,
+            OperationIr::Module(ModuleOperationIr::LstmStatesBackward(desc.clone())),
+            LstmStatesBackwardOps::<B>::new(desc),
+        );
+        LstmStateGrads {
+            hidden_state_grad,
+            cell_state_grad,
+            cache_grad,
+        }
     }
 }

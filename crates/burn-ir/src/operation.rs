@@ -193,6 +193,10 @@ pub enum ModuleOperationIr {
     Interpolate(InterpolateOpIr),
     /// Operation corresponding to [interpolate backward](burn_tensor::ops::ModuleOps::interpolate_backward).
     InterpolateBackward(InterpolateBackwardOpIr),
+    /// Operation corresponding to [lstm](burn_tensor::ops::ModuleOps::lstm).
+    Lstm(LstmOpIr),
+    /// Operation corresponding to [lstm_states_backward](burn_tensor::ops::ModuleOps::lstm_states_backward).
+    LstmStatesBackward(LstmStatesBackwardOpIr),
 }
 
 /// Basic operations that can be done on any tensor type.
@@ -1372,6 +1376,35 @@ pub struct InterpolateBackwardOpIr {
     pub out: TensorIr,
 }
 
+#[derive(Clone, Debug, Hash, PartialEq, Serialize, Deserialize)]
+#[allow(missing_docs)]
+pub struct LstmOpIr {
+    pub input: TensorIr,
+    pub hidden_state: TensorIr,
+    pub cell_state: TensorIr,
+    pub input_weights: TensorIr,
+    pub recurrent_weights: TensorIr,
+    pub biases: Option<TensorIr>,
+    pub size: [usize; 4],
+    pub tracked: bool,
+    pub hidden_states: TensorIr,
+    pub cell_states: TensorIr,
+    pub cache: Option<TensorIr>,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Serialize, Deserialize)]
+#[allow(missing_docs)]
+pub struct LstmStatesBackwardOpIr {
+    pub recurrent_weights: TensorIr,
+    pub cell_states: TensorIr,
+    pub cache: TensorIr,
+    pub hidden_states_grad: TensorIr,
+    pub size: [usize; 4],
+    pub hidden_state_grad: TensorIr,
+    pub cell_state_grad: TensorIr,
+    pub cache_grad: TensorIr,
+}
+
 impl OperationIr {
     /// Get all [tensor](TensorIr) involved with the current operation.
     pub fn nodes(&self) -> Vec<&TensorIr> {
@@ -2168,6 +2201,34 @@ impl ModuleOperationIr {
             ModuleOperationIr::InterpolateBackward(repr) => {
                 vec![&repr.x, &repr.out, &repr.grad]
             }
+            ModuleOperationIr::Lstm(repr) => {
+                if let Some(b) = &repr.biases {
+                    vec![
+                        &repr.input,
+                        &repr.hidden_state,
+                        &repr.cell_state,
+                        &repr.input_weights,
+                        &repr.recurrent_weights,
+                        b,
+                    ]
+                } else {
+                    vec![
+                        &repr.input,
+                        &repr.hidden_state,
+                        &repr.cell_state,
+                        &repr.input_weights,
+                        &repr.recurrent_weights,
+                    ]
+                }
+            }
+            ModuleOperationIr::LstmStatesBackward(repr) => {
+                vec![
+                    &repr.recurrent_weights,
+                    &repr.cell_states,
+                    &repr.cache,
+                    &repr.hidden_states_grad,
+                ]
+            }
         }
     }
 
@@ -2318,6 +2379,21 @@ impl ModuleOperationIr {
             ModuleOperationIr::InterpolateBackward(repr) => {
                 repr.x.mark_read_only(nodes, &mut output);
                 repr.grad.mark_read_only(nodes, &mut output);
+            }
+            ModuleOperationIr::Lstm(repr) => {
+                repr.input.mark_read_only(nodes, &mut output);
+                repr.hidden_state.mark_read_only(nodes, &mut output);
+                repr.cell_state.mark_read_only(nodes, &mut output);
+                repr.input_weights.mark_read_only(nodes, &mut output);
+                repr.recurrent_weights.mark_read_only(nodes, &mut output);
+                repr.biases
+                    .as_mut()
+                    .map(|b| b.mark_read_only(nodes, &mut output));
+            }
+            ModuleOperationIr::LstmStatesBackward(repr) => {
+                repr.recurrent_weights.mark_read_only(nodes, &mut output);
+                repr.cell_states.mark_read_only(nodes, &mut output);
+                repr.hidden_states_grad.mark_read_only(nodes, &mut output);
             }
         };
 

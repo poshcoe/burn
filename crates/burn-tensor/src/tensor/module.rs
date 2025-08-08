@@ -403,6 +403,7 @@ pub fn lstm<B: Backend>(
     input_weights: Tensor<B, 3>,
     recurrent_weights: Tensor<B, 3>,
     biases: Option<Tensor<B, 3>>,
+    size: [usize; 4],
 ) -> (Tensor<B, 3>, Tensor<B, 3>) {
     let out = B::lstm(
         input.primitive.tensor(),
@@ -411,6 +412,7 @@ pub fn lstm<B: Backend>(
         input_weights.primitive.tensor(),
         recurrent_weights.primitive.tensor(),
         biases.map(|b| b.primitive.tensor()),
+        size,
         false,
     );
     (

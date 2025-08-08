@@ -1,6 +1,6 @@
+use crate::ElementConversion;
 use crate::backend::Backend;
 use crate::ops::FloatTensor;
-use crate::{ElementConversion, TensorMetadata};
 
 /// tanh'(x) = 1 - tanh^2(x)
 ///
@@ -13,6 +13,8 @@ fn d_tanh<B: Backend>(tanh: FloatTensor<B>) -> FloatTensor<B> {
 }
 
 /// LSTM output
+///
+/// Cache of activations must be returned if lstm was tracked!
 #[derive(new, Debug, Clone)]
 pub struct LstmOut<B: Backend> {
     /// stacked output hidden states `[d_sequence + 1, d_batch, d_hidden]`
@@ -30,12 +32,11 @@ pub(crate) fn lstm<B: Backend>(
     iw: FloatTensor<B>,
     rw: FloatTensor<B>,
     b: Option<FloatTensor<B>>,
+    size: [usize; 4],
     tracked: bool,
 ) -> LstmOut<B> {
     let device = B::float_device(&x);
-    let [seq_d, bat_d, _inp_d] = x.shape().dims();
-    let [_, _inp_d, hid_d_4] = iw.shape().dims();
-    let hid_d = hid_d_4 / 4;
+    let [seq_d, bat_d, _inp_d, hid_d] = size;
     let mut h_out = B::float_empty([seq_d + 1, bat_d, hid_d].into(), &device);
     let mut c_out = B::float_empty([seq_d + 1, bat_d, hid_d].into(), &device);
     // insert initial states
@@ -54,7 +55,7 @@ pub(crate) fn lstm<B: Backend>(
         let rwh = B::float_matmul(h, rw.clone());
         // sum input and recurrent transformations
         let linear = B::float_add(
-            B::float_slice(iwx_b.clone(), &[i..i + 1, 0..bat_d, 0..hid_d_4]),
+            B::float_slice(iwx_b.clone(), &[i..i + 1, 0..bat_d, 0..hid_d * 4]),
             rwh,
         );
         // prepare split of combined transformations
@@ -110,10 +111,10 @@ pub(crate) fn lstm_states_backward<B: Backend>(
     c_out: FloatTensor<B>,
     mut cache: FloatTensor<B>,
     h_out_grad: FloatTensor<B>,
+    size: [usize; 4],
 ) -> LstmStateGrads<B> {
     let device = B::float_device(&cache);
-    let [seq_d, bat_d, hid_d_4] = cache.shape().dims();
-    let hid_d = hid_d_4 / 4;
+    let [seq_d, bat_d, _, hid_d] = size;
     // init storage for hidden and cell gradients
     let mut h_grad = B::float_zeros([1, bat_d, hid_d].into(), &device);
     let mut c_grad = B::float_zeros([1, bat_d, hid_d].into(), &device);
@@ -161,12 +162,12 @@ pub(crate) fn lstm_states_backward<B: Backend>(
         }
         // calculate hidden state derivative
         h_grad = B::float_matmul(
-            B::float_slice(cache.clone(), &[i..i + 1, 0..bat_d, 0..hid_d_4]),
+            B::float_slice(cache.clone(), &[i..i + 1, 0..bat_d, 0..hid_d * 4]),
             rw_t.clone(),
         );
     }
     // reshape cache for downstream grad calcs
-    let cache_grad = B::float_reshape(cache, [1, seq_d * bat_d, hid_d_4].into());
+    let cache_grad = B::float_reshape(cache, [1, seq_d * bat_d, hid_d * 4].into());
     LstmStateGrads {
         hidden_state_grad: h_grad,
         cell_state_grad: c_grad,
@@ -185,8 +186,9 @@ pub(crate) fn lstm_input_backward<B: Backend>(
 pub(crate) fn lstm_input_weights_backward<B: Backend>(
     x: FloatTensor<B>,
     cache_grad: FloatTensor<B>,
+    size: [usize; 4],
 ) -> FloatTensor<B> {
-    let [seq_d, bat_d, inp_d] = x.shape().dims();
+    let [seq_d, bat_d, inp_d, _] = size;
     let x_t = B::float_transpose(B::float_reshape(x, [1, seq_d * bat_d, inp_d].into()));
     B::float_matmul(x_t, cache_grad)
 }
@@ -194,9 +196,9 @@ pub(crate) fn lstm_input_weights_backward<B: Backend>(
 pub(crate) fn lstm_recurrent_weights_backward<B: Backend>(
     h_out: FloatTensor<B>,
     cache_grad: FloatTensor<B>,
+    size: [usize; 4],
 ) -> FloatTensor<B> {
-    let [seq_d_p1, bat_d, hid_d] = h_out.shape().dims();
-    let seq_d = seq_d_p1 - 1;
+    let [seq_d, bat_d, _, hid_d] = size;
     let ranges = &[0..seq_d, 0..bat_d, 0..hid_d];
     let h_out_t = B::float_transpose(B::float_reshape(
         B::float_slice(h_out, ranges),

@@ -92,6 +92,7 @@ mod tests {
             input_weights.clone(),
             recurrent_weights.clone(),
             biases.clone(),
+            [SEQ_D, BAT_D, INP_D, HID_D],
         );
         let output = hidden_states
             .clone()

@@ -843,6 +843,7 @@ pub trait ModuleOps<B: Backend> {
         input_weights: FloatTensor<B>,
         recurrent_weights: FloatTensor<B>,
         biases: Option<FloatTensor<B>>,
+        size: [usize; 4],
         tracked: bool,
     ) -> LstmOut<B> {
         super::rnn::lstm::lstm(
@@ -852,6 +853,7 @@ pub trait ModuleOps<B: Backend> {
             input_weights,
             recurrent_weights,
             biases,
+            size,
             tracked,
         )
     }
@@ -861,12 +863,14 @@ pub trait ModuleOps<B: Backend> {
         cell_states: FloatTensor<B>,
         cache: FloatTensor<B>,
         hidden_states_grad: FloatTensor<B>,
+        size: [usize; 4],
     ) -> LstmStateGrads<B> {
         super::rnn::lstm::lstm_states_backward(
             recurrent_weights,
             cell_states,
             cache,
             hidden_states_grad,
+            size,
         )
     }
     /// Backwards pass for the [lstm](ModuleOps::lstm) operation, returning the gradient for the input
@@ -880,15 +884,17 @@ pub trait ModuleOps<B: Backend> {
     fn lstm_input_weights_backward(
         input: FloatTensor<B>,
         cache_grad: FloatTensor<B>,
+        size: [usize; 4],
     ) -> FloatTensor<B> {
-        super::rnn::lstm::lstm_input_weights_backward::<B>(input, cache_grad)
+        super::rnn::lstm::lstm_input_weights_backward::<B>(input, cache_grad, size)
     }
     /// Backwards pass for the [lstm](ModuleOps::lstm) operation, returning the gradient for the recurrent weights
     fn lstm_recurrent_weights_backward(
         hidden_states: FloatTensor<B>,
         cache_grad: FloatTensor<B>,
+        size: [usize; 4],
     ) -> FloatTensor<B> {
-        super::rnn::lstm::lstm_recurrent_weights_backward::<B>(hidden_states, cache_grad)
+        super::rnn::lstm::lstm_recurrent_weights_backward::<B>(hidden_states, cache_grad, size)
     }
     /// Backwards pass for the [lstm](ModuleOps::lstm) operation, returning the gradient for the biases
     fn lstm_biases_backward(cache_grad: FloatTensor<B>) -> FloatTensor<B> {

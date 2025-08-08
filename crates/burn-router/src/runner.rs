@@ -1204,6 +1204,43 @@ impl<B: BackendIr> RunnerClient for Runner<B> {
                     );
                     handles.register_float_tensor::<B>(&desc.out.id, output);
                 }
+                ModuleOperationIr::Lstm(desc) => {
+                    let out = B::lstm(
+                        handles.get_float_tensor::<B>(&desc.input),
+                        handles.get_float_tensor::<B>(&desc.hidden_state),
+                        handles.get_float_tensor::<B>(&desc.cell_state),
+                        handles.get_float_tensor::<B>(&desc.input_weights),
+                        handles.get_float_tensor::<B>(&desc.recurrent_weights),
+                        desc.biases.map(|b| handles.get_float_tensor::<B>(&b)),
+                        desc.size,
+                        desc.tracked,
+                    );
+                    handles.register_float_tensor::<B>(&desc.hidden_states.id, out.hidden_states);
+                    handles.register_float_tensor::<B>(&desc.cell_states.id, out.cell_states);
+                    desc.cache.map(|c| {
+                        handles.register_float_tensor::<B>(
+                            &c.id,
+                            out.cache
+                                .expect("lstm was tracked but did not return cache"),
+                        )
+                    });
+                }
+                ModuleOperationIr::LstmStatesBackward(desc) => {
+                    let out = B::lstm_states_backward(
+                        handles.get_float_tensor::<B>(&desc.recurrent_weights),
+                        handles.get_float_tensor::<B>(&desc.cell_states),
+                        handles.get_float_tensor::<B>(&desc.cache),
+                        handles.get_float_tensor::<B>(&desc.hidden_states_grad),
+                        desc.size,
+                    );
+                    handles.register_float_tensor::<B>(
+                        &desc.hidden_state_grad.id,
+                        out.hidden_state_grad,
+                    );
+                    handles
+                        .register_float_tensor::<B>(&desc.cell_state_grad.id, out.cell_state_grad);
+                    handles.register_float_tensor::<B>(&desc.cache_grad.id, out.cache_grad);
+                }
             },
             OperationIr::Custom(_) => {
                 panic!("Can't execute custom operation here")

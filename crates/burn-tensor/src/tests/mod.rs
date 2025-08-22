@@ -70,7 +70,7 @@ macro_rules! testgen_all {
 
                     pub type BoolType = $bool;
 
-                    $crate::testgen_with_int_param!();
+                    $crate::testgen_with_bool_param!();
                 })*
             }
             $crate::testgen_no_param!();
@@ -160,6 +160,7 @@ macro_rules! testgen_with_float_param {
 
         // test grid
         burn_tensor::testgen_meshgrid!();
+        burn_tensor::testgen_affine_grid!();
 
         // test linalg
         burn_tensor::testgen_vector_norm!();
@@ -204,6 +205,7 @@ macro_rules! testgen_with_float_param {
         burn_tensor::testgen_cosh!();
         burn_tensor::testgen_create_like!();
         burn_tensor::testgen_div!();
+        burn_tensor::testgen_dot!();
         burn_tensor::testgen_erf!();
         burn_tensor::testgen_exp!();
         burn_tensor::testgen_flatten!();
@@ -262,6 +264,7 @@ macro_rules! testgen_with_float_param {
         burn_tensor::testgen_select!();
         burn_tensor::testgen_split!();
         burn_tensor::testgen_prod!();
+        burn_tensor::testgen_grid_sample!();
 
         // test stats
         burn_tensor::testgen_var!();
@@ -300,6 +303,7 @@ macro_rules! testgen_with_int_param {
         burn_tensor::testgen_transpose!();
         burn_tensor::testgen_gather_scatter!();
         burn_tensor::testgen_bitwise!();
+        burn_tensor::testgen_matmul!();
 
         // test stats
         burn_tensor::testgen_eye!();
@@ -314,7 +318,7 @@ macro_rules! testgen_with_int_param {
 macro_rules! testgen_with_bool_param {
     () => {
         burn_tensor::testgen_all_op!();
-        burn_tensor::testgen_any_op!();
+        burn_tensor::testgen_any!();
         burn_tensor::testgen_argwhere_nonzero!();
         burn_tensor::testgen_cast!();
         burn_tensor::testgen_cat!();
@@ -327,7 +331,7 @@ macro_rules! testgen_with_bool_param {
         burn_tensor::testgen_reshape!();
         burn_tensor::testgen_stack!();
         burn_tensor::testgen_transpose!();
-        burn_tensor::tri_mask!();
+        burn_tensor::testgen_tri_mask!();
     };
 }
 

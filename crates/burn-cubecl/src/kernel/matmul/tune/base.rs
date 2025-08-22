@@ -1,7 +1,7 @@
-use burn_tensor::{DType, Element};
+use burn_tensor::DType;
 use cubecl::{
     matmul::{
-        Strategy, SyncLoadingStrategy, SyncPartialLoadingStrategy,
+        MatmulInputHandleRef, Strategy, SyncLoadingStrategy, SyncPartialLoadingStrategy,
         components::MatmulKind,
         kernels::layered::{
             Selection, TileSizeSelection, double_buffering::DoubleBufferingArgs,
@@ -14,7 +14,7 @@ use cubecl::{
 };
 
 use crate::{
-    CubeRuntime, CubeTuneId, element::FloatElement, kernel::matmul::utils::init_matmul_output,
+    CubeRuntime, CubeTuneId, element::MatmulElement, kernel::matmul::utils::init_matmul_output,
     tensor::CubeTensor,
 };
 
@@ -28,12 +28,12 @@ fn matmul_input_gen<R: CubeRuntime>(
 }
 
 /// Executes autotune on matmul operations
-pub fn matmul_autotune<R: CubeRuntime, E: FloatElement + Element>(
+pub fn matmul_autotune<R: CubeRuntime, E: MatmulElement>(
     lhs: CubeTensor<R>,
     rhs: CubeTensor<R>,
     out: Option<CubeTensor<R>>,
 ) -> CubeTensor<R> {
-    let output = out.unwrap_or_else(|| init_matmul_output::<R, E>(&lhs, &rhs));
+    let output = out.unwrap_or_else(|| init_matmul_output::<R, E::EO>(&lhs, &rhs));
 
     let client = lhs.client.clone();
 
@@ -99,6 +99,8 @@ pub fn matmul_autotune<R: CubeRuntime, E: FloatElement + Element>(
                 }
             }))
             .with(Tunable::new(simple_unit_max::<R, E>).group(&unit, |_| PRIORITY_MAX))
+            .with(Tunable::new(simple_vec_mat::<R, E>).group(&unit, |_| PRIORITY_MAX))
+            .with(Tunable::new(double_vec_mat::<R, E>).group(&unit, |_| PRIORITY_MAX))
             .with(Tunable::new(double_unit::<R, E>).group(&unit, |key| {
                 double_buffering_priority(key, PRIORITY_MAX, PRIORITY_HIGH)
             }))
@@ -152,7 +154,7 @@ fn create_key<R: CubeRuntime>(
     )
 }
 
-fn matmul_simple<R: CubeRuntime, E: FloatElement>(
+fn matmul_simple<R: CubeRuntime, E: MatmulElement>(
     lhs: CubeTensor<R>,
     rhs: CubeTensor<R>,
     out: CubeTensor<R>,
@@ -163,16 +165,14 @@ fn matmul_simple<R: CubeRuntime, E: FloatElement>(
             Selection::Inferred(SimpleArgs { multi_rows: false }),
         ),
         &lhs.client,
-        &lhs.as_handle_ref(),
-        &None,
-        &rhs.as_handle_ref(),
-        &None,
+        &MatmulInputHandleRef::Normal(lhs.as_handle_ref()),
+        &MatmulInputHandleRef::Normal(rhs.as_handle_ref()),
         &out.as_handle_ref(),
     )
     .map_err(|err| format!("{err:?}"))
 }
 
-fn matmul_simple_multi_rows<R: CubeRuntime, E: FloatElement>(
+fn matmul_simple_multi_rows<R: CubeRuntime, E: MatmulElement>(
     lhs: CubeTensor<R>,
     rhs: CubeTensor<R>,
     out: CubeTensor<R>,
@@ -183,16 +183,14 @@ fn matmul_simple_multi_rows<R: CubeRuntime, E: FloatElement>(
             Selection::Inferred(SimpleArgs { multi_rows: true }),
         ),
         &lhs.client,
-        &lhs.as_handle_ref(),
-        &None,
-        &rhs.as_handle_ref(),
-        &None,
+        &MatmulInputHandleRef::Normal(lhs.as_handle_ref()),
+        &MatmulInputHandleRef::Normal(rhs.as_handle_ref()),
         &out.as_handle_ref(),
     )
     .map_err(|err| format!("{err:?}"))
 }
 
-fn matmul_double_buffering<R: CubeRuntime, E: FloatElement>(
+fn matmul_double_buffering<R: CubeRuntime, E: MatmulElement>(
     lhs: CubeTensor<R>,
     rhs: CubeTensor<R>,
     out: CubeTensor<R>,
@@ -203,16 +201,14 @@ fn matmul_double_buffering<R: CubeRuntime, E: FloatElement>(
             Selection::Inferred(DoubleBufferingArgs { specialized: false }),
         ),
         &lhs.client,
-        &lhs.as_handle_ref(),
-        &None,
-        &rhs.as_handle_ref(),
-        &None,
+        &MatmulInputHandleRef::Normal(lhs.as_handle_ref()),
+        &MatmulInputHandleRef::Normal(rhs.as_handle_ref()),
         &out.as_handle_ref(),
     )
     .map_err(|err| format!("{err:?}"))
 }
 
-fn matmul_double_buffering_specialized<R: CubeRuntime, E: FloatElement>(
+fn matmul_double_buffering_specialized<R: CubeRuntime, E: MatmulElement>(
     lhs: CubeTensor<R>,
     rhs: CubeTensor<R>,
     out: CubeTensor<R>,
@@ -223,16 +219,14 @@ fn matmul_double_buffering_specialized<R: CubeRuntime, E: FloatElement>(
             Selection::Inferred(DoubleBufferingArgs { specialized: true }),
         ),
         &lhs.client,
-        &lhs.as_handle_ref(),
-        &None,
-        &rhs.as_handle_ref(),
-        &None,
+        &MatmulInputHandleRef::Normal(lhs.as_handle_ref()),
+        &MatmulInputHandleRef::Normal(rhs.as_handle_ref()),
         &out.as_handle_ref(),
     )
     .map_err(|err| format!("{err:?}"))
 }
 
-fn matmul_ordered_double_buffering<R: CubeRuntime, E: FloatElement>(
+fn matmul_ordered_double_buffering<R: CubeRuntime, E: MatmulElement>(
     lhs: CubeTensor<R>,
     rhs: CubeTensor<R>,
     out: CubeTensor<R>,
@@ -248,16 +242,14 @@ fn matmul_ordered_double_buffering<R: CubeRuntime, E: FloatElement>(
             rows_per_plane: Some(2),
         })),
         &lhs.client,
-        &lhs.as_handle_ref(),
-        &None,
-        &rhs.as_handle_ref(),
-        &None,
+        &MatmulInputHandleRef::Normal(lhs.as_handle_ref()),
+        &MatmulInputHandleRef::Normal(rhs.as_handle_ref()),
         &out.as_handle_ref(),
     )
     .map_err(|err| format!("{err:?}"))
 }
 
-fn simple_unit_min<R: CubeRuntime, E: FloatElement>(
+fn simple_unit_min<R: CubeRuntime, E: MatmulElement>(
     lhs: CubeTensor<R>,
     rhs: CubeTensor<R>,
     out: CubeTensor<R>,
@@ -267,16 +259,14 @@ fn simple_unit_min<R: CubeRuntime, E: FloatElement>(
             tile_size: TileSizeSelection::MinTileSize,
         })),
         &lhs.client,
-        &lhs.as_handle_ref(),
-        &None,
-        &rhs.as_handle_ref(),
-        &None,
+        &MatmulInputHandleRef::Normal(lhs.as_handle_ref()),
+        &MatmulInputHandleRef::Normal(rhs.as_handle_ref()),
         &out.as_handle_ref(),
     )
     .map_err(|err| format!("{err:?}"))
 }
 
-fn simple_unit_max<R: CubeRuntime, E: FloatElement>(
+fn simple_unit_max<R: CubeRuntime, E: MatmulElement>(
     lhs: CubeTensor<R>,
     rhs: CubeTensor<R>,
     out: CubeTensor<R>,
@@ -286,16 +276,14 @@ fn simple_unit_max<R: CubeRuntime, E: FloatElement>(
             tile_size: TileSizeSelection::MaxTileSize,
         })),
         &lhs.client,
-        &lhs.as_handle_ref(),
-        &None,
-        &rhs.as_handle_ref(),
-        &None,
+        &MatmulInputHandleRef::Normal(lhs.as_handle_ref()),
+        &MatmulInputHandleRef::Normal(rhs.as_handle_ref()),
         &out.as_handle_ref(),
     )
     .map_err(|err| format!("{err:?}"))
 }
 
-fn double_unit<R: CubeRuntime, E: FloatElement>(
+fn double_unit<R: CubeRuntime, E: MatmulElement>(
     lhs: CubeTensor<R>,
     rhs: CubeTensor<R>,
     out: CubeTensor<R>,
@@ -303,16 +291,44 @@ fn double_unit<R: CubeRuntime, E: FloatElement>(
     cubecl::matmul::launch_ref::<R, E>(
         &Strategy::DoubleUnit(Default::default()),
         &lhs.client,
-        &lhs.as_handle_ref(),
-        &None,
-        &rhs.as_handle_ref(),
-        &None,
+        &MatmulInputHandleRef::Normal(lhs.as_handle_ref()),
+        &MatmulInputHandleRef::Normal(rhs.as_handle_ref()),
         &out.as_handle_ref(),
     )
     .map_err(|err| format!("{err:?}"))
 }
 
-fn naive<R: CubeRuntime, E: FloatElement>(
+fn simple_vec_mat<R: CubeRuntime, E: MatmulElement>(
+    lhs: CubeTensor<R>,
+    rhs: CubeTensor<R>,
+    out: CubeTensor<R>,
+) -> Result<(), String> {
+    cubecl::matmul::launch_ref::<R, E>(
+        &Strategy::SimpleVecMat(Selection::Inferred(())),
+        &lhs.client,
+        &MatmulInputHandleRef::Normal(lhs.as_handle_ref()),
+        &MatmulInputHandleRef::Normal(rhs.as_handle_ref()),
+        &out.as_handle_ref(),
+    )
+    .map_err(|err| format!("{err:?}"))
+}
+
+fn double_vec_mat<R: CubeRuntime, E: MatmulElement>(
+    lhs: CubeTensor<R>,
+    rhs: CubeTensor<R>,
+    out: CubeTensor<R>,
+) -> Result<(), String> {
+    cubecl::matmul::launch_ref::<R, E>(
+        &Strategy::DoubleVecMat(Selection::Inferred(())),
+        &lhs.client,
+        &MatmulInputHandleRef::Normal(lhs.as_handle_ref()),
+        &MatmulInputHandleRef::Normal(rhs.as_handle_ref()),
+        &out.as_handle_ref(),
+    )
+    .map_err(|err| format!("{err:?}"))
+}
+
+fn naive<R: CubeRuntime, E: MatmulElement>(
     lhs: CubeTensor<R>,
     rhs: CubeTensor<R>,
     out: CubeTensor<R>,
@@ -320,10 +336,8 @@ fn naive<R: CubeRuntime, E: FloatElement>(
     cubecl::matmul::launch_ref::<R, E>(
         &Strategy::Naive,
         &lhs.client,
-        &lhs.as_handle_ref(),
-        &None,
-        &rhs.as_handle_ref(),
-        &None,
+        &MatmulInputHandleRef::Normal(lhs.as_handle_ref()),
+        &MatmulInputHandleRef::Normal(rhs.as_handle_ref()),
         &out.as_handle_ref(),
     )
     .map_err(|err| format!("{err:?}"))

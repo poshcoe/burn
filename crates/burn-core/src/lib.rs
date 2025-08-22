@@ -40,6 +40,10 @@ pub mod record;
 /// Module for the tensor.
 pub mod tensor;
 
+/// Module for visual operations
+#[cfg(feature = "vision")]
+pub mod vision;
+
 extern crate alloc;
 
 /// Backend for test cases
@@ -87,8 +91,8 @@ pub mod prelude {
         module::Module,
         nn,
         tensor::{
-            Bool, Device, ElementConversion, Float, Int, Shape, Tensor, TensorData,
-            backend::Backend, s,
+            Bool, Device, ElementConversion, Float, Int, RangesArg, Shape, Tensor, TensorData,
+            backend::Backend, cast::ToElement, s,
         },
     };
 }

@@ -2,9 +2,12 @@ use alloc::{sync::Arc, vec::Vec};
 use burn_common::{future::DynFut, stub::Mutex};
 use burn_ir::{
     BackendIr, BaseOperationIr, BoolOperationIr, FloatOperationIr, HandleContainer, IntOperationIr,
-    ModuleOperationIr, NumericOperationIr, OperationIr, TensorId, TensorIr, TensorStatus,
+    ModuleOperationIr, NumericOperationIr, OperationIr, RnnCellIr, TensorId, TensorIr,
+    TensorStatus,
 };
-use burn_tensor::{DType, ElementConversion, FloatDType, Shape, TensorData, backend::Backend};
+use burn_tensor::{
+    DType, ElementConversion, FloatDType, Shape, TensorData, backend::Backend, ops::rnn::RnnCell,
+};
 
 use super::{RouterTensor, RunnerClient};
 use crate::{
@@ -1217,42 +1220,52 @@ impl<B: BackendIr> RunnerClient for Runner<B> {
                     );
                     handles.register_float_tensor::<B>(&desc.out.id, output);
                 }
-                ModuleOperationIr::Lstm(desc) => {
-                    let out = B::lstm(
+                ModuleOperationIr::Rnn(desc) => {
+                    let out = B::rnn(
                         handles.get_float_tensor::<B>(&desc.input),
                         handles.get_float_tensor::<B>(&desc.hidden_state),
-                        handles.get_float_tensor::<B>(&desc.cell_state),
                         handles.get_float_tensor::<B>(&desc.input_weights),
                         handles.get_float_tensor::<B>(&desc.recurrent_weights),
                         desc.biases.map(|b| handles.get_float_tensor::<B>(&b)),
-                        desc.size,
-                        desc.tracked,
+                        match &desc.cell {
+                            RnnCellIr::Lstm(c) => RnnCell::Lstm(handles.get_float_tensor::<B>(c)),
+                            RnnCellIr::Gru => RnnCell::Gru,
+                        },
+                        &desc.size,
                     );
-                    handles.register_float_tensor::<B>(&desc.hidden_states.id, out.hidden_states);
-                    handles.register_float_tensor::<B>(&desc.cell_states.id, out.cell_states);
-                    desc.cache.map(|c| {
-                        handles.register_float_tensor::<B>(
-                            &c.id,
-                            out.cache
-                                .expect("lstm was tracked but did not return cache"),
-                        )
-                    });
+                    handles.register_float_tensor::<B>(&desc.out.traj.id, out.traj);
+                    handles.register_float_tensor::<B>(&desc.out.hidden_state.id, out.hidden_state);
+                    match out.cell {
+                        RnnCell::Lstm(c_out) => match &desc.out.cell {
+                            RnnCellIr::Lstm(c_out_ir) => {
+                                handles.register_float_tensor::<B>(&c_out_ir.id, c_out);
+                            }
+                            _ => panic!("cell mismatch"),
+                        },
+                        RnnCell::Gru => {}
+                    }
+                    if let Some(cache) = out.cache {
+                        let desc_cache = desc.out.cache.expect("cache returned unexpectedly");
+                        for (v_desc, v_out) in desc_cache.iter().zip(cache) {
+                            handles.register_float_tensor::<B>(&v_desc.id, v_out);
+                        }
+                    }
                 }
-                ModuleOperationIr::LstmStatesBackward(desc) => {
-                    let out = B::lstm_states_backward(
+                ModuleOperationIr::RnnGatesBackward(desc) => {
+                    let gates_grad = B::rnn_gates_backward(
                         handles.get_float_tensor::<B>(&desc.recurrent_weights),
-                        handles.get_float_tensor::<B>(&desc.cell_states),
-                        handles.get_float_tensor::<B>(&desc.cache),
-                        handles.get_float_tensor::<B>(&desc.hidden_states_grad),
-                        desc.size,
+                        handles.get_float_tensor::<B>(&desc.traj_grad),
+                        desc.cache
+                            .iter()
+                            .map(|v_desc| handles.get_float_tensor::<B>(v_desc))
+                            .collect(),
+                        match &desc.cell {
+                            RnnCellIr::Lstm(c) => RnnCell::Lstm(handles.get_float_tensor::<B>(c)),
+                            RnnCellIr::Gru => RnnCell::Gru,
+                        },
+                        &desc.size,
                     );
-                    handles.register_float_tensor::<B>(
-                        &desc.hidden_state_grad.id,
-                        out.hidden_state_grad,
-                    );
-                    handles
-                        .register_float_tensor::<B>(&desc.cell_state_grad.id, out.cell_state_grad);
-                    handles.register_float_tensor::<B>(&desc.cache_grad.id, out.cache_grad);
+                    handles.register_float_tensor::<B>(&desc.gates_grad.id, gates_grad);
                 }
             },
             OperationIr::Custom(_) => {

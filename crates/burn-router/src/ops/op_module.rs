@@ -13,6 +13,7 @@ use burn_tensor::Element;
 use burn_tensor::ops::conv::{
     calculate_conv_output_size, calculate_conv_transpose_output_size, calculate_pool_output_size,
 };
+use burn_tensor::ops::rnn::RnnOps;
 use burn_tensor::ops::{
     ConvOptions, ConvTransposeOptions, DeformConv2dBackward, DeformConvOptions, FloatTensor,
     IntElem, ModuleOps,
@@ -796,4 +797,8 @@ impl<R: RunnerChannel> ModuleOps<Self> for BackendRouter<R> {
 
         DeformConv2dBackward::new(input_grad, offset_grad, weight_grad, mask_grad, bias_grad)
     }
+}
+
+impl<R: RunnerChannel> RnnOps<Self> for BackendRouter<R> {
+    //TODO: implementations here
 }

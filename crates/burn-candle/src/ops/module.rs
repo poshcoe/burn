@@ -3,7 +3,7 @@ use burn_tensor::{
     ops::{
         ConvOptions, ConvTransposeOptions, DeformConv2dBackward, DeformConvOptions, FloatTensor,
         IntTensor, InterpolateMode, InterpolateOptions, MaxPool2dBackward, MaxPool2dWithIndices,
-        ModuleOps, UnfoldOptions,
+        ModuleOps, UnfoldOptions, rnn::RnnOps,
     },
 };
 use candle_core::ToUsize2;
@@ -306,3 +306,5 @@ impl<F: FloatCandleElement, I: IntCandleElement> ModuleOps<Self> for Candle<F, I
         panic!("interpolate_backward is not supported by Candle")
     }
 }
+
+impl<F: FloatCandleElement, I: IntCandleElement> RnnOps<Self> for Candle<F, I> {}

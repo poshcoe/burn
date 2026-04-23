@@ -15,7 +15,7 @@ use crate::{
     element::{IntNdArrayElement, QuantElement},
     ops::interpolate::nearest_interpolate_backward,
 };
-use burn_tensor::ops::*;
+use burn_tensor::ops::{rnn::RnnOps, *};
 
 macro_rules! module_op {
     // Module op with inputs (inp), optional (opt) and arguments (args).
@@ -302,4 +302,9 @@ impl<E: FloatNdArrayElement, I: IntNdArrayElement, Q: QuantElement> ModuleOps<Se
             conv_transpose3d::<E>(x, weight, bias, options).into()
         })
     }
+}
+
+impl<E: FloatNdArrayElement, I: IntNdArrayElement, Q: QuantElement> RnnOps<Self>
+    for NdArray<E, I, Q>
+{
 }

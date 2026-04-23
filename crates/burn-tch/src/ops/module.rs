@@ -4,7 +4,7 @@ use burn_tensor::{
     ops::{
         ConvOptions, ConvTransposeOptions, DeformConv2dBackward, DeformConvOptions,
         InterpolateMode, InterpolateOptions, MaxPool1dWithIndices, MaxPool2dBackward,
-        MaxPool2dWithIndices, ModuleOps,
+        MaxPool2dWithIndices, ModuleOps, rnn::RnnOps,
     },
 };
 
@@ -407,3 +407,5 @@ impl<E: TchElement, Q: QuantElement> ModuleOps<Self> for LibTorch<E, Q> {
         TchTensor::new(tensor)
     }
 }
+
+impl<E: TchElement, Q: QuantElement> RnnOps<Self> for LibTorch<E, Q> {}

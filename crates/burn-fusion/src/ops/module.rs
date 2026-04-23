@@ -14,7 +14,7 @@ use burn_tensor::{
             calculate_conv_output_size, calculate_conv_transpose_output_size,
             calculate_pool_output_size,
         },
-        rnn::lstm::{LstmOut, LstmStateGrads},
+        rnn::{RnnCell, RnnOps, RnnSize, RnnTrajectory},
     },
 };
 use std::marker::PhantomData;
@@ -1401,161 +1401,161 @@ impl<B: FusionBackend> ModuleOps<Fusion<B>> for Fusion<B> {
         );
         out
     }
+}
 
-    fn lstm(
+impl<B: FusionBackend> RnnOps<Fusion<B>> for Fusion<B> {
+    fn rnn(
         input: FloatTensor<Self>,
         hidden_state: FloatTensor<Self>,
-        cell_state: FloatTensor<Self>,
         input_weights: FloatTensor<Self>,
         recurrent_weights: FloatTensor<Self>,
         biases: Option<FloatTensor<Self>>,
-        size: [usize; 4],
-        tracked: bool,
-    ) -> LstmOut<Self> {
+        cell: RnnCell<Self>,
+        size: &RnnSize,
+    ) -> RnnTrajectory<Self> {
         #[rustfmt::skip]
         make_ops!(
-            LstmOps,
-            LstmOpIr,
-            |args: &LstmOpIr, handles: &mut HandleContainer<B::Handle>| {
-            let input = handles.get_float_tensor::<B>(&args.input);
-            let hidden_state = handles.get_float_tensor::<B>(&args.hidden_state);
-            let cell_state = handles.get_float_tensor::<B>(&args.cell_state);
-            let input_weights = handles.get_float_tensor::<B>(&args.input_weights);
-            let recurrent_weights = handles.get_float_tensor::<B>(&args.recurrent_weights);
-            let biases = args
-                .biases
-                .as_ref()
-                .map(|b| handles.get_float_tensor::<B>(b));
-            let out = B::lstm(
-                input,
-                hidden_state,
-                cell_state,
-                input_weights,
-                recurrent_weights,
-                biases,
-                args.size,
-                args.tracked,
+            RnnOps,
+            RnnOpIr,
+            |args: &RnnOpIr, handles: &mut HandleContainer<B::Handle>| {
+            let out = B::rnn(
+                handles.get_float_tensor::<B>(&args.input),
+                handles.get_float_tensor::<B>(&args.hidden_state),
+                handles.get_float_tensor::<B>(&args.input_weights),
+                handles.get_float_tensor::<B>(&args.recurrent_weights),
+                args.biases.as_ref().map(|b| handles.get_float_tensor::<B>(b)),
+                match &args.cell {
+                    RnnCellIr::Lstm(c) => RnnCell::Lstm(handles.get_float_tensor::<B>(c)),
+                    RnnCellIr::Gru => RnnCell::Gru,
+                },
+                &args.size,
             );
-            handles.register_float_tensor::<B>(&args.hidden_states.id, out.hidden_states);
-            handles.register_float_tensor::<B>(&args.cell_states.id, out.cell_states);
-            args.cache.as_ref().map(|c| {
-                handles.register_float_tensor::<B>(
-                    &c.id,
-                    out.cache
-                        .expect("lstm was tracked but did not return cache"),
-                )
-            });
+            handles.register_float_tensor::<B>(&args.out.traj.id, out.traj);
+            handles.register_float_tensor::<B>(&args.out.hidden_state.id, out.hidden_state);
+            match out.cell {
+                RnnCell::Lstm(c_out) => match &args.out.cell {
+                    RnnCellIr::Lstm(c_out_ir) => handles.register_float_tensor::<B>(&c_out_ir.id, c_out),
+                    _ => panic!("cell mismatch")
+                }
+                RnnCell::Gru => {},
+            }
+            if let Some(cache) = out.cache {
+                let args_cache = args.out.cache.as_ref().expect("cache returned unexpectedly");
+                for (v_args, v_out) in args_cache.iter().zip(cache) {
+                    handles.register_float_tensor::<B>(&v_args.id, v_out);
+                }
+            }
         });
 
         // register inputs
         let mut streams = OperationStreams::default();
         streams.tensor(&input);
         streams.tensor(&hidden_state);
-        streams.tensor(&cell_state);
         streams.tensor(&input_weights);
         streams.tensor(&recurrent_weights);
         biases.as_ref().map(|b| streams.tensor(b));
         // prep uninit outputs
         let client = &input.client;
-        let [seq_d, bat_d, _, hid_d] = size;
-        let hidden_states =
-            client.tensor_uninitialized(vec![seq_d + 1, bat_d, hid_d], B::FloatElem::dtype());
-        let cell_states =
-            client.tensor_uninitialized(vec![seq_d + 1, bat_d, hid_d], B::FloatElem::dtype());
-        let cache = tracked.then_some(
-            client.tensor_uninitialized(vec![seq_d, bat_d, hid_d * 4], B::FloatElem::dtype()),
-        );
+        let dtype = B::FloatElem::dtype();
+        let traj = client.tensor_uninitialized(size.traj_shape().dims, dtype);
+        let hidden_state_out = client.tensor_uninitialized(size.state_shape().dims, dtype);
+        // register/prep cell specific
+        let (cell_inp_ir, cell_out_ir, cell_out) = match cell {
+            RnnCell::Lstm(c) => {
+                streams.tensor(&c);
+                let c_out = client.tensor_uninitialized(size.state_shape().dims, dtype);
+                (
+                    RnnCellIr::Lstm(c.into_ir()),
+                    RnnCellIr::Lstm(c_out.to_ir_out()),
+                    RnnCell::Lstm(c_out),
+                )
+            }
+            RnnCell::Gru => (RnnCellIr::Gru, RnnCellIr::Gru, RnnCell::Gru),
+        };
         // build desc
-        let desc = LstmOpIr {
+        let desc = RnnOpIr {
             input: input.into_ir(),
             hidden_state: hidden_state.into_ir(),
-            cell_state: cell_state.into_ir(),
             input_weights: input_weights.into_ir(),
             recurrent_weights: recurrent_weights.into_ir(),
             biases: biases.map(|b| b.into_ir()),
-            size,
-            tracked,
-            hidden_states: hidden_states.to_ir_out(),
-            cell_states: cell_states.to_ir_out(),
-            cache: cache.as_ref().map(|c| c.to_ir_out()),
+            cell: cell_inp_ir,
+            size: size.clone(),
+            out: RnnTrajectoryIr {
+                traj: traj.to_ir_out(),
+                hidden_state: hidden_state_out.to_ir_out(),
+                cell: cell_out_ir,
+                cache: None,
+            },
         };
         // register op
-        hidden_states.client.register(
+        traj.client.register(
             streams,
-            OperationIr::Module(ModuleOperationIr::Lstm(desc.clone())),
-            LstmOps::<B>::new(desc),
+            OperationIr::Module(ModuleOperationIr::Rnn(desc.clone())),
+            RnnOps::<B>::new(desc),
         );
-        LstmOut {
-            hidden_states,
-            cell_states,
-            cache,
-        }
+        RnnTrajectory::new(traj, hidden_state_out, cell_out, None)
     }
 
-    fn lstm_states_backward(
+    fn rnn_gates_backward(
         recurrent_weights: FloatTensor<Self>,
-        cell_states: FloatTensor<Self>,
-        cache: FloatTensor<Self>,
-        hidden_states_grad: FloatTensor<Self>,
-        size: [usize; 4],
-    ) -> LstmStateGrads<Self> {
+        traj_grad: FloatTensor<Self>,
+        cache: Vec<FloatTensor<Self>>,
+        cell: RnnCell<Self>,
+        size: &RnnSize,
+    ) -> FloatTensor<Self> {
         #[rustfmt::skip]
         make_ops!(
-            LstmStatesBackwardOps,
-            LstmStatesBackwardOpIr,
-            |args: &LstmStatesBackwardOpIr, handles: &mut HandleContainer<B::Handle>| {
+            RnnBackwardOps,
+            RnnGatesBackwardOpIr,
+            |args: &RnnGatesBackwardOpIr, handles: &mut HandleContainer<B::Handle>| {
             let recurrent_weights = handles.get_float_tensor::<B>(&args.recurrent_weights);
-            let cell_states = handles.get_float_tensor::<B>(&args.cell_states);
-            let cache = handles.get_float_tensor::<B>(&args.cache);
-            let hidden_states_grad = handles.get_float_tensor::<B>(&args.hidden_states_grad);
-            let out = B::lstm_states_backward(
+            let traj_grad = handles.get_float_tensor::<B>(&args.traj_grad);
+            let cache = args.cache.iter().map(|v| handles.get_float_tensor::<B>(v)).collect();
+            let cell = match &args.cell {
+                RnnCellIr::Lstm(c) => RnnCell::Lstm(handles.get_float_tensor::<B>(c)),
+                RnnCellIr::Gru => RnnCell::Gru,
+            };
+            let gates_grad = B::rnn_gates_backward(
                 recurrent_weights,
-                cell_states,
+                traj_grad,
                 cache,
-                hidden_states_grad,
-                args.size,
+                cell,
+                &args.size,
             );
-            handles.register_float_tensor::<B>(&args.hidden_state_grad.id, out.hidden_state_grad);
-            handles.register_float_tensor::<B>(&args.cell_state_grad.id, out.cell_state_grad);
-            handles.register_float_tensor::<B>(&args.cache_grad.id, out.cache_grad);
+            handles.register_float_tensor::<B>(&args.gates_grad.id, gates_grad);
         });
 
         // register inputs
         let mut streams = OperationStreams::default();
         streams.tensor(&recurrent_weights);
-        streams.tensor(&cell_states);
-        streams.tensor(&cache);
-        streams.tensor(&hidden_states_grad);
+        streams.tensor(&traj_grad);
+        for v in &cache {
+            streams.tensor(v);
+        }
         // prep uninit outputs
-        let client = &recurrent_weights.client;
-        let [seq_d, bat_d, _, hid_d] = size;
-        let hidden_state_grad =
-            client.tensor_uninitialized(vec![1, bat_d, hid_d], B::FloatElem::dtype());
-        let cell_state_grad =
-            client.tensor_uninitialized(vec![1, bat_d, hid_d], B::FloatElem::dtype());
-        let cache_grad =
-            client.tensor_uninitialized(vec![1, seq_d * bat_d, hid_d * 4], B::FloatElem::dtype());
+        let gates_grad = traj_grad.client.tensor_uninitialized(
+            vec![1, size.seq_d * size.bat_d, size.hid_d * cell.gate_count()],
+            B::FloatElem::dtype(),
+        );
         // build desc
-        let desc = LstmStatesBackwardOpIr {
+        let desc = RnnGatesBackwardOpIr {
             recurrent_weights: recurrent_weights.into_ir(),
-            cell_states: cell_states.into_ir(),
-            cache: cache.into_ir(),
-            hidden_states_grad: hidden_states_grad.into_ir(),
-            size,
-            hidden_state_grad: hidden_state_grad.to_ir_out(),
-            cell_state_grad: cell_state_grad.to_ir_out(),
-            cache_grad: cache_grad.to_ir_out(),
+            traj_grad: traj_grad.into_ir(),
+            cache: cache.into_iter().map(|v| v.into_ir()).collect(),
+            cell: match cell {
+                RnnCell::Lstm(c) => RnnCellIr::Lstm(c.into_ir()),
+                RnnCell::Gru => RnnCellIr::Gru,
+            },
+            size: size.clone(),
+            gates_grad: gates_grad.to_ir_out(),
         };
         // register op
-        hidden_state_grad.client.register(
+        gates_grad.client.register(
             streams,
-            OperationIr::Module(ModuleOperationIr::LstmStatesBackward(desc.clone())),
-            LstmStatesBackwardOps::<B>::new(desc),
+            OperationIr::Module(ModuleOperationIr::RnnGatesBackward(desc.clone())),
+            RnnBackwardOps::<B>::new(desc),
         );
-        LstmStateGrads {
-            hidden_state_grad,
-            cell_state_grad,
-            cache_grad,
-        }
+        gates_grad
     }
 }

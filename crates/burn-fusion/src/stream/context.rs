@@ -449,29 +449,46 @@ impl RelativeOps for ModuleOperationIr {
                     out: desc.out.to_relative(converter),
                 })
             }
-            ModuleOperationIr::Lstm(desc) => ModuleOperationIr::Lstm(LstmOpIr {
+            ModuleOperationIr::Rnn(desc) => ModuleOperationIr::Rnn(RnnOpIr {
                 input: desc.input.to_relative(converter),
                 hidden_state: desc.hidden_state.to_relative(converter),
-                cell_state: desc.cell_state.to_relative(converter),
                 input_weights: desc.input_weights.to_relative(converter),
                 recurrent_weights: desc.recurrent_weights.to_relative(converter),
                 biases: desc.biases.as_ref().map(|b| b.to_relative(converter)),
-                size: desc.size,
-                tracked: desc.tracked,
-                hidden_states: desc.hidden_states.to_relative(converter),
-                cell_states: desc.cell_states.to_relative(converter),
-                cache: desc.cache.as_ref().map(|c| c.to_relative(converter)),
+                cell: match &desc.cell {
+                    RnnCellIr::Lstm(c) => RnnCellIr::Lstm(c.to_relative(converter)),
+                    RnnCellIr::Gru => RnnCellIr::Gru,
+                },
+                size: desc.size.clone(),
+                out: RnnTrajectoryIr {
+                    traj: desc.out.traj.to_relative(converter),
+                    hidden_state: desc.out.hidden_state.to_relative(converter),
+                    cell: match &desc.out.cell {
+                        RnnCellIr::Lstm(c) => RnnCellIr::Lstm(c.to_relative(converter)),
+                        RnnCellIr::Gru => RnnCellIr::Gru,
+                    },
+                    cache: desc
+                        .out
+                        .cache
+                        .as_ref()
+                        .map(|cache| cache.iter().map(|v| v.to_relative(converter)).collect()),
+                },
             }),
-            ModuleOperationIr::LstmStatesBackward(desc) => {
-                ModuleOperationIr::LstmStatesBackward(LstmStatesBackwardOpIr {
+            ModuleOperationIr::RnnGatesBackward(desc) => {
+                ModuleOperationIr::RnnGatesBackward(RnnGatesBackwardOpIr {
                     recurrent_weights: desc.recurrent_weights.to_relative(converter),
-                    cell_states: desc.cell_states.to_relative(converter),
-                    cache: desc.cache.to_relative(converter),
-                    hidden_states_grad: desc.hidden_states_grad.to_relative(converter),
-                    size: desc.size,
-                    hidden_state_grad: desc.hidden_state_grad.to_relative(converter),
-                    cell_state_grad: desc.cell_state_grad.to_relative(converter),
-                    cache_grad: desc.cache_grad.to_relative(converter),
+                    traj_grad: desc.traj_grad.to_relative(converter),
+                    cache: desc
+                        .cache
+                        .iter()
+                        .map(|v| v.to_relative(converter))
+                        .collect(),
+                    cell: match &desc.cell {
+                        RnnCellIr::Lstm(c) => RnnCellIr::Lstm(c.to_relative(converter)),
+                        RnnCellIr::Gru => RnnCellIr::Gru,
+                    },
+                    size: desc.size.clone(),
+                    gates_grad: desc.gates_grad.to_relative(converter),
                 })
             }
         }

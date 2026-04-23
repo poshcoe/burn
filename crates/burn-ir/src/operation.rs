@@ -1,3 +1,4 @@
+use core::fmt::Debug;
 use core::hash::Hash;
 use core::ops::Range;
 use serde::{Deserialize, Serialize};
@@ -8,6 +9,7 @@ use alloc::{string::String, vec, vec::Vec};
 
 use burn_tensor::{
     DType, Distribution, Element,
+    ops::rnn::RnnSize,
     ops::{
         ConvOptions, ConvTransposeOptions, DeformConvOptions, InterpolateMode, InterpolateOptions,
     },
@@ -193,10 +195,10 @@ pub enum ModuleOperationIr {
     Interpolate(InterpolateOpIr),
     /// Operation corresponding to [interpolate backward](burn_tensor::ops::ModuleOps::interpolate_backward).
     InterpolateBackward(InterpolateBackwardOpIr),
-    /// Operation corresponding to [lstm](burn_tensor::ops::ModuleOps::lstm).
-    Lstm(LstmOpIr),
-    /// Operation corresponding to [lstm_states_backward](burn_tensor::ops::ModuleOps::lstm_states_backward).
-    LstmStatesBackward(LstmStatesBackwardOpIr),
+    /// Operation corresponding to [rnn](burn_tensor::ops::rnn::RnnOps::rnn).
+    Rnn(RnnOpIr),
+    /// Operation corresponding to [rnn_gates_backward](burn_tensor::ops::rnn::RnnOps::rnn_gates_backward).
+    RnnGatesBackward(RnnGatesBackwardOpIr),
 }
 
 /// Basic operations that can be done on any tensor type.
@@ -1386,31 +1388,42 @@ pub struct InterpolateBackwardOpIr {
 
 #[derive(Clone, Debug, Hash, PartialEq, Serialize, Deserialize)]
 #[allow(missing_docs)]
-pub struct LstmOpIr {
-    pub input: TensorIr,
-    pub hidden_state: TensorIr,
-    pub cell_state: TensorIr,
-    pub input_weights: TensorIr,
-    pub recurrent_weights: TensorIr,
-    pub biases: Option<TensorIr>,
-    pub size: [usize; 4],
-    pub tracked: bool,
-    pub hidden_states: TensorIr,
-    pub cell_states: TensorIr,
-    pub cache: Option<TensorIr>,
+pub enum RnnCellIr {
+    Lstm(TensorIr),
+    Gru,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Serialize, Deserialize)]
 #[allow(missing_docs)]
-pub struct LstmStatesBackwardOpIr {
+pub struct RnnTrajectoryIr {
+    pub traj: TensorIr,
+    pub hidden_state: TensorIr,
+    pub cell: RnnCellIr,
+    pub cache: Option<Vec<TensorIr>>,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Serialize, Deserialize)]
+#[allow(missing_docs)]
+pub struct RnnOpIr {
+    pub input: TensorIr,
+    pub hidden_state: TensorIr,
+    pub input_weights: TensorIr,
     pub recurrent_weights: TensorIr,
-    pub cell_states: TensorIr,
-    pub cache: TensorIr,
-    pub hidden_states_grad: TensorIr,
-    pub size: [usize; 4],
-    pub hidden_state_grad: TensorIr,
-    pub cell_state_grad: TensorIr,
-    pub cache_grad: TensorIr,
+    pub biases: Option<TensorIr>,
+    pub cell: RnnCellIr,
+    pub size: RnnSize,
+    pub out: RnnTrajectoryIr,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Serialize, Deserialize)]
+#[allow(missing_docs)]
+pub struct RnnGatesBackwardOpIr {
+    pub recurrent_weights: TensorIr,
+    pub traj_grad: TensorIr,
+    pub cache: Vec<TensorIr>,
+    pub cell: RnnCellIr,
+    pub size: RnnSize,
+    pub gates_grad: TensorIr,
 }
 
 impl OperationIr {
@@ -2220,33 +2233,37 @@ impl ModuleOperationIr {
             ModuleOperationIr::InterpolateBackward(repr) => {
                 vec![&repr.x, &repr.out, &repr.grad]
             }
-            ModuleOperationIr::Lstm(repr) => {
-                if let Some(b) = &repr.biases {
-                    vec![
-                        &repr.input,
-                        &repr.hidden_state,
-                        &repr.cell_state,
-                        &repr.input_weights,
-                        &repr.recurrent_weights,
-                        b,
-                    ]
-                } else {
-                    vec![
-                        &repr.input,
-                        &repr.hidden_state,
-                        &repr.cell_state,
-                        &repr.input_weights,
-                        &repr.recurrent_weights,
-                    ]
-                }
-            }
-            ModuleOperationIr::LstmStatesBackward(repr) => {
-                vec![
+            ModuleOperationIr::Rnn(repr) => {
+                let mut nodes = vec![
+                    &repr.input,
+                    &repr.hidden_state,
+                    &repr.input_weights,
                     &repr.recurrent_weights,
-                    &repr.cell_states,
-                    &repr.cache,
-                    &repr.hidden_states_grad,
-                ]
+                    &repr.out.traj,
+                    &repr.out.hidden_state,
+                ];
+                match &repr.cell {
+                    RnnCellIr::Lstm(c_inp) => {
+                        nodes.push(c_inp);
+                        let RnnCellIr::Lstm(c_out) = &repr.out.cell else {
+                            panic!()
+                        };
+                        nodes.push(c_out);
+                    }
+                    RnnCellIr::Gru => {}
+                }
+                if let Some(b) = &repr.biases {
+                    nodes.push(b);
+                }
+                if let Some(v) = repr.out.cache.as_ref() {
+                    nodes.extend(v);
+                }
+                nodes
+            }
+            ModuleOperationIr::RnnGatesBackward(repr) => {
+                let mut nodes = vec![&repr.recurrent_weights, &repr.traj_grad, &repr.gates_grad];
+                nodes.extend(&repr.cache);
+                nodes
             }
         }
     }
@@ -2399,20 +2416,25 @@ impl ModuleOperationIr {
                 repr.x.mark_read_only(nodes, &mut output);
                 repr.grad.mark_read_only(nodes, &mut output);
             }
-            ModuleOperationIr::Lstm(repr) => {
+            ModuleOperationIr::Rnn(repr) => {
                 repr.input.mark_read_only(nodes, &mut output);
                 repr.hidden_state.mark_read_only(nodes, &mut output);
-                repr.cell_state.mark_read_only(nodes, &mut output);
+                match &mut repr.cell {
+                    RnnCellIr::Lstm(c) => c.mark_read_only(nodes, &mut output),
+                    RnnCellIr::Gru => {}
+                }
                 repr.input_weights.mark_read_only(nodes, &mut output);
                 repr.recurrent_weights.mark_read_only(nodes, &mut output);
                 repr.biases
                     .as_mut()
                     .map(|b| b.mark_read_only(nodes, &mut output));
             }
-            ModuleOperationIr::LstmStatesBackward(repr) => {
+            ModuleOperationIr::RnnGatesBackward(repr) => {
                 repr.recurrent_weights.mark_read_only(nodes, &mut output);
-                repr.cell_states.mark_read_only(nodes, &mut output);
-                repr.hidden_states_grad.mark_read_only(nodes, &mut output);
+                repr.traj_grad.mark_read_only(nodes, &mut output);
+                for v in &mut repr.cache {
+                    v.mark_read_only(nodes, &mut output);
+                }
             }
         };
 

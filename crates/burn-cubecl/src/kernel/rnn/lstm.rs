@@ -90,8 +90,9 @@ fn lstm_elemwise_kernel<E: Float>(
     let s_inp_idx = s_idx + (seq_i * seq_stride);
     let s_out_idx = s_inp_idx + seq_stride;
     // transition and store states
-    c_out[s_out_idx] = fg * c_out[s_inp_idx] + ig * cg;
-    h_out[s_out_idx] = og * Line::tanh(c_out[s_out_idx]);
+    let c_out_t = fg * c_out[s_inp_idx] + ig * cg;
+    h_out[s_out_idx] = og * Line::tanh(c_out_t);
+    c_out[s_out_idx] = c_out_t;
 }
 
 /// Type containing LSTM output hidden states, cell states and optional cache for backprop
@@ -139,7 +140,7 @@ pub fn lstm<R: CubeRuntime, E: FloatElement>(
                 c_out.as_array_arg::<E>(line_size),
                 iwx_b.as_array_arg::<E>(line_size),
                 rwh.as_array_arg::<E>(line_size),
-                // reuse wx_b as cache
+                // reuse iwx_b as cache
                 iwx_b.as_array_arg::<E>(line_size),
                 ScalarArg::new(i as u32),
                 bat_d as u32,

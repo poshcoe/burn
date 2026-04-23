@@ -2,8 +2,9 @@ use crate as burn;
 use crate::config::Config;
 use crate::module::{Module, Param};
 use crate::nn::Initializer;
+use crate::tensor::Tensor;
 use crate::tensor::backend::Backend;
-use crate::tensor::{Tensor, s};
+use crate::tensor::ops::rnn::RnnSize;
 
 /// An LstmState is used to store cell state and hidden state in LSTM.
 #[derive(new, Module, Debug)]
@@ -151,20 +152,17 @@ impl<B: Backend> Lstm<B> {
             inp_d, self.d_input,
             "input tensor must be of shape [.., .., d_input]"
         );
-        let size = [seq_d, bat_d, inp_d, self.d_hidden];
-        // forward
-        let (hidden_states, cell_states) = crate::tensor::module::lstm(
+        let size = RnnSize::new(seq_d, bat_d, inp_d, self.d_hidden);
+        // forward RNN in LSTM mode
+        let (out, hidden, cell) = crate::tensor::module::lstm(
             input,
             state.hidden,
             state.cell,
             self.input_weights.val(),
             self.recurrent_weights.val(),
             self.biases.as_ref().map(|b| b.val()),
-            size,
+            &size,
         );
-        let out = hidden_states.clone().slice(s![1.., .., ..]);
-        let hidden = hidden_states.slice(s![-1, .., ..]);
-        let cell = cell_states.slice(s![-1, .., ..]);
         (out, LstmState { hidden, cell })
     }
 }

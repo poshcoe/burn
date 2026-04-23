@@ -2,11 +2,12 @@
 mod tests {
     use super::*;
     use burn_tensor::ops::FloatElem;
+    use burn_tensor::ops::rnn::{RnnCell, RnnSize};
     use burn_tensor::{TensorData, Tolerance, s};
 
     type FT = FloatElem<TestBackend>;
 
-    pub const SEQ_D: usize = 2;
+    const SEQ_D: usize = 2;
     const BAT_D: usize = 4;
     const INP_D: usize = 3;
     const HID_D: usize = 2;
@@ -90,16 +91,15 @@ mod tests {
             .to_data();
         let expected_biases_grad = TensorData::from(BIASES_G);
         // run lstm under test
-        let (hidden_states, cell_states) = burn_tensor::module::lstm(
+        let (out, _hidden, _cell) = burn_tensor::module::lstm(
             input,
             hidden.clone(),
             cell.clone(),
             input_weights.clone(),
             recurrent_weights.clone(),
             biases.clone(),
-            [SEQ_D, BAT_D, INP_D, HID_D],
+            &RnnSize::new(SEQ_D, BAT_D, INP_D, HID_D),
         );
-        let out = hidden_states.slice(s![1.., .., ..]);
         // backprop with dummy loss
         let grads = out.mean().backward();
         let input_weights_grad = input_weights.grad(&grads).unwrap();

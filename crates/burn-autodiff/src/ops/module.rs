@@ -7,7 +7,7 @@ use crate::ops::{Backward, Ops, unary};
 use crate::tensor::AutodiffTensor;
 
 use burn_tensor::backend::Backend;
-use burn_tensor::ops::rnn::lstm::{LstmOut, LstmStateGrads};
+use burn_tensor::ops::rnn::{RnnCell, RnnOps, RnnSize, RnnTrajectory};
 use burn_tensor::ops::*;
 
 use super::OpsKind;
@@ -1663,97 +1663,87 @@ impl<B: Backend, C: CheckpointStrategy> ModuleOps<Autodiff<B, C>> for Autodiff<B
     ) -> <Autodiff<B> as Backend>::FloatTensorPrimitive {
         panic!("Can't differentiate interpolate backward.");
     }
+}
 
-    fn lstm(
+impl<B: Backend, C: CheckpointStrategy> RnnOps<Autodiff<B, C>> for Autodiff<B, C> {
+    fn rnn(
         input: FloatTensor<Autodiff<B, C>>,
         hidden_state: FloatTensor<Autodiff<B, C>>,
-        cell_state: FloatTensor<Autodiff<B, C>>,
         input_weights: FloatTensor<Autodiff<B, C>>,
         recurrent_weights: FloatTensor<Autodiff<B, C>>,
         biases: Option<FloatTensor<Autodiff<B, C>>>,
-        size: [usize; 4],
-        _tracked: bool,
-    ) -> LstmOut<Autodiff<B, C>> {
+        cell: RnnCell<Autodiff<B, C>>,
+        size: &RnnSize,
+    ) -> RnnTrajectory<Autodiff<B, C>> {
         #[derive(Debug)]
-        struct Lstm;
+        struct Rnn;
 
-        impl<B: Backend> Backward<B, 6> for Lstm {
-            type State = ([NodeID; 3], [usize; 4], LstmOut<B>);
+        impl<B: Backend> Backward<B, 4> for Rnn {
+            type State = ([NodeID; 3], RnnSize, RnnTrajectory<B>);
 
             fn backward(
                 self,
-                ops: Ops<Self::State, 6>,
+                ops: Ops<Self::State, 4>,
                 grads: &mut Gradients,
                 checkpointer: &mut Checkpointer,
             ) {
                 let [
                     input_node,
-                    hidden_state_node,
-                    cell_state_node,
                     input_weights_node,
                     recurrent_weights_node,
                     biases_node,
                 ] = ops.parents;
-                // get output hidden states grad
-                let out_hidden_states_grad = grads.consume::<B>(&ops.node);
                 let ([x, iw, rw], size, out) = ops.state;
-                // calculate gradients for states and cache
+                // get output trajectory grad (stacked hidden states)
+                let traj_grad = grads.consume::<B>(&ops.node);
+                // calculate base gate activation gradients
                 let recurrent_weights =
                     checkpointer.retrieve_node_output::<B::FloatTensorPrimitive>(rw);
-                let LstmStateGrads {
-                    hidden_state_grad,
-                    cell_state_grad,
-                    cache_grad,
-                } = B::lstm_states_backward(
+                let gates_grad = B::rnn_gates_backward(
                     recurrent_weights,
-                    out.cell_states,
+                    traj_grad,
                     out.cache.unwrap(),
-                    out_hidden_states_grad,
-                    size,
+                    out.cell,
+                    &size,
                 );
                 // finalize input gradient
                 if let Some(node) = input_node {
                     let input_weights =
                         checkpointer.retrieve_node_output::<B::FloatTensorPrimitive>(iw);
-                    let input_grad = B::lstm_input_backward(input_weights, cache_grad.clone());
+                    let input_grad = B::rnn_input_backward(input_weights, gates_grad.clone());
                     grads.register::<B>(node.id, input_grad);
-                }
-                if let Some(node) = hidden_state_node {
-                    grads.register::<B>(node.id, hidden_state_grad);
-                }
-                if let Some(node) = cell_state_node {
-                    grads.register::<B>(node.id, cell_state_grad);
                 }
                 // finalize input weights gradient
                 if let Some(node) = input_weights_node {
                     let input = checkpointer.retrieve_node_output::<B::FloatTensorPrimitive>(x);
                     let input_weights_grad =
-                        B::lstm_input_weights_backward(input, cache_grad.clone(), size);
+                        B::rnn_input_weights_backward(input, gates_grad.clone(), &size);
                     grads.register::<B>(node.id, input_weights_grad)
                 }
                 // finalize recurrent weights gradient
                 if let Some(node) = recurrent_weights_node {
-                    let recurrent_weights_grad = B::lstm_recurrent_weights_backward(
-                        out.hidden_states,
-                        cache_grad.clone(),
-                        size,
-                    );
+                    let recurrent_weights_grad =
+                        B::rnn_recurrent_weights_backward(out.traj, gates_grad.clone(), &size);
                     grads.register::<B>(node.id, recurrent_weights_grad);
                 }
                 // finalize biases gradient
                 if let Some(node) = biases_node {
-                    let biases_grad = B::lstm_biases_backward(cache_grad);
+                    let biases_grad = B::rnn_biases_backward(gates_grad);
                     grads.register::<B>(node.id, biases_grad);
                 }
             }
         }
 
-        let cell_states;
-        let hidden_states = match Lstm
+        // get cell state primitives
+        let cell = match cell {
+            RnnCell::Lstm(c) => RnnCell::Lstm(c.primitive),
+            RnnCell::Gru => RnnCell::Gru,
+        };
+        let out_hidden_state;
+        let out_cell;
+        let traj = match Rnn
             .prepare::<C>([
                 input.node.clone(),
-                hidden_state.node.clone(),
-                cell_state.node.clone(),
                 input_weights.node.clone(),
                 recurrent_weights.node.clone(),
                 biases.as_ref().map(|b| b.node.clone()).unwrap_or_default(),
@@ -1767,77 +1757,44 @@ impl<B: Backend, C: CheckpointStrategy> ModuleOps<Autodiff<B, C>> for Autodiff<B
                 let iw = prep.checkpoint(&input_weights);
                 let rw = prep.checkpoint(&recurrent_weights);
                 // run forward with tracking
-                let out = B::lstm(
+                let out = B::rnn(
                     input.primitive,
                     hidden_state.primitive,
-                    cell_state.primitive,
                     input_weights.primitive,
                     recurrent_weights.primitive,
                     biases.map(|b| b.primitive),
+                    cell,
                     size,
-                    true,
                 );
                 // collect checkpoints and outputs to backprop state
-                let state = ([x, iw, rw], size, out.clone());
-                // output cell states are not included in the graph
-                cell_states = AutodiffTensor::new(out.cell_states);
-                prep.finish(state, out.hidden_states)
+                let state = ([x, iw, rw], size.clone(), out.clone());
+                out_cell = out.cell;
+                out_hidden_state = out.hidden_state;
+                prep.finish(state, out.traj)
             }
             OpsKind::UnTracked(prep) => {
                 // run forward without tracking
-                let out = B::lstm(
+                let out = B::rnn(
                     input.primitive,
                     hidden_state.primitive,
-                    cell_state.primitive,
                     input_weights.primitive,
                     recurrent_weights.primitive,
                     biases.map(|b| b.primitive),
+                    cell,
                     size,
-                    false,
                 );
-                cell_states = AutodiffTensor::new(out.cell_states);
-                prep.finish(out.hidden_states)
+                out_cell = out.cell;
+                out_hidden_state = out.hidden_state;
+                prep.finish(out.traj)
             }
         };
-        LstmOut {
-            hidden_states,
-            cell_states,
-            cache: None,
-        }
-    }
-    fn lstm_states_backward(
-        _recurrent_weights: FloatTensor<Autodiff<B, C>>,
-        _cell_states: FloatTensor<Autodiff<B, C>>,
-        _cache: FloatTensor<Autodiff<B, C>>,
-        _hidden_states_grad: FloatTensor<Autodiff<B, C>>,
-        _size: [usize; 4],
-    ) -> LstmStateGrads<Autodiff<B, C>> {
-        panic!("Cannot differentiate lstm states backward");
-    }
-    fn lstm_input_backward(
-        _input_weights: FloatTensor<Autodiff<B, C>>,
-        _cache_grad: FloatTensor<Autodiff<B, C>>,
-    ) -> FloatTensor<Autodiff<B, C>> {
-        panic!("Cannot differentiate lstm input backward");
-    }
-    fn lstm_input_weights_backward(
-        _input: FloatTensor<Autodiff<B, C>>,
-        _cache_grad: FloatTensor<Autodiff<B, C>>,
-        _size: [usize; 4],
-    ) -> FloatTensor<Autodiff<B, C>> {
-        panic!("Cannot differentiate lstm input weights backward");
-    }
-    fn lstm_recurrent_weights_backward(
-        _hidden_states: FloatTensor<Autodiff<B, C>>,
-        _cache_grad: FloatTensor<Autodiff<B, C>>,
-        _size: [usize; 4],
-    ) -> FloatTensor<Autodiff<B, C>> {
-        panic!("Cannot differentiate lstm recurrent weights backward");
-    }
-    fn lstm_biases_backward(
-        _cache_grad: FloatTensor<Autodiff<B, C>>,
-    ) -> FloatTensor<Autodiff<B, C>> {
-        panic!("Cannot differentiate lstm biases backward");
+        // final states as leaf tensors
+        let out_hidden_state = AutodiffTensor::new(out_hidden_state);
+        let out_cell = match out_cell {
+            RnnCell::Lstm(c) => RnnCell::Lstm(AutodiffTensor::new(c)),
+            RnnCell::Gru => RnnCell::Gru,
+        };
+        RnnTrajectory::new(traj, out_hidden_state, out_cell, None)
     }
 }
 

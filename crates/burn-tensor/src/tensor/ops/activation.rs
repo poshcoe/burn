@@ -281,4 +281,38 @@ pub trait ActivationOps<B: Backend> {
             ),
         )
     }
+
+    /// Applies the Tanh activation function.
+    ///
+    /// # Arguments
+    ///
+    /// * `tensor` - The tensor.
+    ///
+    /// # Returns
+    ///
+    /// The output tensor.
+    fn tanh(tensor: FloatTensor<B>) -> FloatTensor<B> {
+        B::float_tanh(tensor)
+    }
+
+    /// Applies the Tanh activation function backward.
+    ///
+    /// # Arguments
+    ///
+    /// * `output` - The output tensor of the tanh function.
+    /// * `grad` - The gradient.
+    ///
+    /// # Returns
+    ///
+    /// The output tensor.
+    fn tanh_backward(output: FloatTensor<B>, grad: FloatTensor<B>) -> FloatTensor<B> {
+        B::float_mul(
+            grad,
+            // tanh'(x) = 1 - tanh^2(x)
+            B::float_add_scalar(
+                B::float_neg(B::float_powi_scalar(output, 2.elem())),
+                1.0.elem(),
+            ),
+        )
+    }
 }

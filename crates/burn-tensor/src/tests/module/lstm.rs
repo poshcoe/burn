@@ -3,6 +3,7 @@ mod tests {
     use super::*;
     use burn_tensor::TensorData;
     use burn_tensor::ops::FloatElem;
+    use burn_tensor::ops::rnn::{RnnCell, RnnSize};
 
     type FT = FloatElem<TestBackend>;
 
@@ -79,34 +80,29 @@ mod tests {
         let input_weights = TestTensor::<3>::from(INPUT_WEIGHTS_T).transpose();
         let recurrent_weights = TestTensor::<3>::from(RECURRENT_WEIGHTS_T).transpose();
         let biases = Some(TestTensor::<3>::from(BIASES));
-        let cell = TestTensor::<3>::from([[[0.; HID_D]; BAT_D]; 1]);
-        let hidden = TestTensor::<3>::from([[[0.; HID_D]; BAT_D]; 1]);
+        let cell_state = TestTensor::<3>::from([[[0.; HID_D]; BAT_D]; 1]);
+        let hidden_state = TestTensor::<3>::from([[[0.; HID_D]; BAT_D]; 1]);
         let expected_output = TensorData::from(OUT);
         let expected_cell = TensorData::from(CELL);
         let expected_hidden = TensorData::from(HIDDEN);
         // test forward pass
-        let (hidden_states, cell_states) = burn_tensor::module::lstm(
+        let (out, hidden_state, cell_state) = burn_tensor::module::lstm(
             input,
-            hidden.clone(),
-            cell.clone(),
+            hidden_state.clone(),
+            cell_state.clone(),
             input_weights.clone(),
             recurrent_weights.clone(),
             biases.clone(),
-            [SEQ_D, BAT_D, INP_D, HID_D],
+            &RnnSize::new(SEQ_D, BAT_D, INP_D, HID_D),
         );
-        let output = hidden_states
-            .clone()
-            .slice([1..SEQ_D + 1, 0..BAT_D, 0..HID_D]);
-        let hidden = hidden_states.slice([SEQ_D..SEQ_D + 1, 0..BAT_D, 0..HID_D]);
-        let cell = cell_states.slice([SEQ_D..SEQ_D + 1, 0..BAT_D, 0..HID_D]);
         // check forward results
-        output
-            .to_data()
+        out.to_data()
             .assert_approx_eq::<FT>(&expected_output, Default::default());
-        hidden
+        hidden_state
             .to_data()
             .assert_approx_eq::<FT>(&expected_hidden, Default::default());
-        cell.to_data()
+        cell_state
+            .to_data()
             .assert_approx_eq::<FT>(&expected_cell, Default::default());
     }
 }

@@ -1,10 +1,9 @@
-use crate::{
-    Int, Tensor, TensorPrimitive,
-    backend::Backend,
-    check,
-    check::TensorCheck,
-    ops::{ConvOptions, ConvTransposeOptions, InterpolateOptions, UnfoldOptions},
-};
+use crate::backend::Backend;
+use crate::check;
+use crate::check::TensorCheck;
+use crate::ops::rnn::{RnnCell, RnnSize};
+use crate::ops::{ConvOptions, ConvTransposeOptions, InterpolateOptions, UnfoldOptions};
+use crate::{Int, Tensor, TensorPrimitive};
 
 use super::ops::DeformConvOptions;
 
@@ -395,7 +394,11 @@ pub fn linear<B: Backend, const D: usize>(
     )))
 }
 
-/// Run an [LSTM forward](crate::ops::ModuleOps::lstm)
+/// Run an [RNN forward](crate::ops::ModuleOps::rnn) in LSTM mode
+///
+/// # Returns:
+///
+/// Tuple of `(output, hidden_state, cell_state)`
 pub fn lstm<B: Backend>(
     input: Tensor<B, 3>,
     hidden_state: Tensor<B, 3>,
@@ -403,20 +406,25 @@ pub fn lstm<B: Backend>(
     input_weights: Tensor<B, 3>,
     recurrent_weights: Tensor<B, 3>,
     biases: Option<Tensor<B, 3>>,
-    size: [usize; 4],
-) -> (Tensor<B, 3>, Tensor<B, 3>) {
-    let out = B::lstm(
+    size: &RnnSize,
+) -> (Tensor<B, 3>, Tensor<B, 3>, Tensor<B, 3>) {
+    // RNN forward in LSTM mode
+    let out = B::rnn(
         input.primitive.tensor(),
         hidden_state.primitive.tensor(),
-        cell_state.primitive.tensor(),
         input_weights.primitive.tensor(),
         recurrent_weights.primitive.tensor(),
         biases.map(|b| b.primitive.tensor()),
+        RnnCell::Lstm(cell_state.primitive.tensor()),
         size,
-        false,
     );
+    let RnnCell::Lstm(out_cell_state) = out.cell else {
+        panic!("LSTM cell given but not returned.")
+    };
     (
-        Tensor::new(TensorPrimitive::Float(out.hidden_states)),
-        Tensor::new(TensorPrimitive::Float(out.cell_states)),
+        // output excludes first state in the trajectory (initial state)
+        Tensor::new(TensorPrimitive::Float(out.traj)),
+        Tensor::new(TensorPrimitive::Float(out.hidden_state)),
+        Tensor::new(TensorPrimitive::Float(out_cell_state)),
     )
 }

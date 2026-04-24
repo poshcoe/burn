@@ -2,8 +2,10 @@ use core::marker::PhantomData;
 use std::sync::Arc;
 
 use super::state::{FormatOptions, NumericMetricState};
-use super::{MetricEntry, MetricMetadata};
-use crate::metric::{Metric, MetricName, Numeric};
+use super::{MetricMetadata, SerializedEntry};
+use crate::metric::{
+    Metric, MetricAttributes, MetricName, Numeric, NumericAttributes, NumericEntry,
+};
 use burn_core::tensor::backend::Backend;
 use burn_core::tensor::{ElementConversion, Int, Tensor};
 
@@ -50,7 +52,11 @@ impl<B: Backend> TopKAccuracyMetric<B> {
 impl<B: Backend> Metric for TopKAccuracyMetric<B> {
     type Input = TopKAccuracyInput<B>;
 
-    fn update(&mut self, input: &TopKAccuracyInput<B>, _metadata: &MetricMetadata) -> MetricEntry {
+    fn update(
+        &mut self,
+        input: &TopKAccuracyInput<B>,
+        _metadata: &MetricMetadata,
+    ) -> SerializedEntry {
         let [batch_size, _n_classes] = input.outputs.dims();
 
         let targets = input.targets.clone().to_device(&B::Device::default());
@@ -97,11 +103,23 @@ impl<B: Backend> Metric for TopKAccuracyMetric<B> {
     fn name(&self) -> MetricName {
         self.name.clone()
     }
+
+    fn attributes(&self) -> MetricAttributes {
+        NumericAttributes {
+            unit: Some("%".to_string()),
+            higher_is_better: true,
+        }
+        .into()
+    }
 }
 
 impl<B: Backend> Numeric for TopKAccuracyMetric<B> {
-    fn value(&self) -> super::NumericEntry {
-        self.state.value()
+    fn value(&self) -> NumericEntry {
+        self.state.current_value()
+    }
+
+    fn running_value(&self) -> NumericEntry {
+        self.state.running_value()
     }
 }
 

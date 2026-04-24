@@ -1,10 +1,13 @@
-use crate::PeerId;
-use burn_tensor::backend::{Backend, DeviceOps};
-use std::collections::HashMap;
+use crate::{PeerId, local::tensor_map::CollectiveTensorMap};
+use burn_backend::{Backend, DeviceOps};
 
 /// Performs a reduce on the provided tensors in a b-tree structure with `arity`.
+#[cfg_attr(
+    feature = "tracing",
+    tracing::instrument(level = "trace", skip(tensors))
+)]
 pub(crate) fn reduce_sum_tree<B: Backend>(
-    mut tensors: HashMap<PeerId, B::FloatTensorPrimitive>,
+    mut tensors: CollectiveTensorMap<B>,
     root: &PeerId,
     arity: u32,
 ) -> B::FloatTensorPrimitive {
@@ -32,6 +35,10 @@ pub(crate) fn reduce_sum_tree<B: Backend>(
 ///
 /// Traverses `tensors` and reduces in a post-order traversal. The first tensor in the list is
 /// chosen as the root
+#[cfg_attr(
+    feature = "tracing",
+    tracing::instrument(level = "trace", skip(tensors))
+)]
 fn reduce_sum_tree_inner<B: Backend>(
     mut tensors: Vec<B::FloatTensorPrimitive>,
     arity: u32,

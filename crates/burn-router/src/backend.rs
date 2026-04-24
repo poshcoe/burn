@@ -1,12 +1,7 @@
+use super::{RouterTensor, RunnerChannel, RunnerClient, get_client};
 use alloc::{format, string::String};
+use burn_backend::{Backend, DType, ExecutionError, QTensorPrimitive, quantization::QuantScheme};
 use core::marker::PhantomData;
-
-use burn_tensor::{
-    backend::Backend,
-    quantization::{QTensorPrimitive, QuantScheme},
-};
-
-use super::{RouterTensor, RunnerChannel, RunnerClient, get_client, set_seed};
 
 /// A backend that forwards the tensor operations to the appropriate backend (given multiple backends).
 pub struct BackendRouter<R: RunnerChannel> {
@@ -31,10 +26,14 @@ impl<R: RunnerChannel> Default for BackendRouter<R> {
     }
 }
 
-// TODO: quantization tensor primitive (w/ qparams)
 impl<R: RunnerClient> QTensorPrimitive for RouterTensor<R> {
     fn scheme(&self) -> &QuantScheme {
-        todo!()
+        if let DType::QFloat(scheme) = &self.dtype {
+            scheme
+        } else {
+            // TODO: maybe `tensor.scheme()` should return an option
+            panic!("Expected quantized float dtype, got {:?}", self.dtype)
+        }
     }
 }
 
@@ -55,18 +54,27 @@ impl<R: RunnerChannel> Backend for BackendRouter<R> {
 
     type QuantizedTensorPrimitive = RouterTensor<R::Client>;
 
-    type QuantizedEncoding = u32;
-
     fn name(device: &Self::Device) -> String {
         format!("router<{}>", R::name(device))
     }
 
-    fn seed(seed: u64) {
-        set_seed(seed)
+    fn seed(device: &Self::Device, seed: u64) {
+        let client = get_client::<R>(device);
+        client.seed(seed);
     }
 
-    fn sync(device: &Self::Device) {
+    fn sync(device: &Self::Device) -> Result<(), ExecutionError> {
         let client = get_client::<R>(device);
-        client.sync();
+        client.sync()
+    }
+
+    fn dtype_usage(device: &Self::Device, dtype: DType) -> burn_backend::DTypeUsageSet {
+        let client = get_client::<R>(device);
+        client.dtype_usage(dtype)
+    }
+
+    fn device_count(_: u16) -> usize {
+        // This is what was there before, not sure if it's actually correct
+        1
     }
 }

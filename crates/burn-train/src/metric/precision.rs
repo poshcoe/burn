@@ -1,7 +1,7 @@
-use crate::metric::MetricName;
+use crate::metric::{MetricName, Numeric};
 
 use super::{
-    Metric, MetricEntry, MetricMetadata, Numeric,
+    Metric, MetricAttributes, MetricMetadata, NumericAttributes, NumericEntry, SerializedEntry,
     classification::{ClassReduction, ClassificationMetricConfig, DecisionRule},
     confusion_stats::{ConfusionStats, ConfusionStatsInput},
     state::{FormatOptions, NumericMetricState},
@@ -105,7 +105,7 @@ impl<B: Backend> PrecisionMetric<B> {
                     let nan_mask = aggregated_metric.clone().is_nan();
                     aggregated_metric = aggregated_metric
                         .clone()
-                        .select(0, nan_mask.bool_not().argwhere().squeeze(1))
+                        .select(0, nan_mask.bool_not().argwhere().squeeze_dim(1))
                 }
                 aggregated_metric.mean()
             }
@@ -117,7 +117,7 @@ impl<B: Backend> PrecisionMetric<B> {
 impl<B: Backend> Metric for PrecisionMetric<B> {
     type Input = ConfusionStatsInput<B>;
 
-    fn update(&mut self, input: &Self::Input, _metadata: &MetricMetadata) -> MetricEntry {
+    fn update(&mut self, input: &Self::Input, _metadata: &MetricMetadata) -> SerializedEntry {
         let [sample_size, _] = input.predictions.dims();
 
         let cf_stats = ConfusionStats::new(input, &self.config);
@@ -138,11 +138,23 @@ impl<B: Backend> Metric for PrecisionMetric<B> {
     fn name(&self) -> MetricName {
         self.name.clone()
     }
+
+    fn attributes(&self) -> MetricAttributes {
+        NumericAttributes {
+            unit: Some("%".to_string()),
+            higher_is_better: true,
+        }
+        .into()
+    }
 }
 
 impl<B: Backend> Numeric for PrecisionMetric<B> {
-    fn value(&self) -> super::NumericEntry {
-        self.state.value()
+    fn value(&self) -> NumericEntry {
+        self.state.current_value()
+    }
+
+    fn running_value(&self) -> NumericEntry {
+        self.state.running_value()
     }
 }
 
@@ -150,8 +162,9 @@ impl<B: Backend> Numeric for PrecisionMetric<B> {
 mod tests {
     use super::{
         ClassReduction::{self, *},
-        Metric, MetricMetadata, Numeric, PrecisionMetric,
+        Metric, MetricMetadata, PrecisionMetric,
     };
+    use crate::metric::Numeric;
     use crate::{
         TestBackend,
         tests::{ClassificationType, THRESHOLD, dummy_classification_input},

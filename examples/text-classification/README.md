@@ -29,7 +29,7 @@ cd burn
 # Use the --release flag to really speed up training.
 # Use the f16 feature if your CUDA device supports FP16 (half precision) operations. May not work well on every device.
 
-export TORCH_CUDA_VERSION=cu124  # Set the cuda version (CUDA users)
+export TORCH_CUDA_VERSION=cu128  # Set the cuda version (CUDA users)
 
 # AG News
 cargo run --example ag-news-train --release --features tch-gpu   # Train on the ag news dataset
@@ -57,7 +57,7 @@ cargo run --example db-pedia-train --release --features tch-cpu  # Train on the 
 cargo run --example db-pedia-infer --release --features tch-cpu  # Run inference db pedia dataset
 ```
 
-## ndarray backend
+## Flex backend
 
 ```bash
 git clone https://github.com/tracel-ai/burn.git
@@ -65,15 +65,13 @@ cd burn
 
 # Use the --release flag to really speed up training.
 
-# Replace ndarray by ndarray-blas-netlib, ndarray-blas-openblas or ndarray-blas-accelerate for different matmul techniques
-
 # AG News
-cargo run --example ag-news-train --release --features ndarray   # Train on the ag news dataset
-cargo run --example ag-news-infer --release --features ndarray   # Run inference on the ag news dataset
+cargo run --example ag-news-train --release --features flex   # Train on the ag news dataset
+cargo run --example ag-news-infer --release --features flex   # Run inference on the ag news dataset
 
 # DbPedia
-cargo run --example db-pedia-train --release --features ndarray  # Train on the db pedia dataset
-cargo run --example db-pedia-infer --release --features ndarray  # Run inference db pedia dataset
+cargo run --example db-pedia-train --release --features flex  # Train on the db pedia dataset
+cargo run --example db-pedia-infer --release --features flex  # Run inference db pedia dataset
 ```
 
 ## WGPU backend

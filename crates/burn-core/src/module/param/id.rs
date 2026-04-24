@@ -1,7 +1,7 @@
 use core::hash::{BuildHasher, Hasher};
 
 use alloc::string::String;
-use burn_common::id::IdGenerator;
+use burn_std::id::IdGenerator;
 use data_encoding::BASE32_DNSSEC;
 
 // Hashbrown changed its default hasher in 0.15, but there are some issues
@@ -9,7 +9,7 @@ use data_encoding::BASE32_DNSSEC;
 // Also, `param_serde_deserialize_legacy_uuid` doesn't pass with the default hasher.
 type DefaultHashBuilder = core::hash::BuildHasherDefault<ahash::AHasher>;
 
-/// Parameter ID.
+/// Unique ID for a parameter of a module.
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy, PartialOrd, Ord)]
 pub struct ParamId {
     value: u64,

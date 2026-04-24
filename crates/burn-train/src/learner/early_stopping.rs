@@ -54,12 +54,13 @@ pub struct MetricEarlyStoppingStrategy {
     split: Split,
     best_epoch: usize,
     best_value: f64,
+    warmup_epochs: Option<usize>,
 }
 
 impl EarlyStoppingStrategy for MetricEarlyStoppingStrategy {
     fn should_stop(&mut self, epoch: usize, store: &EventStoreClient) -> bool {
         let current_value =
-            match store.find_metric(&self.metric_name, epoch, self.aggregate, self.split) {
+            match store.find_metric(&self.metric_name, epoch, self.aggregate, &self.split) {
                 Some(value) => value,
                 None => {
                     log::warn!("Can't find metric for early stopping.");
@@ -81,6 +82,12 @@ impl EarlyStoppingStrategy for MetricEarlyStoppingStrategy {
             );
             self.best_value = current_value;
             self.best_epoch = epoch;
+            return false;
+        }
+
+        if let Some(warmup_epochs) = self.warmup_epochs
+            && epoch <= warmup_epochs
+        {
             return false;
         }
 
@@ -134,6 +141,27 @@ impl MetricEarlyStoppingStrategy {
             split,
             best_epoch: 1,
             best_value: init_value,
+            warmup_epochs: None,
+        }
+    }
+
+    /// Get the warmup period.
+    ///
+    /// Early stopping will not trigger during the warmup epochs.
+    pub fn warmup_epochs(&self) -> Option<usize> {
+        self.warmup_epochs
+    }
+
+    /// Set the warmup epochs.
+    ///
+    /// Early stopping will not trigger during the warmup epochs.
+    ///
+    /// # Arguments
+    /// - `warmup`: the number of warmup epochs, or None.
+    pub fn with_warmup_epochs(self, warmup: Option<usize>) -> Self {
+        Self {
+            warmup_epochs: warmup,
+            ..self
         }
     }
 }
@@ -143,7 +171,7 @@ mod tests {
     use std::sync::Arc;
 
     use crate::{
-        TestBackend,
+        EventProcessorTraining, TestBackend,
         logger::InMemoryMetricLogger,
         metric::{
             LossMetric,
@@ -160,6 +188,7 @@ mod tests {
     #[test]
     fn never_early_stop_while_it_is_improving() {
         test_early_stopping(
+            None,
             1,
             &[
                 (&[0.5, 0.3], false, "Should not stop first epoch"),
@@ -173,6 +202,7 @@ mod tests {
     #[test]
     fn early_stop_when_no_improvement_since_two_epochs() {
         test_early_stopping(
+            None,
             2,
             &[
                 (&[1.0, 0.5], false, "Should not stop first epoch"),
@@ -192,8 +222,27 @@ mod tests {
     }
 
     #[test]
+    fn early_stopping_with_warmup() {
+        test_early_stopping(
+            Some(3),
+            2,
+            &[
+                (&[1.0, 0.5], false, "Should not stop during warmup"),
+                (&[1.0, 0.5], false, "Should not stop during warmup"),
+                (&[1.0, 0.5], false, "Should not stop during warmup"),
+                (
+                    &[1.0, 0.5],
+                    true,
+                    "Should stop when not improving after warmup",
+                ),
+            ],
+        )
+    }
+
+    #[test]
     fn early_stop_when_stays_equal() {
         test_early_stopping(
+            None,
             2,
             &[
                 (&[0.5, 0.3], false, "Should not stop first epoch"),
@@ -211,7 +260,7 @@ mod tests {
         );
     }
 
-    fn test_early_stopping(n_epochs: usize, data: &[(&[f64], bool, &str)]) {
+    fn test_early_stopping(warmup: Option<usize>, n_epochs: usize, data: &[(&[f64], bool, &str)]) {
         let loss = LossMetric::<TestBackend>::new();
         let mut early_stopping = MetricEarlyStoppingStrategy::new(
             &loss,
@@ -219,17 +268,19 @@ mod tests {
             Direction::Lowest,
             Split::Train,
             StoppingCondition::NoImprovementSince { n_epochs },
-        );
+        )
+        .with_warmup_epochs(warmup);
         let mut store = LogEventStore::default();
         let mut metrics = MetricsTraining::<f64, f64>::default();
 
-        store.register_logger_train(InMemoryMetricLogger::default());
+        store.register_logger(InMemoryMetricLogger::default());
         metrics.register_train_metric_numeric(loss);
 
         let store = Arc::new(EventStoreClient::new(store));
         let mut processor = MinimalEventProcessor::new(metrics, store.clone());
 
         let mut epoch = 1;
+        processor.process_train(crate::LearnerEvent::Start);
         for (points, should_start, comment) in data {
             for point in points.iter() {
                 process_train(&mut processor, *point, epoch);

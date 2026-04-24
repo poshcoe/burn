@@ -12,14 +12,14 @@ type ElemType = f32;
 #[cfg(feature = "f16")]
 type ElemType = burn::tensor::f16;
 
-pub fn launch<B: AutodiffBackend>(devices: Vec<B::Device>) {
+pub fn launch<B: AutodiffBackend>(device: B::Device) {
     let config = ExperimentConfig::new(
         TransformerEncoderConfig::new(256, 1024, 8, 4).with_norm_first(true),
         AdamConfig::new().with_weight_decay(Some(WeightDecayConfig::new(5e-5))),
     );
 
     text_classification::training::train::<B, DbPediaDataset>(
-        devices,
+        burn::train::ExecutionStrategy::SingleDevice(device),
         DbPediaDataset::train(),
         DbPediaDataset::test(),
         config,
@@ -27,21 +27,13 @@ pub fn launch<B: AutodiffBackend>(devices: Vec<B::Device>) {
     );
 }
 
-#[cfg(any(
-    feature = "ndarray",
-    feature = "ndarray-blas-netlib",
-    feature = "ndarray-blas-openblas",
-    feature = "ndarray-blas-accelerate",
-))]
-mod ndarray {
-    use crate::{ElemType, launch};
-    use burn::backend::{
-        Autodiff,
-        ndarray::{NdArray, NdArrayDevice},
-    };
+#[cfg(feature = "flex")]
+mod flex {
+    use crate::launch;
+    use burn::backend::{Autodiff, Flex};
 
     pub fn run() {
-        launch::<Autodiff<NdArray<ElemType>>>(vec![NdArrayDevice::Cpu]);
+        launch::<Autodiff<Flex>>(Default::default());
     }
 }
 
@@ -60,7 +52,7 @@ mod tch_gpu {
         #[cfg(target_os = "macos")]
         let device = LibTorchDevice::Mps;
 
-        launch::<Autodiff<LibTorch<ElemType>>>(vec![device]);
+        launch::<Autodiff<LibTorch<ElemType>>>(device);
     }
 }
 
@@ -74,7 +66,7 @@ mod tch_cpu {
     use crate::{ElemType, launch};
 
     pub fn run() {
-        launch::<Autodiff<LibTorch<ElemType>>>(vec![LibTorchDevice::Cpu]);
+        launch::<Autodiff<LibTorch<ElemType>>>(LibTorchDevice::Cpu);
     }
 }
 
@@ -88,18 +80,13 @@ mod wgpu {
     use crate::{ElemType, launch};
 
     pub fn run() {
-        launch::<Autodiff<Wgpu<ElemType, i32>>>(vec![WgpuDevice::default()]);
+        launch::<Autodiff<Wgpu<ElemType, i32>>>(WgpuDevice::default());
     }
 }
 
 fn main() {
-    #[cfg(any(
-        feature = "ndarray",
-        feature = "ndarray-blas-netlib",
-        feature = "ndarray-blas-openblas",
-        feature = "ndarray-blas-accelerate",
-    ))]
-    ndarray::run();
+    #[cfg(feature = "flex")]
+    flex::run();
     #[cfg(feature = "tch-gpu")]
     tch_gpu::run();
     #[cfg(feature = "tch-cpu")]

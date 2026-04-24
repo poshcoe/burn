@@ -39,7 +39,7 @@ impl CheckpointingStrategy for MetricCheckpointingStrategy {
         store: &EventStoreClient,
     ) -> Vec<CheckpointingAction> {
         let best_epoch =
-            match store.find_epoch(&self.name, self.aggregate, self.direction, self.split) {
+            match store.find_epoch(&self.name, self.aggregate, self.direction, &self.split) {
                 Some(epoch_best) => epoch_best,
                 None => epoch,
             };
@@ -65,7 +65,7 @@ impl CheckpointingStrategy for MetricCheckpointingStrategy {
 #[cfg(test)]
 mod tests {
     use crate::{
-        TestBackend,
+        EventProcessorTraining, TestBackend,
         logger::InMemoryMetricLogger,
         metric::{
             LossMetric,
@@ -92,11 +92,12 @@ mod tests {
         );
         let mut metrics = MetricsTraining::<f64, f64>::default();
         // Register an in memory logger.
-        store.register_logger_train(InMemoryMetricLogger::default());
+        store.register_logger(InMemoryMetricLogger::default());
         // Register the loss metric.
         metrics.register_train_metric_numeric(loss);
         let store = Arc::new(EventStoreClient::new(store));
         let mut processor = MinimalEventProcessor::new(metrics, store.clone());
+        processor.process_train(crate::LearnerEvent::Start);
 
         // Two points for the first epoch. Mean 0.75
         let mut epoch = 1;

@@ -1,7 +1,7 @@
-use crate::metric::MetricName;
+use crate::metric::{MetricAttributes, MetricName, SerializedEntry};
 
 use super::super::{
-    Metric, MetricEntry, MetricMetadata, Numeric,
+    Metric, MetricMetadata,
     state::{FormatOptions, NumericMetricState},
 };
 use burn_core::{
@@ -120,7 +120,7 @@ impl<B: Backend, const D: usize> Metric for DiceMetric<B, D> {
         self.name.clone()
     }
 
-    fn update(&mut self, item: &Self::Input, _metadata: &MetricMetadata) -> MetricEntry {
+    fn update(&mut self, item: &Self::Input, _metadata: &MetricMetadata) -> SerializedEntry {
         // Dice coefficient: 2 * (|X ∩ Y|) / (|X| + |Y|)
         if item.outputs.dims() != item.targets.dims() {
             panic!(
@@ -171,19 +171,30 @@ impl<B: Backend, const D: usize> Metric for DiceMetric<B, D> {
     fn clear(&mut self) {
         self.state.reset();
     }
+
+    fn attributes(&self) -> MetricAttributes {
+        crate::metric::NumericAttributes {
+            unit: None,
+            higher_is_better: true,
+        }
+        .into()
+    }
 }
 
-impl<B: Backend, const D: usize> Numeric for DiceMetric<B, D> {
-    /// Returns the current value of the metric.
+impl<B: Backend, const D: usize> crate::metric::Numeric for DiceMetric<B, D> {
     fn value(&self) -> crate::metric::NumericEntry {
-        self.state.value()
+        self.state.current_value()
+    }
+
+    fn running_value(&self) -> crate::metric::NumericEntry {
+        self.state.running_value()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::TestBackend;
+    use crate::{TestBackend, metric::Numeric};
     use burn_core::tensor::{Shape, Tensor};
 
     #[test]

@@ -1,7 +1,14 @@
 use super::init_matmul_output;
-use crate::{CubeRuntime, element::MatmulElement, tensor::CubeTensor};
-use burn_tensor::{DType, quantization::QuantAcc};
-use cubecl::matmul::{MatmulInputHandleRef, components::MatmulSetupError};
+use crate::{CubeRuntime, kernel::quantization::dequantize, tensor::CubeTensor};
+use burn_backend::{DType, QTensorPrimitive};
+use burn_std::QuantLevel;
+use cubek::{
+    matmul::{
+        definition::{MatmulElems, MatmulGlobalElems, MatmulSetupError},
+        launch::Strategy,
+    },
+    std::InputBinding,
+};
 
 #[cfg(feature = "autotune")]
 use super::matmul_autotune;
@@ -27,83 +34,138 @@ impl Default for MatmulStrategy {
 }
 
 /// Launch a matmul kernel using the given strategy.
-pub fn matmul<R: CubeRuntime, E: MatmulElement>(
+pub fn matmul<R: CubeRuntime>(
     lhs: CubeTensor<R>,
     rhs: CubeTensor<R>,
     out: Option<CubeTensor<R>>,
     strategy: MatmulStrategy,
+    out_dtype: DType,
 ) -> Result<CubeTensor<R>, MatmulSetupError> {
     match strategy {
         MatmulStrategy::Cube => {
-            let out = out.unwrap_or_else(|| init_matmul_output::<R, E::EO>(&lhs, &rhs));
-
-            let client = &lhs.client;
-
-            cubecl::matmul::launch_ref::<R, E>(
-                &Default::default(),
-                client,
-                &MatmulInputHandleRef::Normal(lhs.as_handle_ref()),
-                &MatmulInputHandleRef::Normal(rhs.as_handle_ref()),
-                &out.as_handle_ref(),
-            )?;
-
+            let out = out.unwrap_or_else(|| init_matmul_output(&lhs, &rhs, out_dtype));
+            launch_matmul(&Default::default(), lhs, rhs, out.clone())?;
             Ok(out)
         }
         #[cfg(feature = "autotune")]
-        MatmulStrategy::Autotune => Ok(matmul_autotune::<R, E>(lhs, rhs, out)),
+        MatmulStrategy::Autotune => Ok(matmul_autotune(lhs, rhs, out, out_dtype)),
     }
 }
 
-/// Launch a quantized matmul kernel using the given strategy.
-pub fn q_matmul<R: CubeRuntime>(
+pub(crate) fn launch_matmul_naive<R: CubeRuntime>(
+    strategy: &Strategy,
     mut lhs: CubeTensor<R>,
     mut rhs: CubeTensor<R>,
-    out: Option<CubeTensor<R>>,
-    _strategy: MatmulStrategy,
-) -> Result<CubeTensor<R>, MatmulSetupError> {
-    let out = out.unwrap_or_else(|| init_matmul_output::<R, half::f16>(&lhs, &rhs));
-
-    let client = &lhs.client;
-
-    lhs.dtype = DType::I8;
-    rhs.dtype = DType::I8;
-
-    let lhs_scales = lhs.scales().unwrap();
-    let rhs_scales = rhs.scales().unwrap();
-
-    match QuantAcc::default() {
-        QuantAcc::F32 => {
-            cubecl::matmul::launch_ref::<R, (i8, i8, half::f16, half::f16, f32, half::f16)>(
-                &Default::default(),
-                client,
-                &MatmulInputHandleRef::Quantized {
-                    data: lhs.as_handle_ref(),
-                    scale: lhs_scales.as_handle_ref(),
-                },
-                &MatmulInputHandleRef::Quantized {
-                    data: rhs.as_handle_ref(),
-                    scale: rhs_scales.as_handle_ref(),
-                },
-                &out.as_handle_ref(),
-            )?;
+    out: CubeTensor<R>,
+) -> Result<(), MatmulSetupError> {
+    // Naive has very specific layout requirements for block scaled tensors, so we need to manually
+    // dequantize if it fails to launch normally. This is because naive is assumed to always work.
+    if lhs.qparams.is_some() || rhs.qparams.is_some() {
+        match launch_matmul(strategy, lhs.clone(), rhs.clone(), out.clone()) {
+            Err(_) => {
+                if lhs.qparams.is_some() {
+                    lhs = dequantize(lhs, out.dtype);
+                }
+                if rhs.qparams.is_some() {
+                    rhs = dequantize(rhs, out.dtype);
+                }
+                launch_matmul(strategy, lhs, rhs, out)
+            }
+            Ok(_) => Ok(()),
         }
-        QuantAcc::F16 => {
-            cubecl::matmul::launch_ref::<R, (i8, i8, half::f16, half::f16, half::f16, half::f16)>(
-                &Default::default(),
-                client,
-                &MatmulInputHandleRef::Quantized {
-                    data: lhs.as_handle_ref(),
-                    scale: lhs_scales.as_handle_ref(),
-                },
-                &MatmulInputHandleRef::Quantized {
-                    data: rhs.as_handle_ref(),
-                    scale: rhs_scales.as_handle_ref(),
-                },
-                &out.as_handle_ref(),
-            )?;
-        }
-        QuantAcc::BF16 => unimplemented!(),
+    } else {
+        launch_matmul(strategy, lhs, rhs, out)
     }
+}
 
-    Ok(out)
+pub(crate) fn launch_matmul<R: CubeRuntime>(
+    strategy: &Strategy,
+    lhs: CubeTensor<R>,
+    mut rhs: CubeTensor<R>,
+    out: CubeTensor<R>,
+) -> Result<(), MatmulSetupError> {
+    let client = &out.client;
+
+    let lhs_quant_handles = lhs.quantized_handles();
+    let out_dtype: DType = out.dtype;
+
+    let (lhs_dtype, lhs_handle) = match lhs_quant_handles {
+        None => {
+            let lhs_dtype = lhs.dtype;
+            (
+                lhs_dtype,
+                InputBinding::new(lhs.binding(), lhs_dtype.into()),
+            )
+        }
+        Some((data, scale)) => {
+            let scheme = *lhs.scheme();
+            let data_dtype = data.dtype;
+            let scale_dtype = scale.dtype;
+            (
+                out_dtype,
+                InputBinding::quantized(
+                    data.binding(),
+                    scale.binding(),
+                    lhs.meta.shape().clone(),
+                    scheme,
+                    data_dtype.into(),
+                    scale_dtype.into(),
+                ),
+            )
+        }
+    };
+
+    let rhs_quant_handles = rhs.quantized_handles();
+
+    let (rhs_dtype, rhs_handle) = match rhs_quant_handles {
+        None => (
+            lhs_dtype,
+            InputBinding::new(rhs.binding(), lhs_dtype.into()),
+        ),
+        Some((data, scale)) => {
+            // Extremely hacky fix to ensure naive can run in every case
+            if matches!(strategy, Strategy::Naive)
+                && matches!(rhs.scheme().level, QuantLevel::Block(_))
+            {
+                rhs = dequantize(rhs.clone(), lhs_dtype);
+                let rhs_dtype = rhs.dtype;
+                (
+                    lhs_dtype,
+                    InputBinding::new(rhs.binding(), rhs_dtype.into()),
+                )
+            } else {
+                let scheme = *rhs.scheme();
+                let data_dtype = data.dtype;
+                let scale_dtype = scale.dtype;
+                (
+                    out_dtype,
+                    InputBinding::quantized(
+                        data.binding(),
+                        scale.binding(),
+                        rhs.meta.shape().clone(),
+                        scheme,
+                        data_dtype.into(),
+                        scale_dtype.into(),
+                    ),
+                )
+            }
+        }
+    };
+
+    let mut dtypes = MatmulElems::from_globals(&MatmulGlobalElems {
+        lhs: lhs_dtype.into(),
+        rhs: rhs_dtype.into(),
+        out: out_dtype.into(),
+    });
+
+    cubek::matmul::launch::launch_ref(
+        strategy,
+        client,
+        lhs_handle,
+        rhs_handle,
+        out.clone().binding(),
+        &mut dtypes,
+    )?;
+
+    Ok(())
 }

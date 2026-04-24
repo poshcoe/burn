@@ -6,6 +6,8 @@ pub use base::*;
 
 pub(crate) mod cli;
 
+pub use cli::*;
+
 /// The tui renderer
 #[cfg(feature = "tui")]
 pub mod tui;
@@ -25,8 +27,8 @@ pub(crate) fn default_renderer(
 ) -> Box<dyn MetricsRenderer> {
     #[cfg(feature = "tui")]
     if std::io::stdout().is_terminal() {
-        return Box::new(tui::TuiMetricsRenderer::new(interuptor, checkpoint));
+        return Box::new(tui::TuiMetricsRendererWrapper::new(interuptor, checkpoint));
     }
 
-    Box::new(cli::CliMetricsRenderer::new())
+    Box::new(CliMetricsRenderer::new())
 }

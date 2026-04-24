@@ -1,16 +1,16 @@
 use crate::dataset::{HousingBatcher, HousingDataset};
 use crate::model::RegressionModelConfig;
 use burn::optim::AdamConfig;
-use burn::train::LearningStrategy;
+use burn::train::{Learner, SupervisedTraining};
 use burn::{
     data::{dataloader::DataLoaderBuilder, dataset::Dataset},
     prelude::*,
     record::{CompactRecorder, NoStdTrainingRecorder},
     tensor::backend::AutodiffBackend,
-    train::{LearnerBuilder, metric::LossMetric},
+    train::metric::LossMetric,
 };
 
-#[derive(Config)]
+#[derive(Config, Debug)]
 pub struct ExpConfig {
     #[config(default = 100)]
     pub num_epochs: usize,
@@ -40,7 +40,7 @@ pub fn run<B: AutodiffBackend>(artifact_dir: &str, device: B::Device) {
     let optimizer = AdamConfig::new();
     let config = ExpConfig::new(optimizer);
     let model = RegressionModelConfig::new().init(&device);
-    B::seed(config.seed);
+    B::seed(&device, config.seed);
 
     // Define train/valid datasets and dataloaders
     let train_dataset = HousingDataset::train();
@@ -66,22 +66,20 @@ pub fn run<B: AutodiffBackend>(artifact_dir: &str, device: B::Device) {
         .build(valid_dataset);
 
     // Model
-    let learner = LearnerBuilder::new(artifact_dir)
+    let training = SupervisedTraining::new(artifact_dir, dataloader_train, dataloader_test)
         .metric_train_numeric(LossMetric::new())
         .metric_valid_numeric(LossMetric::new())
         .with_file_checkpointer(CompactRecorder::new())
-        .learning_strategy(LearningStrategy::SingleDevice(device.clone()))
         .num_epochs(config.num_epochs)
-        .summary()
-        .build(model, config.optimizer.init(), 1e-3);
+        .summary();
 
-    let model_trained = learner.fit(dataloader_train, dataloader_test);
+    let result = training.launch(Learner::new(model, config.optimizer.init(), 1e-3));
 
     config
         .save(format!("{artifact_dir}/config.json").as_str())
         .unwrap();
 
-    model_trained
+    result
         .model
         .save_file(
             format!("{artifact_dir}/model"),

@@ -1,9 +1,13 @@
-use crate::backend::Backend;
-use crate::check;
-use crate::check::TensorCheck;
-use crate::ops::rnn::{RnnCell, RnnSize};
-use crate::ops::{ConvOptions, ConvTransposeOptions, InterpolateOptions, UnfoldOptions};
-use crate::{Int, Tensor, TensorPrimitive};
+use crate::{
+    Bool, Int, Tensor, TensorPrimitive,
+    backend::Backend,
+    check,
+    check::TensorCheck,
+    ops::{
+        AttentionModuleOptions, ConvOptions, ConvTransposeOptions, InterpolateOptions, PadMode,
+        PaddedConvOptions, UnfoldOptions,
+    },
+};
 
 use super::ops::DeformConvOptions;
 
@@ -18,75 +22,136 @@ where
     )))
 }
 
-/// Applies a [1D convolution](crate::ops::ModuleOps::conv2d).
+/// Applies a [1D convolution](crate::ops::ModuleOps::conv1d).
+///
+/// Accepts [`ConvOptions`] for symmetric padding, or [`PaddedConvOptions`] for
+/// asymmetric padding. When asymmetric padding is specified, an explicit pad
+/// operation is applied before the convolution backend op.
 pub fn conv1d<B>(
     x: Tensor<B, 3>,
     weight: Tensor<B, 3>,
     bias: Option<Tensor<B, 1>>,
-    options: ConvOptions<1>,
+    options: impl Into<PaddedConvOptions<1>>,
 ) -> Tensor<B, 3>
 where
     B: Backend,
 {
+    let padded_options = options.into();
     check!(TensorCheck::conv(
         "conv1d",
         x.dims(),
         weight.dims(),
-        options.groups,
+        padded_options.options.groups,
     ));
-    Tensor::new(TensorPrimitive::Float(B::conv1d(
-        x.primitive.tensor(),
-        weight.primitive.tensor(),
-        bias.map(|b| b.primitive.tensor()),
-        options,
-    )))
+
+    if let Some(padding_end) = padded_options.padding_end {
+        let left = padded_options.options.padding[0];
+        let right = padding_end[0];
+        // For 1D (NCL format), pad the length dimension
+        let padded = x.pad((left, right, 0, 0), PadMode::Constant(0.0));
+        let zero_options = ConvOptions::new(
+            padded_options.options.stride,
+            [0],
+            padded_options.options.dilation,
+            padded_options.options.groups,
+        );
+        Tensor::new(TensorPrimitive::Float(B::conv1d(
+            padded.primitive.tensor(),
+            weight.primitive.tensor(),
+            bias.map(|b| b.primitive.tensor()),
+            zero_options,
+        )))
+    } else {
+        Tensor::new(TensorPrimitive::Float(B::conv1d(
+            x.primitive.tensor(),
+            weight.primitive.tensor(),
+            bias.map(|b| b.primitive.tensor()),
+            padded_options.options,
+        )))
+    }
 }
 
 /// Applies a [2D convolution](crate::ops::ModuleOps::conv2d).
+///
+/// Accepts [`ConvOptions`] for symmetric padding, or [`PaddedConvOptions`] for
+/// asymmetric padding. When asymmetric padding is specified, an explicit pad
+/// operation is applied before the convolution backend op.
 pub fn conv2d<B>(
     x: Tensor<B, 4>,
     weight: Tensor<B, 4>,
     bias: Option<Tensor<B, 1>>,
-    options: ConvOptions<2>,
+    options: impl Into<PaddedConvOptions<2>>,
 ) -> Tensor<B, 4>
 where
     B: Backend,
 {
+    let padded_options = options.into();
     check!(TensorCheck::conv(
         "conv2d",
         x.dims(),
         weight.dims(),
-        options.groups,
+        padded_options.options.groups,
     ));
-    Tensor::new(TensorPrimitive::Float(B::conv2d(
-        x.primitive.tensor(),
-        weight.primitive.tensor(),
-        bias.map(|b| b.primitive.tensor()),
-        options,
-    )))
+
+    if let Some(padding_end) = padded_options.padding_end {
+        let top = padded_options.options.padding[0];
+        let left = padded_options.options.padding[1];
+        let bottom = padding_end[0];
+        let right = padding_end[1];
+        // For 2D (NCHW format), pad height and width
+        let padded = x.pad((left, right, top, bottom), PadMode::Constant(0.0));
+        let zero_options = ConvOptions::new(
+            padded_options.options.stride,
+            [0, 0],
+            padded_options.options.dilation,
+            padded_options.options.groups,
+        );
+        Tensor::new(TensorPrimitive::Float(B::conv2d(
+            padded.primitive.tensor(),
+            weight.primitive.tensor(),
+            bias.map(|b| b.primitive.tensor()),
+            zero_options,
+        )))
+    } else {
+        Tensor::new(TensorPrimitive::Float(B::conv2d(
+            x.primitive.tensor(),
+            weight.primitive.tensor(),
+            bias.map(|b| b.primitive.tensor()),
+            padded_options.options,
+        )))
+    }
 }
 
 /// Applies a [3D convolution](crate::ops::ModuleOps::conv3d).
+///
+/// Accepts [`ConvOptions`] for symmetric padding, or [`PaddedConvOptions`] for
+/// asymmetric padding. Asymmetric 3D padding is not yet supported.
 pub fn conv3d<B>(
     x: Tensor<B, 5>,
     weight: Tensor<B, 5>,
     bias: Option<Tensor<B, 1>>,
-    options: ConvOptions<3>,
+    options: impl Into<PaddedConvOptions<3>>,
 ) -> Tensor<B, 5>
 where
     B: Backend,
 {
+    let padded_options = options.into();
     check!(TensorCheck::conv(
         "conv3d",
         x.dims(),
         weight.dims(),
-        options.groups,
+        padded_options.options.groups,
     ));
+
+    if padded_options.is_asymmetric() {
+        panic!("Asymmetric padding is not yet supported for conv3d");
+    }
+
     Tensor::new(TensorPrimitive::Float(B::conv3d(
         x.primitive.tensor(),
         weight.primitive.tensor(),
         bias.map(|b| b.primitive.tensor()),
-        options,
+        padded_options.options,
     )))
 }
 
@@ -206,6 +271,7 @@ pub fn max_pool1d<B>(
     stride: usize,
     padding: usize,
     dilation: usize,
+    ceil_mode: bool,
 ) -> Tensor<B, 3>
 where
     B: Backend,
@@ -216,6 +282,7 @@ where
         stride,
         padding,
         dilation,
+        ceil_mode,
     )))
 }
 
@@ -226,6 +293,7 @@ pub fn max_pool2d<B>(
     stride: [usize; 2],
     padding: [usize; 2],
     dilation: [usize; 2],
+    ceil_mode: bool,
 ) -> Tensor<B, 4>
 where
     B: Backend,
@@ -236,6 +304,7 @@ where
         stride,
         padding,
         dilation,
+        ceil_mode,
     )))
 }
 
@@ -246,6 +315,7 @@ pub fn avg_pool2d<B>(
     stride: [usize; 2],
     padding: [usize; 2],
     count_include_pad: bool,
+    ceil_mode: bool,
 ) -> Tensor<B, 4>
 where
     B: Backend,
@@ -256,6 +326,7 @@ where
         stride,
         padding,
         count_include_pad,
+        ceil_mode,
     )))
 }
 
@@ -266,6 +337,7 @@ pub fn avg_pool1d<B>(
     stride: usize,
     padding: usize,
     count_include_pad: bool,
+    ceil_mode: bool,
 ) -> Tensor<B, 3>
 where
     B: Backend,
@@ -276,6 +348,7 @@ where
         stride,
         padding,
         count_include_pad,
+        ceil_mode,
     )))
 }
 
@@ -286,12 +359,19 @@ pub fn max_pool1d_with_indices<B>(
     stride: usize,
     padding: usize,
     dilation: usize,
+    ceil_mode: bool,
 ) -> (Tensor<B, 3>, Tensor<B, 3, Int>)
 where
     B: Backend,
 {
-    let output =
-        B::max_pool1d_with_indices(x.primitive.tensor(), kernel_size, stride, padding, dilation);
+    let output = B::max_pool1d_with_indices(
+        x.primitive.tensor(),
+        kernel_size,
+        stride,
+        padding,
+        dilation,
+        ceil_mode,
+    );
 
     (
         Tensor::new(TensorPrimitive::Float(output.output)),
@@ -306,12 +386,19 @@ pub fn max_pool2d_with_indices<B>(
     stride: [usize; 2],
     padding: [usize; 2],
     dilation: [usize; 2],
+    ceil_mode: bool,
 ) -> (Tensor<B, 4>, Tensor<B, 4, Int>)
 where
     B: Backend,
 {
-    let output =
-        B::max_pool2d_with_indices(x.primitive.tensor(), kernel_size, stride, padding, dilation);
+    let output = B::max_pool2d_with_indices(
+        x.primitive.tensor(),
+        kernel_size,
+        stride,
+        padding,
+        dilation,
+        ceil_mode,
+    );
 
     (
         Tensor::new(TensorPrimitive::Float(output.output)),
@@ -357,7 +444,7 @@ where
     )))
 }
 
-/// Applies a [linear transformation](crate::ops::ModuleOps::linear) to the input tensor using the given weight and bias.
+/// Applies a linear transformation to the input tensor using the given weight and bias.
 ///
 /// ```math
 /// y = x @ weight + [bias]
@@ -387,10 +474,62 @@ pub fn linear<B: Backend, const D: usize>(
     weight: Tensor<B, 2>,
     bias: Option<Tensor<B, 1>>,
 ) -> Tensor<B, D> {
-    Tensor::new(TensorPrimitive::Float(B::linear(
-        input.primitive.tensor(),
-        weight.primitive.tensor(),
-        bias.map(|b| b.primitive.tensor()),
+    if D == 1 {
+        // Insert and remove an extra batch dimension for the batch matmul to work.
+        let input = input.unsqueeze::<2>();
+        let output = linear(input, weight, bias);
+        return output.squeeze_dim(0);
+    }
+
+    // Perform broadcasting
+    //
+    // Important to be done before doing operations to easily fuse.
+    let weight = weight.unsqueeze::<D>();
+    let bias = bias.map(|bias| bias.unsqueeze::<D>());
+
+    let output = input.matmul(weight);
+    match bias {
+        Some(bias) => output.add(bias),
+        None => output,
+    }
+}
+
+/// Computes scaled dot-product attention: softmax(QKᵗ * scale) · V,
+/// where scale defaults to 1/sqrt(head_dim) (configurable via `options.scale`).
+/// Optionally applies masking, additive bias, causal masking, and softcap.
+///
+/// # Arguments
+/// - `query`: Query tensor of shape `[batch_size, num_heads, seq_len_q, head_dim]`
+/// - `key`: Key tensor of shape `[batch_size, num_heads, seq_len_k, head_dim]`
+/// - `value`: Value tensor of shape `[batch_size, num_heads, seq_len_k, val_dim]`
+/// - `mask`: Optional boolean mask of shape `[batch_size, num_heads, seq_len_q, seq_len_k]`,
+///   where `true` indicates positions to mask (i.e. set to -inf before softmax).
+/// - `attn_bias`: Optional float tensor of shape `[batch_size, num_heads, seq_len_q, seq_len_k]`
+///   added to the attention scores before softmax (e.g. ALiBi, relative position biases).
+/// - `options`: Additional attention options (custom scale, softcap, causal masking).
+///
+/// # Returns
+/// A tensor of shape `[batch_size, num_heads, seq_len_q, val_dim]`
+/// representing the attended context per head.
+///
+/// # Note
+/// This implementation does not support dropout and is intended for inference or
+/// use cases where dropout is not needed.
+pub fn attention<B: Backend>(
+    query: Tensor<B, 4>,
+    key: Tensor<B, 4>,
+    value: Tensor<B, 4>,
+    mask: Option<Tensor<B, 4, Bool>>,
+    attn_bias: Option<Tensor<B, 4>>,
+    options: AttentionModuleOptions,
+) -> Tensor<B, 4> {
+    Tensor::new(TensorPrimitive::Float(B::attention(
+        query.primitive.tensor(),
+        key.primitive.tensor(),
+        value.primitive.tensor(),
+        mask.map(|mask| mask.primitive),
+        attn_bias.map(|bias| bias.primitive.tensor()),
+        options,
     )))
 }
 
@@ -427,4 +566,23 @@ pub fn lstm<B: Backend>(
         Tensor::new(TensorPrimitive::Float(out.hidden_state)),
         Tensor::new(TensorPrimitive::Float(out_cell_state)),
     )
+/// Exports attention fallback to test backend's attention against.
+pub fn attention_fallback<B: Backend>(
+    query: Tensor<B, 4>,
+    key: Tensor<B, 4>,
+    value: Tensor<B, 4>,
+    mask: Option<Tensor<B, 4, Bool>>,
+    attn_bias: Option<Tensor<B, 4>>,
+    options: AttentionModuleOptions,
+) -> Tensor<B, 4> {
+    Tensor::new(TensorPrimitive::Float(
+        crate::ops::attention::attention_fallback::<B>(
+            query.primitive.tensor(),
+            key.primitive.tensor(),
+            value.primitive.tensor(),
+            mask.map(|mask| mask.primitive),
+            attn_bias.map(|bias| bias.primitive.tensor()),
+            options,
+        ),
+    ))
 }

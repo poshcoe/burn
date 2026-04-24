@@ -1,18 +1,19 @@
 use crate::{Autodiff, checkpoint::strategy::CheckpointStrategy, tensor::AutodiffTensor};
 use alloc::vec::Vec;
 
-use burn_tensor::{
-    Device, Distribution, Shape, TensorData,
-    backend::Backend,
-    ops::{BoolTensor, IntTensor, IntTensorOps},
+use burn_backend::{
+    Backend, Distribution, ExecutionError, Scalar, TensorData,
+    ops::IntTensorOps,
+    tensor::{BoolTensor, Device, IntTensor},
 };
+use burn_std::{BoolDType, FloatDType, IntDType, Shape};
 
 impl<B: Backend, C: CheckpointStrategy> IntTensorOps<Self> for Autodiff<B, C> {
     fn int_from_data(data: TensorData, device: &Device<Self>) -> IntTensor<B> {
         B::int_from_data(data, device)
     }
 
-    async fn int_into_data(tensor: IntTensor<B>) -> TensorData {
+    async fn int_into_data(tensor: IntTensor<B>) -> Result<TensorData, ExecutionError> {
         B::int_into_data(tensor).await
     }
 
@@ -28,51 +29,55 @@ impl<B: Backend, C: CheckpointStrategy> IntTensorOps<Self> for Autodiff<B, C> {
         B::int_reshape(tensor, shape)
     }
 
-    fn int_slice(tensor: IntTensor<B>, ranges: &[core::ops::Range<usize>]) -> IntTensor<B> {
-        B::int_slice(tensor, ranges)
+    fn int_slice(tensor: IntTensor<B>, slices: &[burn_std::Slice]) -> IntTensor<B> {
+        B::int_slice(tensor, slices)
     }
 
-    fn int_empty(shape: Shape, device: &<Autodiff<B> as Backend>::Device) -> IntTensor<B> {
-        B::int_empty(shape, device)
+    fn int_empty(
+        shape: Shape,
+        device: &<Autodiff<B> as Backend>::Device,
+        dtype: IntDType,
+    ) -> IntTensor<B> {
+        B::int_empty(shape, device, dtype)
     }
 
     fn int_slice_assign(
         tensor: IntTensor<B>,
-        ranges: &[core::ops::Range<usize>],
+        slices: &[burn_std::Slice],
         value: IntTensor<B>,
     ) -> IntTensor<B> {
-        B::int_slice_assign(tensor, ranges, value)
+        B::int_slice_assign(tensor, slices, value)
     }
 
     fn int_cat(tensors: Vec<IntTensor<B>>, dim: usize) -> IntTensor<B> {
         B::int_cat(tensors, dim)
     }
 
-    fn int_equal(lhs: IntTensor<B>, rhs: IntTensor<B>) -> BoolTensor<B> {
-        B::int_equal(lhs, rhs)
+    fn int_equal(lhs: IntTensor<B>, rhs: IntTensor<B>, out_dtype: BoolDType) -> BoolTensor<B> {
+        B::int_equal(lhs, rhs, out_dtype)
     }
 
-    fn int_equal_elem(lhs: IntTensor<B>, rhs: B::IntElem) -> BoolTensor<B> {
-        B::int_equal_elem(lhs, rhs)
+    fn int_equal_elem(lhs: IntTensor<B>, rhs: Scalar, out_dtype: BoolDType) -> BoolTensor<B> {
+        B::int_equal_elem(lhs, rhs, out_dtype)
     }
 
     fn int_add(lhs: IntTensor<B>, rhs: IntTensor<B>) -> IntTensor<B> {
         B::int_add(lhs, rhs)
     }
 
-    fn int_add_scalar(lhs: IntTensor<B>, rhs: B::IntElem) -> IntTensor<B> {
+    fn int_add_scalar(lhs: IntTensor<B>, rhs: Scalar) -> IntTensor<B> {
         B::int_add_scalar(lhs, rhs)
     }
 
-    fn int_clamp_min(tensor: IntTensor<B>, min: B::IntElem) -> IntTensor<B> {
+    fn int_clamp_min(tensor: IntTensor<B>, min: Scalar) -> IntTensor<B> {
         B::int_clamp_min(tensor, min)
     }
 
-    fn int_clamp_max(tensor: IntTensor<B>, max: B::IntElem) -> IntTensor<B> {
+    fn int_clamp_max(tensor: IntTensor<B>, max: Scalar) -> IntTensor<B> {
         B::int_clamp_max(tensor, max)
     }
 
-    fn int_clamp(tensor: IntTensor<B>, min: B::IntElem, max: B::IntElem) -> IntTensor<B> {
+    fn int_clamp(tensor: IntTensor<B>, min: Scalar, max: Scalar) -> IntTensor<B> {
         B::int_clamp(tensor, min, max)
     }
 
@@ -80,7 +85,7 @@ impl<B: Backend, C: CheckpointStrategy> IntTensorOps<Self> for Autodiff<B, C> {
         B::int_sub(lhs, rhs)
     }
 
-    fn int_sub_scalar(lhs: IntTensor<B>, rhs: B::IntElem) -> IntTensor<B> {
+    fn int_sub_scalar(lhs: IntTensor<B>, rhs: Scalar) -> IntTensor<B> {
         B::int_sub_scalar(lhs, rhs)
     }
 
@@ -88,7 +93,7 @@ impl<B: Backend, C: CheckpointStrategy> IntTensorOps<Self> for Autodiff<B, C> {
         B::int_mul(lhs, rhs)
     }
 
-    fn int_mul_scalar(lhs: IntTensor<B>, rhs: B::IntElem) -> IntTensor<B> {
+    fn int_mul_scalar(lhs: IntTensor<B>, rhs: Scalar) -> IntTensor<B> {
         B::int_mul_scalar(lhs, rhs)
     }
 
@@ -96,7 +101,7 @@ impl<B: Backend, C: CheckpointStrategy> IntTensorOps<Self> for Autodiff<B, C> {
         B::int_div(lhs, rhs)
     }
 
-    fn int_div_scalar(lhs: IntTensor<B>, rhs: B::IntElem) -> IntTensor<B> {
+    fn int_div_scalar(lhs: IntTensor<B>, rhs: Scalar) -> IntTensor<B> {
         B::int_div_scalar(lhs, rhs)
     }
 
@@ -104,7 +109,7 @@ impl<B: Backend, C: CheckpointStrategy> IntTensorOps<Self> for Autodiff<B, C> {
         B::int_remainder(lhs, rhs)
     }
 
-    fn int_remainder_scalar(lhs: IntTensor<B>, rhs: B::IntElem) -> IntTensor<B> {
+    fn int_remainder_scalar(lhs: IntTensor<B>, rhs: Scalar) -> IntTensor<B> {
         B::int_remainder_scalar(lhs, rhs)
     }
 
@@ -116,16 +121,21 @@ impl<B: Backend, C: CheckpointStrategy> IntTensorOps<Self> for Autodiff<B, C> {
         B::int_neg(tensor)
     }
 
-    fn int_zeros(shape: Shape, device: &Device<Self>) -> IntTensor<B> {
-        B::int_zeros(shape, device)
+    fn int_zeros(shape: Shape, device: &Device<Self>, dtype: IntDType) -> IntTensor<B> {
+        B::int_zeros(shape, device, dtype)
     }
 
-    fn int_ones(shape: Shape, device: &Device<Self>) -> IntTensor<B> {
-        B::int_ones(shape, device)
+    fn int_ones(shape: Shape, device: &Device<Self>, dtype: IntDType) -> IntTensor<B> {
+        B::int_ones(shape, device, dtype)
     }
 
-    fn int_full(shape: Shape, fill_value: B::IntElem, device: &Device<Self>) -> IntTensor<B> {
-        B::int_full(shape, fill_value, device)
+    fn int_full(
+        shape: Shape,
+        fill_value: Scalar,
+        device: &Device<Self>,
+        dtype: IntDType,
+    ) -> IntTensor<B> {
+        B::int_full(shape, fill_value, device, dtype)
     }
 
     fn int_sum(tensor: IntTensor<B>) -> IntTensor<B> {
@@ -144,66 +154,94 @@ impl<B: Backend, C: CheckpointStrategy> IntTensorOps<Self> for Autodiff<B, C> {
         B::int_mean_dim(tensor, dim)
     }
 
+    fn int_cumsum(tensor: IntTensor<B>, dim: usize) -> IntTensor<B> {
+        B::int_cumsum(tensor, dim)
+    }
+
+    fn int_cumprod(tensor: IntTensor<B>, dim: usize) -> IntTensor<B> {
+        B::int_cumprod(tensor, dim)
+    }
+
+    fn int_cummin(tensor: IntTensor<B>, dim: usize) -> IntTensor<B> {
+        B::int_cummin(tensor, dim)
+    }
+
+    fn int_cummax(tensor: IntTensor<B>, dim: usize) -> IntTensor<B> {
+        B::int_cummax(tensor, dim)
+    }
+
     fn int_repeat_dim(tensor: IntTensor<B>, dim: usize, times: usize) -> IntTensor<B> {
         B::int_repeat_dim(tensor, dim, times)
     }
 
-    fn int_greater(lhs: IntTensor<B>, rhs: IntTensor<B>) -> BoolTensor<B> {
-        B::int_greater(lhs, rhs)
+    fn int_greater(lhs: IntTensor<B>, rhs: IntTensor<B>, out_dtype: BoolDType) -> BoolTensor<B> {
+        B::int_greater(lhs, rhs, out_dtype)
     }
 
-    fn int_greater_elem(lhs: IntTensor<B>, rhs: B::IntElem) -> BoolTensor<B> {
-        B::int_greater_elem(lhs, rhs)
+    fn int_greater_elem(lhs: IntTensor<B>, rhs: Scalar, out_dtype: BoolDType) -> BoolTensor<B> {
+        B::int_greater_elem(lhs, rhs, out_dtype)
     }
 
-    fn int_greater_equal(lhs: IntTensor<B>, rhs: IntTensor<B>) -> BoolTensor<B> {
-        B::int_greater_equal(lhs, rhs)
+    fn int_greater_equal(
+        lhs: IntTensor<B>,
+        rhs: IntTensor<B>,
+        out_dtype: BoolDType,
+    ) -> BoolTensor<B> {
+        B::int_greater_equal(lhs, rhs, out_dtype)
     }
 
-    fn int_greater_equal_elem(lhs: IntTensor<B>, rhs: B::IntElem) -> BoolTensor<B> {
-        B::int_greater_equal_elem(lhs, rhs)
+    fn int_greater_equal_elem(
+        lhs: IntTensor<B>,
+        rhs: Scalar,
+        out_dtype: BoolDType,
+    ) -> BoolTensor<B> {
+        B::int_greater_equal_elem(lhs, rhs, out_dtype)
     }
 
-    fn int_lower(lhs: IntTensor<B>, rhs: IntTensor<B>) -> BoolTensor<B> {
-        B::int_lower(lhs, rhs)
+    fn int_lower(lhs: IntTensor<B>, rhs: IntTensor<B>, out_dtype: BoolDType) -> BoolTensor<B> {
+        B::int_lower(lhs, rhs, out_dtype)
     }
 
-    fn int_lower_elem(lhs: IntTensor<B>, rhs: B::IntElem) -> BoolTensor<B> {
-        B::int_lower_elem(lhs, rhs)
+    fn int_lower_elem(lhs: IntTensor<B>, rhs: Scalar, out_dtype: BoolDType) -> BoolTensor<B> {
+        B::int_lower_elem(lhs, rhs, out_dtype)
     }
 
-    fn int_lower_equal(lhs: IntTensor<B>, rhs: IntTensor<B>) -> BoolTensor<B> {
-        B::int_lower_equal(lhs, rhs)
+    fn int_lower_equal(
+        lhs: IntTensor<B>,
+        rhs: IntTensor<B>,
+        out_dtype: BoolDType,
+    ) -> BoolTensor<B> {
+        B::int_lower_equal(lhs, rhs, out_dtype)
     }
 
-    fn int_lower_equal_elem(lhs: IntTensor<B>, rhs: B::IntElem) -> BoolTensor<B> {
-        B::int_lower_equal_elem(lhs, rhs)
+    fn int_lower_equal_elem(lhs: IntTensor<B>, rhs: Scalar, out_dtype: BoolDType) -> BoolTensor<B> {
+        B::int_lower_equal_elem(lhs, rhs, out_dtype)
     }
 
     fn int_gather(dim: usize, tensor: IntTensor<B>, indices: IntTensor<B>) -> IntTensor<B> {
         B::int_gather(dim, tensor, indices)
     }
 
-    fn int_scatter(
+    fn int_scatter_add(
         dim: usize,
         tensor: IntTensor<B>,
         indices: IntTensor<B>,
         value: IntTensor<B>,
     ) -> IntTensor<B> {
-        B::int_scatter(dim, tensor, indices, value)
+        B::int_scatter_add(dim, tensor, indices, value)
     }
 
     fn int_select(tensor: IntTensor<B>, dim: usize, indices: IntTensor<B>) -> IntTensor<B> {
         B::int_select(tensor, dim, indices)
     }
 
-    fn int_select_assign(
+    fn int_select_add(
         tensor: IntTensor<B>,
         dim: usize,
         indices: IntTensor<B>,
         value: IntTensor<B>,
     ) -> IntTensor<B> {
-        B::int_select_assign(tensor, dim, indices, value)
+        B::int_select_add(tensor, dim, indices, value)
     }
 
     fn int_mask_where(
@@ -217,7 +255,7 @@ impl<B: Backend, C: CheckpointStrategy> IntTensorOps<Self> for Autodiff<B, C> {
     fn int_mask_fill(
         tensor: IntTensor<B>,
         mask: BoolTensor<B>,
-        value: B::IntElem,
+        value: Scalar,
     ) -> <Autodiff<B> as Backend>::IntTensorPrimitive {
         B::int_mask_fill(tensor, mask, value)
     }
@@ -257,8 +295,9 @@ impl<B: Backend, C: CheckpointStrategy> IntTensorOps<Self> for Autodiff<B, C> {
     }
     fn int_into_float(
         tensor: <Autodiff<B> as Backend>::IntTensorPrimitive,
+        out_dtype: FloatDType,
     ) -> <Autodiff<B> as Backend>::FloatTensorPrimitive {
-        AutodiffTensor::new(B::int_into_float(tensor))
+        AutodiffTensor::new(B::int_into_float(tensor, out_dtype))
     }
 
     fn int_swap_dims(
@@ -273,12 +312,17 @@ impl<B: Backend, C: CheckpointStrategy> IntTensorOps<Self> for Autodiff<B, C> {
         shape: Shape,
         distribution: Distribution,
         device: &Device<Self>,
+        dtype: IntDType,
     ) -> IntTensor<Self> {
-        B::int_random(shape, distribution, device)
+        B::int_random(shape, distribution, device, dtype)
     }
 
-    fn int_arange(range: core::ops::Range<i64>, device: &Device<Self>) -> IntTensor<Self> {
-        B::int_arange(range, device)
+    fn int_arange(
+        range: core::ops::Range<i64>,
+        device: &Device<Self>,
+        dtype: IntDType,
+    ) -> IntTensor<Self> {
+        B::int_arange(range, device, dtype)
     }
 
     fn int_permute(tensor: IntTensor<Self>, axes: &[usize]) -> IntTensor<Self> {
@@ -325,7 +369,7 @@ impl<B: Backend, C: CheckpointStrategy> IntTensorOps<Self> for Autodiff<B, C> {
         B::bitwise_and(lhs, rhs)
     }
 
-    fn bitwise_and_scalar(lhs: IntTensor<Self>, rhs: B::IntElem) -> IntTensor<Self> {
+    fn bitwise_and_scalar(lhs: IntTensor<Self>, rhs: Scalar) -> IntTensor<Self> {
         B::bitwise_and_scalar(lhs, rhs)
     }
 
@@ -333,7 +377,7 @@ impl<B: Backend, C: CheckpointStrategy> IntTensorOps<Self> for Autodiff<B, C> {
         B::bitwise_or(lhs, rhs)
     }
 
-    fn bitwise_or_scalar(lhs: IntTensor<Self>, rhs: B::IntElem) -> IntTensor<Self> {
+    fn bitwise_or_scalar(lhs: IntTensor<Self>, rhs: Scalar) -> IntTensor<Self> {
         B::bitwise_or_scalar(lhs, rhs)
     }
 
@@ -341,7 +385,7 @@ impl<B: Backend, C: CheckpointStrategy> IntTensorOps<Self> for Autodiff<B, C> {
         B::bitwise_xor(lhs, rhs)
     }
 
-    fn bitwise_xor_scalar(lhs: IntTensor<Self>, rhs: B::IntElem) -> IntTensor<Self> {
+    fn bitwise_xor_scalar(lhs: IntTensor<Self>, rhs: Scalar) -> IntTensor<Self> {
         B::bitwise_xor_scalar(lhs, rhs)
     }
 
@@ -353,7 +397,7 @@ impl<B: Backend, C: CheckpointStrategy> IntTensorOps<Self> for Autodiff<B, C> {
         B::bitwise_left_shift(lhs, rhs)
     }
 
-    fn bitwise_left_shift_scalar(lhs: IntTensor<Self>, rhs: B::IntElem) -> IntTensor<Self> {
+    fn bitwise_left_shift_scalar(lhs: IntTensor<Self>, rhs: Scalar) -> IntTensor<Self> {
         B::bitwise_left_shift_scalar(lhs, rhs)
     }
 
@@ -361,7 +405,20 @@ impl<B: Backend, C: CheckpointStrategy> IntTensorOps<Self> for Autodiff<B, C> {
         B::bitwise_right_shift(lhs, rhs)
     }
 
-    fn bitwise_right_shift_scalar(lhs: IntTensor<Self>, rhs: B::IntElem) -> IntTensor<Self> {
+    fn bitwise_right_shift_scalar(lhs: IntTensor<Self>, rhs: Scalar) -> IntTensor<Self> {
         B::bitwise_right_shift_scalar(lhs, rhs)
+    }
+
+    fn int_cast(tensor: IntTensor<Self>, dtype: IntDType) -> IntTensor<Self> {
+        B::int_cast(tensor, dtype)
+    }
+
+    fn int_unfold(
+        tensor: IntTensor<Self>,
+        dim: usize,
+        size: usize,
+        step: usize,
+    ) -> IntTensor<Self> {
+        B::int_unfold(tensor, dim, size, step)
     }
 }

@@ -4,7 +4,7 @@ use super::{AutodiffBackend, Backend};
 use burn::{
     backend::{
         autodiff::{
-            Autodiff, NodeID,
+            Autodiff, NodeId,
             checkpoint::{base::Checkpointer, strategy::CheckpointStrategy},
             grads::Gradients,
             ops::{Backward, Ops, OpsKind, broadcast_shape},
@@ -42,7 +42,7 @@ impl<B: Backend, C: CheckpointStrategy> Backend for Autodiff<B, C> {
             // Note that we could improve the performance further by only keeping the state of
             // tensors that are tracked, improving memory management, but for simplicity, we avoid
             // that part.
-            type State = (NodeID, NodeID, FloatTensor<B>, Shape);
+            type State = (NodeId, NodeId, FloatTensor<B>, Shape);
 
             fn backward(
                 self,
@@ -113,7 +113,7 @@ impl<B: Backend, C: CheckpointStrategy> Backend for Autodiff<B, C> {
 
                 // The state consists of what will be needed for this operation's backward pass.
                 // Since we need the parents' outputs, we must checkpoint their ids to retrieve their node
-                // output at the beginning of the backward. We can also save utilitary data such as the bias shape
+                // output at the beginning of the backward. We can also save utility data such as the bias shape
                 // If we also need this operation's output, we can either save it in the state or recompute it
                 // during the backward pass. Here we choose to save it in the state because it's a compute bound operation.
                 let lhs_state = prep.checkpoint(&lhs);

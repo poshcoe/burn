@@ -11,12 +11,12 @@ workspace = true
 
 [features]
 default = ["webgpu"]
-cuda = ["burn/cuda", "cubecl/compilation-cache"]
+cuda = ["burn/cuda"]
 webgpu = ["burn/webgpu"]
 vulkan = ["burn/vulkan"]
-ndarray = ["burn/ndarray"]
+flex = ["burn/flex"]
 
 [dependencies]
 cfg-if = { workspace = true }
-burn = { path = "../../crates/burn", version = "0.19.0", features = ["server"] }
+burn = { path = "../../crates/burn", version = "=0.21.0-pre.3", features = ["server"] }
 cubecl = { workspace = true }

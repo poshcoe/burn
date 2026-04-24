@@ -1,17 +1,19 @@
+use burn_backend::{Element, bf16, f16};
 use cubecl::{
     CubeElement as CubeElem, flex32,
-    matmul::components::{InputPrecision, MatmulPrecision},
     prelude::{Float, Int, Numeric},
+};
+use cubek::{
+    matmul::definition::{MatmulPrecision, MatrixPrecision},
     reduce::ReducePrecision,
 };
 
 /// The base element trait for the jit backend.
-pub trait CubeElement: burn_tensor::Element + CubeElem + PartialEq + Numeric {}
+pub trait CubeElement: Element + CubeElem + PartialEq + Numeric {}
 
-/// ELement that can be used for matrix multiplication. Includes ints and floats.
+/// Element that can be used for matrix multiplication. Includes ints and floats.
 pub trait MatmulElement:
-    CubeElement
-    + MatmulPrecision<Lhs: InputPrecision, Rhs: InputPrecision, EA: CubeElement, EO: CubeElement>
+    CubeElement + MatmulPrecision<Acc: MatrixPrecision<Global: CubeElement>>
 {
 }
 
@@ -56,19 +58,22 @@ impl CubeElement for i8 {}
 impl CubeElement for f64 {}
 impl CubeElement for f32 {}
 impl CubeElement for flex32 {}
-impl CubeElement for half::f16 {}
-impl CubeElement for half::bf16 {}
+impl CubeElement for f16 {}
+impl CubeElement for bf16 {}
 
 impl FloatElement for f64 {}
 impl FloatElement for f32 {}
 impl FloatElement for flex32 {}
-impl FloatElement for half::bf16 {}
-impl FloatElement for half::f16 {}
+impl FloatElement for bf16 {}
+impl FloatElement for f16 {}
 impl IntElement for i64 {}
 impl IntElement for i32 {}
 impl IntElement for i16 {}
 impl IntElement for i8 {}
+impl IntElement for u64 {}
 impl IntElement for u32 {}
+impl IntElement for u16 {}
+impl IntElement for u8 {}
 
 impl BoolElement for u8 {}
 impl BoolElement for u32 {}
@@ -76,8 +81,8 @@ impl BoolElement for u32 {}
 impl MatmulElement for f64 {}
 impl MatmulElement for f32 {}
 impl MatmulElement for flex32 {}
-impl MatmulElement for half::bf16 {}
-impl MatmulElement for half::f16 {}
+impl MatmulElement for bf16 {}
+impl MatmulElement for f16 {}
 
 impl MatmulElement for i64 {}
 impl MatmulElement for i32 {}

@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
-use crate::metric::{MetricEntry, NumericEntry};
+use crate::{
+    LearnerSummary,
+    metric::{MetricDefinition, MetricEntry, NumericEntry},
+};
 use burn_core::data::dataloader::Progress;
 
 /// Trait for rendering metrics.
@@ -24,14 +27,14 @@ pub trait MetricsRendererTraining: Send + Sync {
     /// # Arguments
     ///
     /// * `item` - The training progress.
-    fn render_train(&mut self, item: TrainingProgress);
+    fn render_train(&mut self, item: TrainingProgress, progress_indicators: Vec<ProgressType>);
 
     /// Renders the validation progress.
     ///
     /// # Arguments
     ///
     /// * `item` - The validation progress.
-    fn render_valid(&mut self, item: TrainingProgress);
+    fn render_valid(&mut self, item: TrainingProgress, progress_indicators: Vec<ProgressType>);
 
     /// Callback method invoked when training ends, whether it
     /// completed successfully or was interrupted.
@@ -39,7 +42,11 @@ pub trait MetricsRendererTraining: Send + Sync {
     /// # Returns
     ///
     /// A result indicating whether the end-of-training actions were successful.
-    fn on_train_end(&mut self) -> Result<(), Box<dyn core::error::Error>> {
+    fn on_train_end(
+        &mut self,
+        summary: Option<LearnerSummary>,
+    ) -> Result<(), Box<dyn core::error::Error>> {
+        default_summary_action(summary);
         Ok(())
     }
 }
@@ -48,22 +55,35 @@ pub trait MetricsRendererTraining: Send + Sync {
 pub trait MetricsRenderer: MetricsRendererEvaluation + MetricsRendererTraining {
     /// Keep the renderer from automatically closing, requiring manual action to close it.
     fn manual_close(&mut self);
+    /// Register a new metric.
+    fn register_metric(&mut self, definition: MetricDefinition);
 }
 
 #[derive(Clone)]
 /// The name of an evaluation.
 ///
-/// This is going to group matrics together for easier analysis.
+/// This is going to group metrics together for easier analysis.
 pub struct EvaluationName {
     pub(crate) name: Arc<String>,
 }
 
 impl EvaluationName {
-    /// Creates a new metric name.
+    /// Creates a new evaluation name.
     pub fn new<S: core::fmt::Display>(s: S) -> Self {
         Self {
             name: Arc::new(format!("{s}")),
         }
+    }
+
+    /// Returns the evaluation name.
+    pub fn as_str(&self) -> &str {
+        &self.name
+    }
+}
+
+impl core::fmt::Display for EvaluationName {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(&self.name)
     }
 }
 
@@ -80,7 +100,7 @@ pub trait MetricsRendererEvaluation: Send + Sync {
     /// # Arguments
     ///
     /// * `item` - The training progress.
-    fn render_test(&mut self, item: EvaluationProgress);
+    fn render_test(&mut self, item: EvaluationProgress, progress_indicators: Vec<ProgressType>);
 
     /// Callback method invoked when testing ends, whether it
     /// completed successfully or was interrupted.
@@ -88,7 +108,11 @@ pub trait MetricsRendererEvaluation: Send + Sync {
     /// # Returns
     ///
     /// A result indicating whether the end-of-testing actions were successful.
-    fn on_test_end(&mut self) -> Result<(), Box<dyn core::error::Error>> {
+    fn on_test_end(
+        &mut self,
+        summary: Option<LearnerSummary>,
+    ) -> Result<(), Box<dyn core::error::Error>> {
+        default_summary_action(summary);
         Ok(())
     }
 }
@@ -106,16 +130,13 @@ pub enum MetricState {
 #[derive(Debug)]
 pub struct TrainingProgress {
     /// The progress.
-    pub progress: Progress,
+    pub progress: Option<Progress>,
 
-    /// The epoch.
-    pub epoch: usize,
+    /// The progress of the whole training.
+    pub global_progress: Progress,
 
-    /// The total number of epochs.
-    pub epoch_total: usize,
-
-    /// The iteration.
-    pub iteration: usize,
+    /// The iteration, if it differs from the items processed.
+    pub iteration: Option<usize>,
 }
 
 /// Evaluation progress.
@@ -124,21 +145,54 @@ pub struct EvaluationProgress {
     /// The progress.
     pub progress: Progress,
 
-    /// The iteration.
-    pub iteration: usize,
+    /// The iteration, if it is different from the processed items.
+    pub iteration: Option<usize>,
+}
+
+impl From<&EvaluationProgress> for TrainingProgress {
+    fn from(value: &EvaluationProgress) -> Self {
+        TrainingProgress {
+            progress: None,
+            global_progress: value.progress.clone(),
+            iteration: value.iteration,
+        }
+    }
 }
 
 impl TrainingProgress {
     /// Creates a new empty training progress.
     pub fn none() -> Self {
         Self {
-            progress: Progress {
+            progress: None,
+            global_progress: Progress {
                 items_processed: 0,
                 items_total: 0,
             },
-            epoch: 0,
-            epoch_total: 0,
-            iteration: 0,
+            iteration: None,
         }
+    }
+}
+
+/// Type of progress indicators.
+pub enum ProgressType {
+    /// Detailed progress.
+    Detailed {
+        /// The tag.
+        tag: String,
+        /// The progress.
+        progress: Progress,
+    },
+    /// Simple value.
+    Value {
+        /// The tag.
+        tag: String,
+        /// The value.
+        value: usize,
+    },
+}
+
+fn default_summary_action(summary: Option<LearnerSummary>) {
+    if let Some(summary) = summary {
+        println!("{summary}");
     }
 }

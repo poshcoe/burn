@@ -14,7 +14,6 @@ use std::sync::Arc;
 /// # Returns
 ///
 /// A vector containing indices from 0 to size - 1.
-// TODO: lift/unify `burn::tensor::indexing` to `burn::core:indexing`; move this there.
 #[inline(always)]
 pub fn iota(size: usize) -> Vec<usize> {
     (0..size).collect()
@@ -29,7 +28,6 @@ pub fn iota(size: usize) -> Vec<usize> {
 /// # Returns
 ///
 /// A vector of shuffled indices.
-// TODO: lift/unify `burn::tensor::indexing` to `burn::core:indexing`; move this there.
 #[inline(always)]
 pub fn shuffled_indices(size: usize, rng: &mut StdRng) -> Vec<usize> {
     let mut indices = iota(size);
@@ -179,7 +177,7 @@ where
     ///
     /// * `start` - The start of the range.
     /// * `end` - The end of the range (exclusive).
-    // TODO: RangeArg in burn-tensor should be lifted to burn-common; this should use RangeArg.
+    // TODO: SliceArg in burn-tensor should be lifted to burn-std; this should use SliceArg.
     pub fn slice(&self, start: usize, end: usize) -> Self {
         Self::from_indices_unchecked(self.wrapped.clone(), self.indices[start..end].to_vec())
     }
@@ -252,11 +250,13 @@ mod tests {
     }
 
     #[test]
-    fn test_shuffled_indices() {
+    fn test_shuffled_indices_same_seed_is_deterministic() {
         let size = 10;
 
         let mut rng1 = StdRng::seed_from_u64(10);
-        let mut rng2 = rng1.clone();
+        // `StdRng` is no longer `Clone`, so its internal state cannot be duplicated.
+        // To test determinism, we must explicitly create a second RNG from the same seed.
+        let mut rng2 = StdRng::seed_from_u64(10);
 
         let mut expected = iota(size);
         expected.shuffle(&mut rng1);
@@ -264,6 +264,22 @@ mod tests {
         let indices = shuffled_indices(size, &mut rng2);
 
         assert_eq!(indices, expected);
+    }
+
+    #[test]
+    fn test_shuffled_indices_forked_rngs_differ() {
+        let size = 10;
+
+        let mut rng1 = StdRng::seed_from_u64(10);
+        let mut rng2 = rng1.fork();
+
+        let mut a = iota(size);
+        let mut b = iota(size);
+
+        a.shuffle(&mut rng1);
+        b.shuffle(&mut rng2);
+
+        assert_ne!(a, b);
     }
 
     #[should_panic(expected = "Index out of bounds for wrapped dataset size: 300 >= 27")]

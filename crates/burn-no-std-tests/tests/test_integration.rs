@@ -4,11 +4,11 @@ use burn_no_std_tests::mlp::*;
 use burn_no_std_tests::model::*;
 
 use burn::tensor::{Distribution, Tensor, backend::Backend};
-use burn_ndarray::NdArray;
+use burn_flex::Flex;
 
 #[test]
 fn test_mnist_model_with_random_input() {
-    type Backend = NdArray<f32>;
+    type Backend = Flex;
 
     // Model configurations
     let device = Default::default();
@@ -17,7 +17,7 @@ fn test_mnist_model_with_random_input() {
     let mnist_model: Model<Backend> = Model::new(&mnist_config, &device);
 
     // Pass a fixed seed for random, otherwise a build generated random seed is used
-    Backend::seed(mnist_config.seed);
+    Backend::seed(&device, mnist_config.seed);
 
     // Some random input
     let input_shape = [1, 28, 28];
@@ -26,6 +26,6 @@ fn test_mnist_model_with_random_input() {
     // Run through the model
     let output = mnist_model.forward(input);
 
-    assert_eq!(output.shape().dims, [1, 10]);
+    assert_eq!(&*output.shape(), [1, 10]);
     assert!(output.to_data().iter::<f32>().all(|x| x <= 1.0));
 }

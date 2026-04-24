@@ -13,7 +13,7 @@ use burn::{
     record::CompactRecorder,
     tensor::backend::AutodiffBackend,
     train::{
-        ClassificationOutput, LearnerBuilder, LearningStrategy, TrainOutput, TrainStep, ValidStep,
+        ClassificationOutput, InferenceStep, Learner, SupervisedTraining, TrainOutput, TrainStep,
         metric::{AccuracyMetric, LossMetric},
     },
 };
@@ -36,7 +36,10 @@ impl<B: Backend> Cnn<B> {
     }
 }
 
-impl<B: AutodiffBackend> TrainStep<ClassificationBatch<B>, ClassificationOutput<B>> for Cnn<B> {
+impl<B: AutodiffBackend> TrainStep for Cnn<B> {
+    type Input = ClassificationBatch<B>;
+    type Output = ClassificationOutput<B>;
+
     fn step(&self, batch: ClassificationBatch<B>) -> TrainOutput<ClassificationOutput<B>> {
         let item = self.forward_classification(batch.images, batch.targets);
 
@@ -44,13 +47,16 @@ impl<B: AutodiffBackend> TrainStep<ClassificationBatch<B>, ClassificationOutput<
     }
 }
 
-impl<B: Backend> ValidStep<ClassificationBatch<B>, ClassificationOutput<B>> for Cnn<B> {
+impl<B: Backend> InferenceStep for Cnn<B> {
+    type Input = ClassificationBatch<B>;
+    type Output = ClassificationOutput<B>;
+
     fn step(&self, batch: ClassificationBatch<B>) -> ClassificationOutput<B> {
         self.forward_classification(batch.images, batch.targets)
     }
 }
 
-#[derive(Config)]
+#[derive(Config, Debug)]
 pub struct TrainingConfig {
     pub optimizer: SgdConfig,
     #[config(default = 30)]
@@ -78,7 +84,7 @@ pub fn train<B: AutodiffBackend>(config: TrainingConfig, device: B::Device) {
         .save(format!("{ARTIFACT_DIR}/config.json"))
         .expect("Config should be saved successfully");
 
-    B::seed(config.seed);
+    B::seed(&device, config.seed);
 
     // Dataloaders
     let batcher_train = ClassificationBatcher::<B>::new(device.clone());
@@ -97,28 +103,28 @@ pub fn train<B: AutodiffBackend>(config: TrainingConfig, device: B::Device) {
         .build(ImageFolderDataset::cifar10_test());
 
     // Learner config
-    let learner = LearnerBuilder::new(ARTIFACT_DIR)
+    let training = SupervisedTraining::new(ARTIFACT_DIR, dataloader_train, dataloader_test)
         .metric_train_numeric(AccuracyMetric::new())
         .metric_valid_numeric(AccuracyMetric::new())
         .metric_train_numeric(LossMetric::new())
         .metric_valid_numeric(LossMetric::new())
         .with_file_checkpointer(CompactRecorder::new())
-        .learning_strategy(LearningStrategy::SingleDevice(device.clone()))
         .num_epochs(config.num_epochs)
-        .summary()
-        .build(
-            Cnn::new(NUM_CLASSES.into(), &device),
-            config.optimizer.init(),
-            config.learning_rate,
-        );
+        .summary();
+
+    let model = Cnn::new(NUM_CLASSES.into(), &device);
 
     // Training
     let now = Instant::now();
-    let model_trained = learner.fit(dataloader_train, dataloader_test);
+    let result = training.launch(Learner::new(
+        model,
+        config.optimizer.init(),
+        config.learning_rate,
+    ));
     let elapsed = now.elapsed().as_secs();
     println!("Training completed in {}m{}s", (elapsed / 60), elapsed % 60);
 
-    model_trained
+    result
         .model
         .save_file(format!("{ARTIFACT_DIR}/model"), &CompactRecorder::new())
         .expect("Trained model should be saved successfully");

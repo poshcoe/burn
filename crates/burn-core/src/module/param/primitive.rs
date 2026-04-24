@@ -3,7 +3,7 @@ use crate::module::{
     ModuleVisitor,
 };
 
-use alloc::{format, vec::Vec};
+use alloc::{format, string::ToString, vec::Vec};
 
 use burn_tensor::{
     backend::{AutodiffBackend, Backend},
@@ -81,6 +81,10 @@ where
     fn valid(&self) -> Self::InnerModule {
         self.as_ref().map(|module| module.valid())
     }
+
+    fn from_inner(module: Self::InnerModule) -> Self {
+        module.map(|module| T::from_inner(module))
+    }
 }
 
 impl<T, B> Module<B> for Vec<T>
@@ -100,13 +104,25 @@ where
     }
 
     fn visit<V: ModuleVisitor<B>>(&self, visitor: &mut V) {
-        self.iter().for_each(|module| {
+        for (i, module) in self.iter().enumerate() {
+            let index_str = alloc::format!("{}", i);
+            visitor.enter_module(&index_str, "Vec");
             module.visit(visitor);
-        });
+            visitor.exit_module(&index_str, "Vec");
+        }
     }
 
     fn map<M: ModuleMapper<B>>(self, mapper: &mut M) -> Self {
-        self.into_iter().map(|module| module.map(mapper)).collect()
+        self.into_iter()
+            .enumerate()
+            .map(|(i, module)| {
+                let index_str = alloc::format!("{}", i);
+                mapper.enter_module(&index_str, "Vec");
+                let mapped = module.map(mapper);
+                mapper.exit_module(&index_str, "Vec");
+                mapped
+            })
+            .collect()
     }
 
     fn into_record(self) -> Self::Record {
@@ -172,6 +188,13 @@ where
     fn valid(&self) -> Self::InnerModule {
         self.iter().map(|module| module.valid()).collect()
     }
+
+    fn from_inner(module: Self::InnerModule) -> Self {
+        module
+            .into_iter()
+            .map(|module| T::from_inner(module))
+            .collect()
+    }
 }
 
 impl<const N: usize, T, B> Module<B> for [T; N]
@@ -199,13 +222,26 @@ where
     }
 
     fn visit<V: ModuleVisitor<B>>(&self, visitor: &mut V) {
-        self.iter().for_each(|module| {
+        for (i, module) in self.iter().enumerate() {
+            let index_str = alloc::format!("{}", i);
+            visitor.enter_module(&index_str, "Array");
             module.visit(visitor);
-        });
+            visitor.exit_module(&index_str, "Array");
+        }
     }
 
     fn map<M: ModuleMapper<B>>(self, mapper: &mut M) -> Self {
-        self.map(|module| module.map(mapper))
+        let mut result = Vec::with_capacity(N);
+        for (i, module) in IntoIterator::into_iter(self).enumerate() {
+            let index_str = alloc::format!("{}", i);
+            mapper.enter_module(&index_str, "Array");
+            let mapped = module.map(mapper);
+            mapper.exit_module(&index_str, "Array");
+            result.push(mapped);
+        }
+        result
+            .try_into()
+            .unwrap_or_else(|v: Vec<T>| panic!("Expected array of length {}, got {}", N, v.len()))
     }
 
     fn load_record(self, record: Self::Record) -> Self {
@@ -256,12 +292,16 @@ where
     fn valid(&self) -> Self::InnerModule {
         self.clone().map(|module| module.valid())
     }
+
+    fn from_inner(module: Self::InnerModule) -> Self {
+        module.map(|module| T::from_inner(module))
+    }
 }
 
 /// A macro for generating implementations for tuple modules of different sizes.
 /// For example: `impl_module_tuple!([L0, L1][0, 1])`.
 /// Would generate an implementation for a tuple of size 2.
-/// For this macro to work properly, please adhear to the convention:
+/// For this macro to work properly, please adhere to the convention:
 /// `impl_module_tuple!([L0, L1, ..., Ln][0, 1, ..., n])`.
 macro_rules! impl_module_tuple {
     // `$l` represents the generic modules.
@@ -288,11 +328,24 @@ macro_rules! impl_module_tuple {
             }
 
             fn visit<V: ModuleVisitor<B>>(&self, visitor: &mut V) {
-                $(self.$i.visit(visitor);)*
+                $(
+                    let index_str = $i.to_string();
+                    visitor.enter_module(&index_str, "Tuple");
+                    self.$i.visit(visitor);
+                    visitor.exit_module(&index_str, "Tuple");
+                )*
             }
 
             fn map<M: ModuleMapper<B>>(self, mapper: &mut M) -> Self {
-                ($(self.$i.map(mapper),)*)
+                ($(
+                    {
+                        let index_str = $i.to_string();
+                        mapper.enter_module(&index_str, "Tuple");
+                        let mapped = self.$i.map(mapper);
+                        mapper.exit_module(&index_str, "Tuple");
+                        mapped
+                    }
+                ,)*)
             }
 
             fn load_record(self, record: Self::Record) -> Self {
@@ -313,6 +366,10 @@ macro_rules! impl_module_tuple {
 
             fn valid(&self) -> Self::InnerModule {
                 ($(self.$i.valid(),)*)
+            }
+
+            fn from_inner(module: Self::InnerModule) -> Self {
+                ($($l::from_inner(module.$i),)*)
             }
         }
 

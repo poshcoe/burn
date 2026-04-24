@@ -1,10 +1,12 @@
-use burn_common::future::DynFut;
-use burn_ir::{BackendIr, OperationIr, TensorHandle, TensorIr};
-use burn_tensor::{
+use alloc::format;
+use alloc::string::String;
+use burn_backend::{
     DType, Shape, TensorData,
-    backend::{Backend, DeviceId, DeviceOps},
+    backend::{Backend, DeviceId, DeviceOps, ExecutionError},
     try_read_sync,
 };
+use burn_ir::{BackendIr, OperationIr, TensorHandle, TensorId, TensorIr};
+use burn_std::future::DynFut;
 
 use crate::{
     ByteBridge, DirectChannel, MultiBackendBridge, RouterTensor, Runner, RunnerChannel,
@@ -20,7 +22,7 @@ macro_rules! impl_multi_backend_types {
         /// - `Handle`: the type used to point to a tensor (defined for all backends).
         /// - `MultiRunnerClient`: a client for multiple runners (each responsible to execute tensor operations on a given backend).
         /// - `DirectChannel`: a local channel with direct connection to the backend runner clients.
-        /// - `ByteBridge`: a simple multi-backend bridge that transfers tensors via the underlying [tensor data](burn_tensor::TensorData).
+        /// - `ByteBridge`: a simple multi-backend bridge that transfers tensors via the underlying [tensor data](burn_backend::TensorData).
         ///
         /// Each enum type is defined with backend identifiers as variant names (e.g., `B1` and `B2` for dual backends).
         pub mod $module_name {
@@ -67,8 +69,13 @@ macro_rules! impl_multi_backend_types {
                 }
             }
 
-            impl<$DefaultBackend: Backend, $($OtherBackend: Backend),+> DeviceOps for MultiDevice<$DefaultBackend, $($OtherBackend),+> {
-                fn id(&self) -> DeviceId {
+            impl<$DefaultBackend: Backend, $($OtherBackend: Backend),+> burn_std::device::Device for MultiDevice<$DefaultBackend, $($OtherBackend),+> {
+                fn from_id(_device_id: DeviceId) -> Self {
+                    // TODO: Should be fix with the new router backend.
+                    Default::default()
+                }
+
+                fn to_id(&self) -> DeviceId {
                     match self {
                         Self::$DefaultBackend(device) => device.id(),
                         $(
@@ -76,7 +83,10 @@ macro_rules! impl_multi_backend_types {
                         )+
                     }
                 }
+
             }
+
+            impl<$DefaultBackend: Backend, $($OtherBackend: Backend),+> DeviceOps for MultiDevice<$DefaultBackend, $($OtherBackend),+> {}
 
             /// A local client with multiple runners (each responsible to execute tensor operations on a given backend).
             #[derive(Clone)]
@@ -93,20 +103,20 @@ macro_rules! impl_multi_backend_types {
             {
                type Device = MultiDevice<$DefaultBackend, $($OtherBackend),+>;
 
-                fn register(&self, op: OperationIr) {
+                fn register_op(&self, op: OperationIr) {
                     match self {
-                        Self::$DefaultBackend(runner) => runner.register(op),
+                        Self::$DefaultBackend(runner) => runner.register_op(op),
                         $(
-                            Self::$OtherBackend(runner) => runner.register(op),
+                            Self::$OtherBackend(runner) => runner.register_op(op),
                         )+
                     }
                 }
 
-                fn read_tensor(&self, tensor: TensorIr) -> DynFut<TensorData> {
+                fn read_tensor_async(&self, tensor: TensorIr) -> DynFut<Result<TensorData, ExecutionError>> {
                     match self {
-                        Self::$DefaultBackend(runner) => runner.read_tensor(tensor),
+                        Self::$DefaultBackend(runner) => runner.read_tensor_async(tensor),
                         $(
-                            Self::$OtherBackend(runner) => runner.read_tensor(tensor),
+                            Self::$OtherBackend(runner) => runner.read_tensor_async(tensor),
                         )+
                     }
                 }
@@ -126,36 +136,6 @@ macro_rules! impl_multi_backend_types {
                     }
                 }
 
-                fn register_empty_tensor(&self, shape: Vec<usize>, dtype: DType) -> RouterTensor<Self> {
-                    match self {
-                        Self::$DefaultBackend(runner) => {
-                            let desc = runner.register_empty_tensor_desc(shape, dtype);
-                            RouterTensor::new(desc.id, desc.shape, desc.dtype, self.clone())
-                        }
-                        $(
-                            Self::$OtherBackend(runner) => {
-                            let desc = runner.register_empty_tensor_desc(shape, dtype);
-                                RouterTensor::new(desc.id, desc.shape, desc.dtype, self.clone())
-                            }
-                        )+
-                    }
-                }
-
-                fn register_float_tensor(&self, shape: Vec<usize>, dtype: burn_tensor::FloatDType) -> RouterTensor<Self> {
-                    match self {
-                        Self::$DefaultBackend(runner) => {
-                            let desc = runner.register_float_tensor_desc(shape, dtype);
-                            RouterTensor::new(desc.id, desc.shape, desc.dtype, self.clone())
-                        }
-                        $(
-                            Self::$OtherBackend(runner) => {
-                            let desc = runner.register_float_tensor_desc(shape, dtype);
-                                RouterTensor::new(desc.id, desc.shape, desc.dtype, self.clone())
-                            }
-                        )+
-                    }
-                }
-
                 fn device(&self) -> Self::Device {
                     match self {
                         Self::$DefaultBackend(runner) => MultiDevice::$DefaultBackend(runner.device()),
@@ -165,13 +145,13 @@ macro_rules! impl_multi_backend_types {
                     }
                 }
 
-                fn sync(&self) {
+                fn sync(&self) -> Result<(), ExecutionError> {
                     match self {
                         Self::$DefaultBackend(runner) => runner.sync(),
                         $(
                             Self::$OtherBackend(runner) => runner.sync(),
                         )+
-                    };
+                    }
                 }
 
                 fn seed(&self, seed: u64) {
@@ -179,6 +159,24 @@ macro_rules! impl_multi_backend_types {
                         Self::$DefaultBackend(runner) => runner.seed(seed),
                         $(
                             Self::$OtherBackend(runner) => runner.seed(seed),
+                        )+
+                    }
+                }
+
+                fn create_empty_handle(&self) -> TensorId {
+                    match self {
+                        Self::$DefaultBackend(runner) => runner.create_empty_handle(),
+                        $(
+                            Self::$OtherBackend(runner) => runner.create_empty_handle(),
+                        )+
+                    }
+                }
+
+                fn dtype_usage(&self, dtype: burn_std::DType) -> burn_backend::DTypeUsageSet {
+                    match self {
+                        Self::$DefaultBackend(runner) => runner.dtype_usage(dtype),
+                        $(
+                            Self::$OtherBackend(runner) => runner.dtype_usage(dtype),
                         )+
                     }
                 }
@@ -222,7 +220,7 @@ macro_rules! impl_multi_backend_types {
                 fn register_tensor(
                     client: &Self::Client,
                     handle: <Self::Bridge as MultiBackendBridge>::TensorHandle,
-                    shape: Vec<usize>,
+                    shape: Shape,
                     dtype: DType,
                 ) -> RouterTensor<Self::Client> {
                     match client {
@@ -295,7 +293,7 @@ macro_rules! bridge {
     ($BackendA:ident, $BackendB:ident, $handle:expr, $device:expr, $shape:expr) => {{
         // Byte bridge between two backends
         let tensor = $BackendA::float_tensor(TensorHandle { handle: $handle, shape: $shape });
-        let data = try_read_sync($BackendA::float_into_data(tensor)).expect(
+        let data = try_read_sync($BackendA::float_into_data(tensor)).unwrap().expect(
             "Failed to read tensor data synchronously. This can happen on platforms that don't support blocking futures like WASM."
         );
         let tensor = $BackendB::float_from_data(data, $device);

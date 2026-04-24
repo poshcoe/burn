@@ -4,8 +4,16 @@ logger = { log = "info", level = "disabled" }
 [autotune]
 level = "balanced"
 cache = "target"
-logger = { log = "info", level = "minimal" }
+logger = { info = true, level = "full" }
 
 [compilation]
 logger = { level = "disabled" }
 cache = "target"
+check_mode = "auto"
+
+[memory]
+logger = { level = "disabled", file = "/tmp/memory.log" }
+persistent_memory = "enabled"
+
+[streaming]
+max_streams = 8

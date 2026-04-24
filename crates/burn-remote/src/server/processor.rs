@@ -1,10 +1,11 @@
+use burn_backend::TensorData;
 use burn_communication::{
     Protocol,
     data_service::{TensorDataService, TensorTransferId},
 };
 use burn_ir::{BackendIr, OperationIr, TensorId, TensorIr};
 use burn_router::{Runner, RunnerClient};
-use burn_tensor::TensorData;
+use burn_std::DType;
 use core::marker::PhantomData;
 use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
@@ -34,6 +35,8 @@ pub enum ProcessorTask {
     },
     ReadTensor(ConnectionId, TensorIr, Callback<TaskResponse>),
     Sync(ConnectionId, Callback<TaskResponse>),
+    Seed(u64),
+    DTypeUsage(ConnectionId, DType, Callback<TaskResponse>),
     Close,
 }
 
@@ -53,13 +56,13 @@ where
             while let Some(item) = task_rec.recv().await {
                 match item {
                     ProcessorTask::RegisterOperation(op) => {
-                        runner.register(*op);
+                        runner.register_op(*op);
                     }
                     ProcessorTask::Sync(id, callback) => {
-                        runner.sync();
+                        let result = runner.sync();
                         callback
                             .send(TaskResponse {
-                                content: TaskResponseContent::SyncBackend,
+                                content: TaskResponseContent::SyncBackend(result),
                                 id,
                             })
                             .await
@@ -68,7 +71,6 @@ where
                     ProcessorTask::RegisterTensor(id, data) => {
                         runner.register_tensor_data_id(id, data);
                     }
-                    // TODO: see the params of these two following tasks, aren't they a bit stupid?
                     ProcessorTask::RegisterTensorRemote(remote_tensor, new_id) => {
                         log::info!(
                             "Registering remote tensor...(id: {:?})",
@@ -86,11 +88,13 @@ where
                         count,
                     } => {
                         log::info!("Exposing tensor: (id: {transfer_id:?})");
-                        let data = runner.read_tensor(tensor).await;
-                        data_service.expose_data(data, count, transfer_id).await;
+                        let data = runner.read_tensor_async(tensor).await;
+                        data_service
+                            .expose_data(data.unwrap(), count, transfer_id)
+                            .await;
                     }
                     ProcessorTask::ReadTensor(id, tensor, callback) => {
-                        let tensor = runner.read_tensor(tensor).await;
+                        let tensor = runner.read_tensor_async(tensor).await;
                         callback
                             .send(TaskResponse {
                                 content: TaskResponseContent::ReadTensor(tensor),
@@ -101,10 +105,21 @@ where
                     }
                     ProcessorTask::Close => {
                         let device = runner.device();
-                        runner.sync();
+                        runner.sync().unwrap();
                         core::mem::drop(runner);
-                        B::sync(&device);
+                        B::sync(&device).unwrap();
                         break;
+                    }
+                    ProcessorTask::Seed(seed) => runner.seed(seed),
+                    ProcessorTask::DTypeUsage(id, dtype, callback) => {
+                        let result = runner.dtype_usage(dtype);
+                        callback
+                            .send(TaskResponse {
+                                content: TaskResponseContent::DTypeUsage(result),
+                                id,
+                            })
+                            .await
+                            .unwrap();
                     }
                 }
             }

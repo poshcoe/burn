@@ -10,15 +10,19 @@ version.workspace = true
 workspace = true
 
 [features]
-default = ["burn/std", "burn/tui", "burn/fusion"]
+default = ["burn/default", "burn/tui"]
+# Opt-in for macOS users with the Vulkan SDK installed (enabled by default on other platforms)
+vulkan = ["burn/vulkan"]
 
 [dependencies]
-# Disable autotune default for convolutions
 burn = { path = "../../crates/burn", features = [
     "webgpu",
     "train",
     "vision",
 ], default-features = false }
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+burn = { path = "../../crates/burn", features = ["vulkan"] }
 
 # Serialization
 log = { workspace = true }

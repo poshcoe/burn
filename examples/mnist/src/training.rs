@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use crate::{
     data::{MnistBatcher, MnistItemPrepared, MnistMapper, Transform},
@@ -18,12 +18,11 @@ use burn::{
         composed::ComposedLrSchedulerConfig, cosine::CosineAnnealingLrSchedulerConfig,
         linear::LinearLrSchedulerConfig,
     },
-    optim::{AdamConfig, decay::WeightDecayConfig},
     prelude::*,
     record::{CompactRecorder, NoStdTrainingRecorder},
     tensor::backend::AutodiffBackend,
     train::{
-        EvaluatorBuilder, LearnerBuilder, MetricEarlyStoppingStrategy, StoppingCondition,
+        EvaluatorBuilder, Learner, MetricEarlyStoppingStrategy, StoppingCondition,
         metric::{
             AccuracyMetric, LearningRateMetric, LossMetric,
             store::{Aggregate, Direction, Split},
@@ -31,12 +30,13 @@ use burn::{
         renderer::MetricsRenderer,
     },
 };
+use burn::{optim::AdamWConfig, train::SupervisedTraining};
 
 static ARTIFACT_DIR: &str = "/tmp/burn-example-mnist";
 
-#[derive(Config)]
+#[derive(Config, Debug)]
 pub struct MnistTrainingConfig {
-    #[config(default = 20)]
+    #[config(default = 5)]
     pub num_epochs: usize,
 
     #[config(default = 256)]
@@ -48,7 +48,7 @@ pub struct MnistTrainingConfig {
     #[config(default = 42)]
     pub seed: u64,
 
-    pub optimizer: AdamConfig,
+    pub optimizer: AdamWConfig,
 }
 
 fn create_artifact_dir(artifact_dir: &str) {
@@ -60,10 +60,12 @@ fn create_artifact_dir(artifact_dir: &str) {
 pub fn run<B: AutodiffBackend>(device: B::Device) {
     create_artifact_dir(ARTIFACT_DIR);
     // Config
-    let config_optimizer = AdamConfig::new().with_weight_decay(Some(WeightDecayConfig::new(5e-5)));
+    let config_optimizer = AdamWConfig::new()
+        .with_cautious_weight_decay(true)
+        .with_weight_decay(5e-5);
 
     let config = MnistTrainingConfig::new(config_optimizer);
-    B::seed(config.seed);
+    B::seed(&device, config.seed);
 
     let model = Model::<B>::new(&device);
 
@@ -92,7 +94,7 @@ pub fn run<B: AutodiffBackend>(device: B::Device) {
         .linear(LinearLrSchedulerConfig::new(1e-8, 1.0, 2000))
         .linear(LinearLrSchedulerConfig::new(1e-2, 1e-6, 10000));
 
-    let learner = LearnerBuilder::new(ARTIFACT_DIR)
+    let training = SupervisedTraining::new(ARTIFACT_DIR, dataloader_train, dataloader_valid)
         .metrics((AccuracyMetric::new(), LossMetric::new()))
         .metric_train_numeric(LearningRateMetric::new())
         .with_file_checkpointer(CompactRecorder::new())
@@ -104,11 +106,13 @@ pub fn run<B: AutodiffBackend>(device: B::Device) {
             StoppingCondition::NoImprovementSince { n_epochs: 5 },
         ))
         .num_epochs(config.num_epochs)
-        .summary()
-        .learning_strategy(burn::train::LearningStrategy::SingleDevice(device))
-        .build(model, config.optimizer.init(), lr_scheduler.init().unwrap());
+        .summary();
 
-    let result = learner.fit(dataloader_train, dataloader_valid);
+    let result = training.launch(Learner::new(
+        model,
+        config.optimizer.init(),
+        lr_scheduler.init().unwrap(),
+    ));
 
     let dataset_test_plain = Arc::new(MnistDataset::test());
     let mut renderer = result.renderer;
@@ -140,14 +144,6 @@ pub fn run<B: AutodiffBackend>(device: B::Device) {
         .unwrap();
 
     renderer.manual_close();
-    core::mem::drop(renderer);
-
-    // Making sure the Terminal is resetted.
-    std::thread::sleep(Duration::from_secs(1));
-    if let Some(summary) = result.summary {
-        log::info!("{}", summary);
-        println!("{}", summary);
-    }
 }
 
 fn evaluate<B: Backend>(
@@ -168,6 +164,7 @@ fn evaluate<B: Backend>(
     let evaluator = EvaluatorBuilder::new(ARTIFACT_DIR)
         .renderer(renderer)
         .metrics((AccuracyMetric::new(), LossMetric::new()))
+        .summary()
         .build(model);
 
     evaluator.eval(name, dataloader_test)
@@ -184,9 +181,11 @@ impl core::fmt::Display for DatasetIdent {
         match self {
             DatasetIdent::Plain => f.write_str("Plain")?,
             DatasetIdent::Transformed(items) => {
-                for i in items {
-                    f.write_fmt(format_args!("{i}"))?;
-                    f.write_str(" ")?;
+                for i in 0..items.len() {
+                    f.write_fmt(format_args!("{}", items[i]))?;
+                    if i < items.len() - 1 {
+                        f.write_str(" ")?;
+                    }
                 }
             }
             DatasetIdent::All => f.write_str("All")?,

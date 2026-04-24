@@ -1,15 +1,16 @@
 use crate::{CubeRuntime, FloatElement, IntElement, element::BoolElement, tensor::CubeTensor};
-use burn_tensor::backend::{Backend, DeviceOps};
-use cubecl::server::ComputeServer;
-use rand::{SeedableRng, rngs::StdRng};
-use std::{marker::PhantomData, sync::Mutex};
+use burn_backend::{Backend, DTypeUsage, DTypeUsageSet, DeviceOps, ExecutionError, TensorData};
+use burn_std::DType;
+use cubecl::{
+    features::{MmaConfig, TypeUsage},
+    server::ComputeServer,
+};
+use std::marker::PhantomData;
 
+#[cfg(not(feature = "fusion"))]
+use burn_backend::tensor::{BoolTensor, FloatTensor, IntTensor, QuantizedTensor};
 #[cfg(not(feature = "fusion"))]
 use burn_ir::{BackendIr, TensorHandle};
-#[cfg(not(feature = "fusion"))]
-use burn_tensor::ops::{BoolTensor, FloatTensor, IntTensor, QuantizedTensor};
-
-pub(crate) static SEED: Mutex<Option<StdRng>> = Mutex::new(None);
 
 /// Generic tensor backend that can be compiled just-in-time to any shader runtime
 #[derive(new)]
@@ -24,7 +25,7 @@ impl<R, F, I, BT> Backend for CubeBackend<R, F, I, BT>
 where
     R: CubeRuntime,
     R::Server: ComputeServer,
-    R::Device: burn_tensor::backend::DeviceOps,
+    R::Device: DeviceOps,
     F: FloatElement,
     I: IntElement,
     BT: BoolElement,
@@ -39,43 +40,98 @@ where
     type IntTensorPrimitive = CubeTensor<R>;
     type BoolTensorPrimitive = CubeTensor<R>;
     type QuantizedTensorPrimitive = CubeTensor<R>;
-    type QuantizedEncoding = u32;
 
     fn name(device: &Self::Device) -> String {
         let client = R::client(device);
         format!("cubecl<{}>", R::name(&client))
     }
 
-    fn seed(seed: u64) {
-        let rng = StdRng::seed_from_u64(seed);
-        let mut seed = SEED.lock().unwrap();
-        *seed = Some(rng);
+    fn seed(_device: &Self::Device, seed: u64) {
+        cubek::random::seed(seed);
     }
 
-    fn ad_enabled() -> bool {
+    fn ad_enabled(_device: &Self::Device) -> bool {
         false
     }
 
-    fn sync(device: &Self::Device) {
+    fn sync(device: &Self::Device) -> Result<(), ExecutionError> {
         let client = R::client(device);
-        futures_lite::future::block_on(client.sync());
+        futures_lite::future::block_on(client.sync()).map_err(|err| ExecutionError::WithContext {
+            reason: format!("{err}"),
+        })
     }
 
-    fn memory_static_allocations<Output, Input, Func: Fn(Input) -> Output>(
+    fn memory_persistent_allocations<
+        Output: Send,
+        Input: Send,
+        Func: Fn(Input) -> Output + Send,
+    >(
         device: &Self::Device,
         input: Input,
         func: Func,
     ) -> Output {
         let client = R::client(device);
-        let output = client.memory_static_allocation(input, func);
-        let memory = client.memory_usage();
-        println!("{memory}");
-        output
+        client.memory_persistent_allocation(input, func).unwrap()
     }
 
     fn memory_cleanup(device: &Self::Device) {
         let client = R::client(device);
         client.memory_cleanup();
+    }
+
+    fn staging<'a, Iter>(data: Iter, device: &Self::Device)
+    where
+        Iter: Iterator<Item = &'a mut TensorData>,
+    {
+        let client = R::client(device);
+        client.staging(data.map(|td| &mut td.bytes), false);
+    }
+
+    fn supports_dtype(device: &Self::Device, dtype: DType) -> bool {
+        let client = R::client(device);
+
+        let type_usage = client.properties().type_usage(dtype.into());
+        // Same as `TypeUsage::all_scalar()`, but we make the usage explicit here
+        type_usage.is_superset(
+            TypeUsage::Buffer
+                | TypeUsage::Conversion
+                | TypeUsage::Arithmetic
+                | TypeUsage::DotProduct,
+        )
+    }
+
+    fn dtype_usage(device: &Self::Device, dtype: DType) -> DTypeUsageSet {
+        let client = R::client(device);
+
+        let props = client.properties();
+        let storage = dtype.into();
+        let usage = props.type_usage(storage);
+
+        let mut out = DTypeUsageSet::new();
+
+        if usage.is_superset(TypeUsage::Buffer | TypeUsage::Conversion) {
+            out |= DTypeUsage::Storage;
+        }
+
+        if usage.contains(TypeUsage::Arithmetic) {
+            out |= DTypeUsage::Arithmetic;
+        }
+
+        let has_mma = |cfg: &MmaConfig| {
+            cfg.a_type == storage || cfg.b_type == storage || cfg.cd_type == storage
+        };
+        if props.features.matmul.cmma.iter().any(has_mma)
+            || props.features.matmul.mma.iter().any(has_mma)
+        {
+            out |= DTypeUsage::Accelerated;
+        }
+
+        out
+    }
+
+    fn device_count(type_id: u16) -> usize {
+        let client = R::client(&Default::default());
+        client.device_count(type_id)
     }
 }
 

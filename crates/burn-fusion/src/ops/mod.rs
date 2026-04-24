@@ -1,10 +1,12 @@
 mod activation;
 mod binary;
-mod boolean;
-mod float;
-mod int;
+mod bool_tensor;
+#[cfg(feature = "distributed")]
+mod distributed;
+mod int_tensor;
 mod module;
 mod qtensor;
+mod tensor;
 mod transaction;
 mod unary;
 

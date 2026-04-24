@@ -1,4 +1,4 @@
-#![cfg_attr(docsrs, feature(doc_auto_cfg))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 extern crate alloc;
 
@@ -111,20 +111,79 @@ pub type Metal<F = f32, I = i32, B = u8> = Wgpu<F, I, B>;
 
 #[cfg(test)]
 mod tests {
-    use burn_cubecl::CubeBackend;
-    #[cfg(feature = "vulkan")]
-    pub use half::f16;
-    #[cfg(feature = "metal")]
-    pub use half::f16;
+    use super::*;
+    use burn_backend::{Backend, BoolStore, DType, QTensorPrimitive};
 
-    pub type TestRuntime = cubecl::wgpu::WgpuRuntime;
+    #[test]
+    fn should_support_dtypes() {
+        type B = Wgpu;
+        let device = Default::default();
 
-    // Don't test `flex32` for now, burn sees it as `f32` but is actually `f16` precision, so it
-    // breaks a lot of tests from precision issues
-    #[cfg(feature = "vulkan")]
-    burn_cubecl::testgen_all!([f16, f32], [i8, i16, i32, i64], [u8, u32]);
-    #[cfg(feature = "metal")]
-    burn_cubecl::testgen_all!([f16, f32], [i16, i32], [u32]);
-    #[cfg(all(not(feature = "vulkan"), not(feature = "metal")))]
-    burn_cubecl::testgen_all!([f32], [i32], [u32]);
+        assert!(B::supports_dtype(&device, DType::F32));
+        assert!(B::supports_dtype(&device, DType::I64));
+        assert!(B::supports_dtype(&device, DType::I32));
+        assert!(B::supports_dtype(&device, DType::U64));
+        assert!(B::supports_dtype(&device, DType::U32));
+        assert!(B::supports_dtype(
+            &device,
+            DType::QFloat(CubeTensor::<WgpuRuntime>::default_scheme())
+        ));
+        // Registered as supported type but we don't actually use it?
+        assert!(B::supports_dtype(&device, DType::Bool(BoolStore::Native)));
+
+        #[cfg(feature = "vulkan")]
+        {
+            assert!(B::supports_dtype(&device, DType::F16));
+            assert!(B::supports_dtype(&device, DType::I16));
+            assert!(B::supports_dtype(&device, DType::I8));
+            assert!(B::supports_dtype(&device, DType::U16));
+            assert!(B::supports_dtype(&device, DType::U8));
+
+            assert!(!B::supports_dtype(&device, DType::F64));
+            assert!(!B::supports_dtype(&device, DType::Flex32));
+            // Not supported for any arithmetics, but buffer, conversion and possibly matmul (hw dependent)
+            assert!(!B::supports_dtype(&device, DType::BF16));
+        }
+
+        #[cfg(feature = "metal")]
+        {
+            assert!(B::supports_dtype(&device, DType::F16));
+            assert!(B::supports_dtype(&device, DType::I16));
+            assert!(B::supports_dtype(&device, DType::I8));
+            assert!(B::supports_dtype(&device, DType::U16));
+            assert!(B::supports_dtype(&device, DType::U8));
+
+            assert!(!B::supports_dtype(&device, DType::F64));
+            assert!(!B::supports_dtype(&device, DType::BF16));
+            assert!(!B::supports_dtype(&device, DType::Flex32));
+        }
+
+        // On macOS without the `metal` feature, wgpu still uses Metal at runtime,
+        // which doesn't support F64 or BF16.
+        #[cfg(all(not(any(feature = "vulkan", feature = "metal")), target_os = "macos"))]
+        {
+            assert!(B::supports_dtype(&device, DType::Flex32));
+            assert!(B::supports_dtype(&device, DType::F16));
+
+            assert!(!B::supports_dtype(&device, DType::F64));
+            assert!(!B::supports_dtype(&device, DType::BF16));
+            assert!(!B::supports_dtype(&device, DType::I16));
+            assert!(!B::supports_dtype(&device, DType::I8));
+            assert!(!B::supports_dtype(&device, DType::U16));
+            assert!(!B::supports_dtype(&device, DType::U8));
+        }
+
+        #[cfg(not(any(feature = "vulkan", feature = "metal", target_os = "macos")))]
+        {
+            assert!(B::supports_dtype(&device, DType::F64));
+            assert!(B::supports_dtype(&device, DType::Flex32));
+            assert!(B::supports_dtype(&device, DType::F16));
+
+            assert!(!B::supports_dtype(&device, DType::BF16));
+            assert!(!B::supports_dtype(&device, DType::I16));
+            assert!(!B::supports_dtype(&device, DType::I8));
+            assert!(!B::supports_dtype(&device, DType::U16));
+            assert!(!B::supports_dtype(&device, DType::U8));
+        }
+    }
 }

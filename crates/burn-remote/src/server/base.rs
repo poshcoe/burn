@@ -7,8 +7,8 @@ use burn_communication::{
 use std::{marker::PhantomData, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
+use burn_backend::tensor::Device;
 use burn_ir::BackendIr;
-use burn_tensor::Device;
 
 use crate::shared::{ComputeTask, Task};
 
@@ -155,6 +155,10 @@ where
                         .expose_tensor_remote(tensor, count, transfer_id)
                         .await;
                 }
+                ComputeTask::Seed(seed) => {
+                    stream.seed(seed).await;
+                }
+                ComputeTask::DTypeUsage(dtype) => stream.dtype_usage(connection_id, dtype).await,
             }
         }
 

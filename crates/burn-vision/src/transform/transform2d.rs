@@ -1,4 +1,9 @@
-use burn_tensor::{Tensor, backend::Backend, grid::affine_grid_2d, ops::InterpolateMode};
+use burn_tensor::{
+    Tensor,
+    backend::Backend,
+    grid::affine_grid_2d,
+    ops::{GridSampleOptions, GridSamplePaddingMode, InterpolateMode},
+};
 
 /// 2D point transformation
 ///
@@ -23,7 +28,10 @@ impl Transform2D {
         let transform = transform.reshape([1, 2, 3]).expand([batch_size, 2, 3]);
         let grid = affine_grid_2d(transform, [batch_size, channels, height, width]);
 
-        img.grid_sample_2d(grid, InterpolateMode::Bilinear)
+        let options = GridSampleOptions::new(InterpolateMode::Bilinear)
+            .with_padding_mode(GridSamplePaddingMode::Border)
+            .with_align_corners(true);
+        img.grid_sample_2d(grid, options)
     }
 
     /// Makes a 2d transformation composed of other transformations
@@ -67,7 +75,7 @@ impl Transform2D {
         }
     }
 
-    /// Makes a [ResampleTransform] for rotating a tensor
+    /// Makes a [`Transform2D`] for rotating a tensor
     ///
     /// * `theta` - In radians, the rotation
     /// * `cx` - Center of rotation, x
@@ -84,7 +92,7 @@ impl Transform2D {
         Self { transform }
     }
 
-    /// Makes a [ResampleTransform] for scaling an image tensor
+    /// Makes a [`Transform2D`] for scaling an image tensor
     ///
     /// * `sx` - Scale factor in the x direction
     /// * `sy` - Scale factor in the y direction
@@ -96,7 +104,7 @@ impl Transform2D {
         Self { transform }
     }
 
-    /// Makes a [ResampleTransform] for translating an image tensor
+    /// Makes a [`Transform2D`] for translating an image tensor
     ///
     /// * `tx` - Translation in the x direction
     /// * `ty` - Translation in the y direction
@@ -126,9 +134,9 @@ impl Transform2D {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use burn_ndarray::NdArray;
+    use burn_flex::Flex;
     use burn_tensor::Tolerance;
-    type B = NdArray;
+    type B = Flex;
 
     #[test]
     fn transform_identity_translation() {

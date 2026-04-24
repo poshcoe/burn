@@ -14,13 +14,13 @@ use burn::{
     record::{CompactRecorder, DefaultRecorder, Recorder},
     tensor::backend::AutodiffBackend,
     train::{
-        LearnerBuilder, LearningStrategy,
-        metric::{AccuracyMetric, CudaMetric, LearningRateMetric, LossMetric},
+        Learner, SupervisedTraining,
+        metric::{AccuracyMetric, CudaMetric, LearningRateMetric, LossMetric, PerplexityMetric},
     },
 };
 use std::sync::Arc;
 
-#[derive(Config)]
+#[derive(Config, Debug)]
 pub struct ExperimentConfig {
     transformer: TransformerEncoderConfig,
     optimizer: AdamConfig,
@@ -68,28 +68,28 @@ pub fn train<B: AutodiffBackend, D: Dataset<TextGenerationItem> + 'static>(
         .init()
         .unwrap();
 
-    let learner = LearnerBuilder::new(artifact_dir)
+    let training = SupervisedTraining::new(artifact_dir, dataloader_train, dataloader_test)
         .metric_train(CudaMetric::new())
         .metric_valid(CudaMetric::new())
         .metric_train_numeric(AccuracyMetric::new().with_pad_token(tokenizer.pad_token()))
         .metric_valid_numeric(AccuracyMetric::new().with_pad_token(tokenizer.pad_token()))
+        .metric_train_numeric(PerplexityMetric::new().with_pad_token(tokenizer.pad_token()))
+        .metric_valid_numeric(PerplexityMetric::new().with_pad_token(tokenizer.pad_token()))
         .metric_train(LossMetric::new())
         .metric_valid(LossMetric::new())
         .metric_train_numeric(LearningRateMetric::new())
         .with_file_checkpointer(CompactRecorder::new())
-        .learning_strategy(LearningStrategy::SingleDevice(device))
         .grads_accumulation(accum)
         .num_epochs(config.num_epochs)
-        .summary()
-        .build(model, optim, lr_scheduler);
+        .summary();
 
-    let model_trained = learner.fit(dataloader_train, dataloader_test);
+    let result = training.launch(Learner::new(model, optim, lr_scheduler));
 
     config.save(format!("{artifact_dir}/config.json")).unwrap();
 
     DefaultRecorder::new()
         .record(
-            model_trained.model.into_record(),
+            result.model.into_record(),
             format!("{artifact_dir}/model").into(),
         )
         .unwrap();

@@ -13,7 +13,7 @@ use alloc::sync::Arc;
 #[cfg(not(target_has_atomic = "ptr"))]
 use portable_atomic_util::Arc;
 
-use burn_common::stub::Mutex;
+use burn_std::stub::Mutex;
 use burn_tensor::{
     Tensor,
     backend::{AutodiffBackend, Backend},
@@ -33,7 +33,7 @@ mod threading {
 
 #[cfg(not(feature = "std"))]
 mod threading {
-    pub(super) use burn_common::stub::ThreadId;
+    pub(super) use burn_std::stub::ThreadId;
     pub(super) use hashbrown::HashMap;
 
     #[inline(always)]
@@ -80,12 +80,15 @@ impl<const D: usize, B: Backend> Module<B> for RunningState<Tensor<B, D>> {
 
     fn visit<V: ModuleVisitor<B>>(&self, visitor: &mut V) {
         let tensor = self.value.lock().unwrap();
-        visitor.visit_float(self.id, &tensor)
+        let param = Param::initialized(self.id, tensor.clone());
+        visitor.visit_float(&param)
     }
 
     fn map<M: ModuleMapper<B>>(self, mapper: &mut M) -> Self {
         let mut tensor = self.value.lock().unwrap();
-        let tensor_out = mapper.map_float(self.id, tensor.clone());
+        let param = Param::initialized(self.id, tensor.clone());
+        let param_out = mapper.map_float(param);
+        let (_, tensor_out, _) = param_out.consume();
 
         *tensor = tensor_out;
         core::mem::drop(tensor);
@@ -244,5 +247,12 @@ impl<const D: usize, B: AutodiffBackend> AutodiffModule<B> for RunningState<Tens
         let value = self.value();
 
         RunningState::with_id(self.id, value.inner())
+    }
+
+    fn from_inner(module: Self::InnerModule) -> Self {
+        module.sync();
+        let value = module.value();
+
+        RunningState::with_id(module.id, Tensor::from_inner(value))
     }
 }

@@ -4,17 +4,18 @@ use std::sync::Arc;
 use crate::shared::{ConnectionId, TaskResponse, TensorRemote};
 
 use super::processor::{Processor, ProcessorTask};
+use burn_backend::TensorData;
 use burn_communication::{
     Protocol,
     data_service::{TensorDataService, TensorTransferId},
 };
 use burn_ir::{BackendIr, OperationIr, TensorId, TensorIr};
 use burn_router::Runner;
-use burn_tensor::TensorData;
+use burn_std::DType;
 use tokio::sync::mpsc::{Receiver, Sender};
 
 /// A stream makes sure all operations registered are executed in the order they were sent to the
-/// server, protentially waiting to reconstruct consistency.
+/// server, potentially waiting to reconstruct consistency.
 #[derive(Clone)]
 pub struct Stream<B, P>
 where
@@ -111,5 +112,23 @@ where
             .send(ProcessorTask::Close)
             .await
             .unwrap();
+    }
+
+    pub async fn seed(&self, seed: u64) {
+        self.compute_sender
+            .send(ProcessorTask::Seed(seed))
+            .await
+            .unwrap();
+    }
+
+    pub async fn dtype_usage(&self, id: ConnectionId, dtype: DType) {
+        let (callback_sender, callback_rec) = tokio::sync::mpsc::channel(1);
+
+        self.compute_sender
+            .send(ProcessorTask::DTypeUsage(id, dtype, callback_sender))
+            .await
+            .unwrap();
+
+        self.writer_sender.send(callback_rec).await.unwrap();
     }
 }

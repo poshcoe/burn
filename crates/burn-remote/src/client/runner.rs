@@ -1,21 +1,47 @@
-use burn_common::future::DynFut;
+use super::{RemoteChannel, RemoteClient};
+use crate::shared::{ComputeTask, TaskResponseContent, TensorRemote};
+use burn_backend::{DeviceId, DeviceOps, ExecutionError, TensorData};
 use burn_communication::{Address, ProtocolClient, data_service::TensorTransferId};
 use burn_ir::TensorIr;
 use burn_router::{MultiBackendBridge, RouterTensor, RunnerClient, get_client};
-use burn_tensor::{
-    DType, TensorData,
-    backend::{DeviceId, DeviceOps},
-};
-use std::{
-    hash::{DefaultHasher, Hash, Hasher},
-    marker::PhantomData,
-    str::FromStr,
-    sync::Mutex,
-};
+use burn_std::{backtrace::BackTrace, future::DynFut};
+use std::sync::OnceLock;
+use std::{collections::HashMap, marker::PhantomData, str::FromStr, sync::Mutex};
 
-use crate::shared::{ComputeTask, TaskResponseContent, TensorRemote};
+// TODO: we should work with the parsed structure of Address, not the string.
+static ADDRESS_REGISTRY: OnceLock<Mutex<HashMap<String, u32>>> = OnceLock::new();
 
-use super::{RemoteChannel, RemoteClient};
+fn get_address_registry() -> &'static Mutex<HashMap<String, u32>> {
+    ADDRESS_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Map a string network address to a (local runtime) global unique u32.
+///
+/// Globally stable over the lifetime of the process, shared between threads,
+/// If the address has never been seen, a new id will be created.
+/// If the address has been seen, the previous id will be returned.
+pub fn address_to_id<S: AsRef<str>>(address: S) -> u32 {
+    let registry = get_address_registry();
+    let mut registry = registry.lock().unwrap();
+    let next_id = registry.len() as u32;
+    *registry
+        .entry(address.as_ref().to_string())
+        .or_insert_with(|| next_id)
+}
+
+/// Look up an address by id.
+///
+/// Returns the same address given ids by [`address_to_id`].
+pub fn id_to_address(id: u32) -> Option<String> {
+    let registry = get_address_registry();
+    let registry = registry.lock().unwrap();
+    for entry in registry.iter() {
+        if entry.1 == &id {
+            return Some(entry.0.clone());
+        }
+    }
+    None
+}
 
 // It is very important to block on any request made with the sender, since ordering is crucial
 // when registering operation or creating tensors.
@@ -25,19 +51,28 @@ use super::{RemoteChannel, RemoteClient};
 impl RunnerClient for RemoteClient {
     type Device = RemoteDevice;
 
-    fn register(&self, op: burn_ir::OperationIr) {
+    fn register_op(&self, op: burn_ir::OperationIr) {
         self.sender
             .send(ComputeTask::RegisterOperation(Box::new(op)));
     }
 
-    fn read_tensor(&self, tensor: burn_ir::TensorIr) -> DynFut<TensorData> {
+    fn read_tensor_async(
+        &self,
+        tensor: burn_ir::TensorIr,
+    ) -> DynFut<Result<TensorData, ExecutionError>> {
         // Important for ordering to call the creation of the future sync.
-        let fut = self.sender.send_callback(ComputeTask::ReadTensor(tensor));
+        let fut = self.sender.send_async(ComputeTask::ReadTensor(tensor));
 
         Box::pin(async move {
             match fut.await {
-                TaskResponseContent::ReadTensor(data) => data,
-                _ => panic!("Invalid message type"),
+                Ok(response) => match response {
+                    TaskResponseContent::ReadTensor(res) => res,
+                    _ => panic!("Invalid message type"),
+                },
+                Err(e) => Err(ExecutionError::Generic {
+                    reason: format!("Failed to read tensor: {:?}", e),
+                    backtrace: BackTrace::capture(),
+                }),
             }
         })
     }
@@ -52,42 +87,44 @@ impl RunnerClient for RemoteClient {
         RouterTensor::new(id, shape, dtype, self.clone())
     }
 
-    fn register_empty_tensor(
-        &self,
-        shape: Vec<usize>,
-        dtype: burn_tensor::DType,
-    ) -> RouterTensor<Self> {
-        let id = self.sender.new_tensor_id();
-
-        RouterTensor::new(id, shape, dtype, self.clone())
-    }
-
-    fn register_float_tensor(
-        &self,
-        shape: Vec<usize>,
-        _dtype: burn_tensor::FloatDType,
-    ) -> RouterTensor<Self> {
-        self.register_empty_tensor(shape, DType::F32)
-    }
-
     fn device(&self) -> Self::Device {
         self.device.clone()
     }
 
-    fn sync(&self) {
+    fn sync(&self) -> Result<(), ExecutionError> {
         // Important for ordering to call the creation of the future sync.
-        let fut = self.sender.send_callback(ComputeTask::SyncBackend);
+        let fut = self.sender.send_async(ComputeTask::SyncBackend);
 
-        let runtime = self.runtime.clone();
-
-        match runtime.block_on(fut) {
-            TaskResponseContent::SyncBackend => {}
-            _ => panic!("Invalid message type"),
-        };
+        match self.runtime.block_on(fut) {
+            Ok(response) => match response {
+                TaskResponseContent::SyncBackend(res) => res,
+                _ => panic!("Invalid message type"),
+            },
+            Err(e) => Err(ExecutionError::Generic {
+                reason: format!("Failed to sync: {:?}", e),
+                backtrace: BackTrace::capture(),
+            }),
+        }
     }
 
-    fn seed(&self, _seed: u64) {
-        // TODO
+    fn seed(&self, seed: u64) {
+        self.sender.send(ComputeTask::Seed(seed));
+    }
+
+    fn create_empty_handle(&self) -> burn_ir::TensorId {
+        self.sender.new_tensor_id()
+    }
+
+    fn dtype_usage(&self, dtype: burn_std::DType) -> burn_backend::DTypeUsageSet {
+        let fut = self.sender.send_async(ComputeTask::DTypeUsage(dtype));
+
+        match self.runtime.block_on(fut) {
+            Ok(response) => match response {
+                TaskResponseContent::DTypeUsage(res) => res,
+                other => panic!("Invalid message type {other:?}"),
+            },
+            Err(e) => panic!("Failed to check dtype support: {:?}", e),
+        }
     }
 }
 
@@ -95,17 +132,14 @@ impl RunnerClient for RemoteClient {
 /// The device contains the connection information of the server.
 pub struct RemoteDevice {
     pub(crate) address: Address,
-    // Unique ID generated from hash of the address
+    /// The id of the device in the local registry, see [`address_to_id`].
     pub(crate) id: u32,
 }
 
 impl RemoteDevice {
     /// Create a device from an url.
     pub fn new(address: &str) -> Self {
-        let mut hasher = DefaultHasher::new();
-        address.hash(&mut hasher);
-        let id = hasher.finish() as u32;
-
+        let id = address_to_id(address);
         Self {
             address: Address::from_str(address).unwrap(),
             id,
@@ -124,14 +158,25 @@ impl Default for RemoteDevice {
     }
 }
 
-impl DeviceOps for RemoteDevice {
-    fn id(&self) -> DeviceId {
+impl burn_std::device::Device for RemoteDevice {
+    fn from_id(device_id: DeviceId) -> Self {
+        if device_id.type_id != 0 {
+            panic!("Invalid device id: {device_id} (expected type 0)");
+        }
+        let address = id_to_address(device_id.index_id as u32)
+            .unwrap_or_else(|| panic!("Invalid device id: {device_id}"));
+        Self::new(&address)
+    }
+
+    fn to_id(&self) -> DeviceId {
         DeviceId {
             type_id: 0,
-            index_id: self.id,
+            index_id: self.id as u16,
         }
     }
 }
+
+impl DeviceOps for RemoteDevice {}
 
 pub struct RemoteBridge<C: ProtocolClient> {
     _p: PhantomData<C>,
@@ -198,7 +243,7 @@ impl<C: ProtocolClient> MultiBackendBridge for RemoteBridge<C> {
 
     fn change_backend_float(
         tensor: Self::TensorHandle,
-        _shape: burn_tensor::Shape,
+        _shape: burn_backend::Shape,
         target_device: &Self::Device,
     ) -> Self::TensorHandle {
         tensor.change_backend(target_device)
@@ -206,7 +251,7 @@ impl<C: ProtocolClient> MultiBackendBridge for RemoteBridge<C> {
 
     fn change_backend_int(
         tensor: Self::TensorHandle,
-        _shape: burn_tensor::Shape,
+        _shape: burn_backend::Shape,
         target_device: &Self::Device,
     ) -> Self::TensorHandle {
         tensor.change_backend(target_device)
@@ -214,9 +259,35 @@ impl<C: ProtocolClient> MultiBackendBridge for RemoteBridge<C> {
 
     fn change_backend_bool(
         tensor: Self::TensorHandle,
-        _shape: burn_tensor::Shape,
+        _shape: burn_backend::Shape,
         target_device: &Self::Device,
     ) -> Self::TensorHandle {
         tensor.change_backend(target_device)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_address_to_id() {
+        let address1 = "ws://127.0.0.1:3000";
+        let address2 = "ws://127.0.0.1:3001";
+
+        let id1 = address_to_id(address1);
+        let id2 = address_to_id(address2);
+
+        assert_ne!(id1, id2);
+
+        assert_eq!(address_to_id(address1), id1);
+        assert_eq!(id_to_address(id1), Some(address1.to_string()));
+
+        assert_eq!(address_to_id(address2), id2);
+        assert_eq!(id_to_address(id2), Some(address2.to_string()));
+
+        let unused_id = u32::MAX;
+
+        assert_eq!(id_to_address(unused_id), None);
     }
 }

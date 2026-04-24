@@ -1,0 +1,106 @@
+[package]
+authors = ["Dilshod Tadjibaev (@antimora)"]
+categories = ["science", "no-std", "embedded", "wasm"]
+description = "Storage and serialization infrastructure for Burn"
+documentation = "https://docs.rs/burn-store"
+edition.workspace = true
+keywords = [
+    "deep-learning",
+    "machine-learning",
+    "tensor",
+    "storage",
+    "serialization",
+]
+license.workspace = true
+name = "burn-store"
+readme.workspace = true
+repository = "https://github.com/tracel-ai/burn/tree/main/crates/burn-store"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["std", "pytorch", "safetensors", "burnpack", "memmap"]
+memmap = ["std", "dep:memmap2"]
+std = [
+    "dep:memmap2",
+    "safetensors/std",
+    "burn-core/std",
+    "burn-tensor/std",
+    "dep:regex",
+    "byteorder/std",
+]
+tracing = [
+    "burn-core/tracing",
+    "burn-cuda?/tracing",
+    "burn-nn/tracing",
+    "burn-tch?/tracing",
+    "burn-tensor/tracing",
+    "burn-wgpu?/tracing",
+]
+
+
+burnpack = ["serde", "ciborium"]
+cuda = ["burn-cuda"]
+metal = ["wgpu", "burn-wgpu/metal"]
+tch = ["burn-tch"]
+wgpu = ["burn-wgpu"]
+
+safetensors = ["dep:safetensors"]
+
+pytorch = ["burn-core/record-item-custom-serde", "zip", "serde", "tar"]
+
+[dependencies]
+burn-core = { path = "../burn-core", version = "=0.21.0-pre.3", default-features = false }
+burn-tensor = { path = "../burn-tensor", version = "=0.21.0-pre.3", default-features = false }
+
+# External dependencies
+byteorder = { workspace = true, default-features = false }
+bytes = { workspace = true }
+ciborium = { workspace = true, optional = true }
+half = { workspace = true }
+hashbrown = { workspace = true, features = ["serde"] }
+memmap2 = { workspace = true, optional = true }
+regex = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+textdistance = { workspace = true }
+zip = { workspace = true, optional = true }
+tar = { workspace = true, optional = true }
+
+# Workaround to force broken minor version to update
+lzma-rust2 = { workspace = true, optional = true }
+
+safetensors = { workspace = true, optional = true }
+
+# Optional backend dependencies for benchmarks
+burn-cuda = { path = "../burn-cuda", version = "=0.21.0-pre.3", optional = true }
+burn-tch = { path = "../burn-tch", version = "=0.21.0-pre.3", optional = true }
+burn-wgpu = { path = "../burn-wgpu", version = "=0.21.0-pre.3", optional = true }
+
+[dev-dependencies]
+# burn-import = { path = "../burn-import", version = "=0.21.0-pre.3" } # disabled (circular dep in publish, only for bench)
+burn-flex = { path = "../burn-flex", version = "=0.21.0-pre.3" }
+burn-nn = { path = "../burn-nn", version = "=0.21.0-pre.3", default-features = false }
+divan = "0.1"
+tempfile = { workspace = true }
+
+[[bench]]
+harness = false
+name = "resnet18_loading"
+
+[[bench]]
+harness = false
+name = "unified_loading"
+
+[[bench]]
+harness = false
+name = "unified_saving"
+
+[[bench]]
+harness = false
+name = "zero_copy_loading"
+
+# Enable extra-platforms for bytes on targets without native atomics (e.g., thumbv6m-none-eabi)
+[target.'cfg(not(target_has_atomic = "ptr"))'.dependencies]
+bytes = { workspace = true, features = ["extra-platforms"] }

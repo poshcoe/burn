@@ -1,26 +1,37 @@
-use crate::metric::TopKAccuracyInput;
 use crate::metric::{
-    AccuracyInput, Adaptor, ConfusionStatsInput, HammingScoreInput, LossInput, processor::ItemLazy,
+    AccuracyInput, Adaptor, AurocInput, ConfusionStatsInput, HammingScoreInput, LossInput,
+    PerplexityInput, TopKAccuracyInput, processor::ItemLazy,
 };
 use burn_core::tensor::backend::Backend;
 use burn_core::tensor::{Int, Tensor, Transaction};
-use burn_ndarray::NdArray;
+use burn_flex::Flex;
 
 /// Simple classification output adapted for multiple metrics.
+///
+/// Supported metrics:
+/// - Accuracy
+/// - AUROC
+/// - TopKAccuracy
+/// - Perplexity
+/// - Precision (via ConfusionStatsInput)
+/// - Recall (via ConfusionStatsInput)
+/// - FBetaScore (via ConfusionStatsInput)
+/// - Loss.
 #[derive(new)]
 pub struct ClassificationOutput<B: Backend> {
     /// The loss.
     pub loss: Tensor<B, 1>,
 
-    /// The output.
+    /// The class logits or probabilities. Shape: \[batch_size, num_classes\].
     pub output: Tensor<B, 2>,
 
-    /// The targets.
+    /// The ground truth class index for each sample. Shape: \[batch_size\].
     pub targets: Tensor<B, 1, Int>,
 }
 
 impl<B: Backend> ItemLazy for ClassificationOutput<B> {
-    type ItemSync = ClassificationOutput<NdArray>;
+    // Flex's IntElem is i32; class indices > i32::MAX would truncate on sync.
+    type ItemSync = ClassificationOutput<Flex>;
 
     fn sync(self) -> Self::ItemSync {
         let [output, loss, targets] = Transaction::default()
@@ -47,6 +58,12 @@ impl<B: Backend> Adaptor<AccuracyInput<B>> for ClassificationOutput<B> {
     }
 }
 
+impl<B: Backend> Adaptor<AurocInput<B>> for ClassificationOutput<B> {
+    fn adapt(&self) -> AurocInput<B> {
+        AurocInput::new(self.output.clone(), self.targets.clone())
+    }
+}
+
 impl<B: Backend> Adaptor<LossInput<B>> for ClassificationOutput<B> {
     fn adapt(&self) -> LossInput<B> {
         LossInput::new(self.loss.clone())
@@ -56,6 +73,12 @@ impl<B: Backend> Adaptor<LossInput<B>> for ClassificationOutput<B> {
 impl<B: Backend> Adaptor<TopKAccuracyInput<B>> for ClassificationOutput<B> {
     fn adapt(&self) -> TopKAccuracyInput<B> {
         TopKAccuracyInput::new(self.output.clone(), self.targets.clone())
+    }
+}
+
+impl<B: Backend> Adaptor<PerplexityInput<B>> for ClassificationOutput<B> {
+    fn adapt(&self) -> PerplexityInput<B> {
+        PerplexityInput::new(self.output.clone(), self.targets.clone())
     }
 }
 
@@ -77,20 +100,28 @@ impl<B: Backend> Adaptor<ConfusionStatsInput<B>> for ClassificationOutput<B> {
 }
 
 /// Multi-label classification output adapted for multiple metrics.
+///
+/// Supported metrics:
+/// - HammingScore
+/// - Precision (via ConfusionStatsInput)
+/// - Recall (via ConfusionStatsInput)
+/// - FBetaScore (via ConfusionStatsInput)
+/// - Loss
 #[derive(new)]
 pub struct MultiLabelClassificationOutput<B: Backend> {
     /// The loss.
     pub loss: Tensor<B, 1>,
 
-    /// The output.
+    /// The label logits or probabilities. Shape: \[batch_size, num_classes\].
     pub output: Tensor<B, 2>,
 
-    /// The targets.
+    /// The ground truth labels. Shape: \[batch_size, num_classes\].
     pub targets: Tensor<B, 2, Int>,
 }
 
 impl<B: Backend> ItemLazy for MultiLabelClassificationOutput<B> {
-    type ItemSync = MultiLabelClassificationOutput<NdArray>;
+    // Flex's IntElem is i32; label indices > i32::MAX would truncate on sync.
+    type ItemSync = MultiLabelClassificationOutput<Flex>;
 
     fn sync(self) -> Self::ItemSync {
         let [output, loss, targets] = Transaction::default()

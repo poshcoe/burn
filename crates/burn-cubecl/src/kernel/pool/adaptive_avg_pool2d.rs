@@ -1,35 +1,41 @@
 use crate::{
     CubeRuntime,
-    element::CubeElement,
-    kernel::into_contiguous,
-    ops::{max_line_size, numeric::empty_device, permute_nchw_to_nhwc, permute_nhwc_to_nchw},
+    kernel::{
+        into_contiguous_aligned,
+        pool::pool2d::{Position, view4d},
+        utils::{address_type, decompose_linear, shape_divmod},
+    },
+    ops::{
+        max_vector_size, numeric::empty_device_dtype, permute_nchw_to_nhwc, permute_nhwc_to_nchw,
+    },
     tensor::CubeTensor,
 };
-use burn_tensor::Shape;
-use cubecl::{calculate_cube_count_elemwise, prelude::*};
+use burn_backend::Shape;
+use cubecl::{
+    calculate_cube_count_elemwise,
+    num_traits::Zero,
+    prelude::*,
+    std::{FastDivmod, tensor::View},
+};
 
-#[cube(launch)]
-fn adaptive_avg_pool2d_direct<E: Numeric>(input: &Tensor<Line<E>>, output: &mut Tensor<Line<E>>) {
-    if ABSOLUTE_POS >= output.len() {
+#[cube(launch, address_type = "dynamic")]
+fn adaptive_avg_pool2d_direct<E: Numeric, N: Size>(
+    input: &Tensor<Vector<E, N>>,
+    output: &mut View<Vector<E, N>, Position, ReadWrite>,
+    out_shape: Sequence<FastDivmod<usize>>,
+    working_units: usize,
+    #[define(E)] _dtype: StorageType,
+) {
+    if ABSOLUTE_POS >= working_units {
         terminate!();
     }
 
-    let (out_h, out_w, channels) = (output.shape(1), output.shape(2), output.shape(3));
-    let channel_lines = channels / output.line_size();
-    let (in_stride_b, in_stride_h, in_stride_w, in_stride_c) = (
-        input.stride(0),
-        input.stride(1),
-        input.stride(2),
-        input.stride(3),
-    );
-    let (in_h, in_w) = (input.shape(1), input.shape(2));
+    let (_, pos) = decompose_linear(ABSOLUTE_POS * output.vector_size(), &out_shape);
+    let [b, oh, ow, c] = *pos else { unreachable!() };
 
-    let c = (ABSOLUTE_POS % channel_lines) * input.line_size();
-    let pos = ABSOLUTE_POS / channel_lines;
-    let ow = pos % out_w;
-    let pos = pos / out_w;
-    let oh = pos % out_h;
-    let b = pos / out_h;
+    let (_, out_h, out_w, _) = output.shape();
+    let (in_stride_h, in_stride_w) = (input.stride(1), input.stride(2));
+    let (in_h, in_w) = (input.shape(1), input.shape(2));
 
     let ih_start = start_index(oh, out_h, in_h);
     let ih_end = end_index(oh, out_h, in_h);
@@ -37,10 +43,9 @@ fn adaptive_avg_pool2d_direct<E: Numeric>(input: &Tensor<Line<E>>, output: &mut 
     let iw_start = start_index(ow, out_w, in_w);
     let iw_end = end_index(ow, out_w, in_w);
 
-    let mut sum = Line::empty(input.line_size()).fill(E::from_int(0));
+    let mut sum = Vector::zero();
 
-    let index_input_0 = b * in_stride_b;
-    let index_input_1 = c * in_stride_c;
+    let index_input_base = b * input.stride(0) + c * input.stride(3);
 
     for ih in ih_start..ih_end {
         let index_input_2 = ih * in_stride_h;
@@ -48,28 +53,26 @@ fn adaptive_avg_pool2d_direct<E: Numeric>(input: &Tensor<Line<E>>, output: &mut 
         for iw in iw_start..iw_end {
             let index_input_3 = iw * in_stride_w;
 
-            let index_input = index_input_0 + index_input_1 + index_input_2 + index_input_3;
-            sum += input[index_input / input.line_size()];
+            let index_input = index_input_base + index_input_2 + index_input_3;
+            sum += input[index_input / input.vector_size()];
         }
     }
 
     let num_ih = ih_end - ih_start;
     let num_iw = iw_end - iw_start;
 
-    output[ABSOLUTE_POS] = sum / Line::cast_from(num_ih * num_iw);
+    output[(b, oh, ow, c)] = sum / Vector::cast_from(num_ih * num_iw);
 }
 
 #[cube]
-fn start_index(output_size_index: u32, output_size: u32, input_size: u32) -> u32 {
+fn start_index(output_size_index: usize, output_size: usize, input_size: usize) -> usize {
     (output_size_index * input_size) / output_size
 }
 
-#[allow(unknown_lints)] // `manual_div_ceil` only appeared in 1.83
-#[allow(clippy::manual_div_ceil)]
 #[cube]
-fn end_index(output_size_index: u32, output_size: u32, input_size: u32) -> u32 {
+fn end_index(output_size_index: usize, output_size: usize, input_size: usize) -> usize {
     let index = (output_size_index + 1) * input_size;
-    let index = (index + output_size - 1) / output_size;
+    let index = index.div_ceil(output_size);
 
     if input_size < index {
         input_size
@@ -78,28 +81,39 @@ fn end_index(output_size_index: u32, output_size: u32, input_size: u32) -> u32 {
     }
 }
 
-pub(crate) fn adaptive_avg_pool2d<R: CubeRuntime, E: CubeElement>(
+pub(crate) fn adaptive_avg_pool2d<R: CubeRuntime>(
     input: CubeTensor<R>,
     output_size: [usize; 2],
 ) -> CubeTensor<R> {
-    let [batch_size, channels, _, _] = input.shape.dims();
+    let [batch_size, channels, _, _] = input.meta.shape().dims();
 
-    let input = into_contiguous(permute_nchw_to_nhwc(input));
-    let line_size = max_line_size(&input);
+    let input = into_contiguous_aligned(permute_nchw_to_nhwc(input));
+    let vector_size = max_vector_size(&input);
 
     let output_shape = Shape::new([batch_size, output_size[0], output_size[1], channels]);
     let num_elems: usize = output_shape.num_elements();
-    let output = empty_device::<R, E>(input.client.clone(), input.device.clone(), output_shape);
+    let output = empty_device_dtype(
+        input.client.clone(),
+        input.device.clone(),
+        output_shape,
+        input.dtype,
+    );
 
-    let cube_dim = CubeDim::default();
-    let cube_count = calculate_cube_count_elemwise(num_elems / line_size as usize, cube_dim);
+    let working_units = num_elems / vector_size as usize;
+    let cube_dim = CubeDim::new(&input.client, working_units);
+    let cube_count = calculate_cube_count_elemwise(&input.client, working_units, cube_dim);
 
-    adaptive_avg_pool2d_direct::launch::<E, R>(
-        &input.client,
+    adaptive_avg_pool2d_direct::launch(
+        &output.client,
         cube_count,
         cube_dim,
-        input.as_tensor_arg::<E>(line_size),
-        output.as_tensor_arg::<E>(line_size),
+        address_type!(input, output),
+        vector_size,
+        input.into_tensor_arg(),
+        view4d(output.clone(), vector_size),
+        shape_divmod(&output),
+        working_units,
+        output.dtype.into(),
     );
 
     permute_nhwc_to_nchw(output)

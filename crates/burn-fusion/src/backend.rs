@@ -1,22 +1,19 @@
 use crate::{
-    FusionClientLocator, FusionTensor,
-    client::FusionClient,
+    FusionTensor,
+    client::GlobalFusionClient,
     stream::{Context, OrderedExecution},
 };
-use burn_ir::{BackendIr, OperationIr, TensorHandle};
-use burn_tensor::{
-    Device, Element,
-    backend::{Backend, DeviceOps},
-    ops::{BoolTensor, FloatTensor, IntTensor, QuantizedTensor},
+use burn_backend::{
+    Backend, DType, DeviceOps, ExecutionError,
+    tensor::{BoolTensor, Device, FloatTensor, IntTensor, QuantizedTensor},
 };
+use burn_ir::{BackendIr, OperationIr, TensorHandle};
 use serde::{Serialize, de::DeserializeOwned};
 use std::marker::PhantomData;
 
-pub(crate) static CLIENTS: FusionClientLocator = FusionClientLocator::new();
-
 /// Get the client for the given device.
 pub fn get_client<B: FusionBackend>(device: &Device<B>) -> Client<B::FusionRuntime> {
-    CLIENTS.client::<B::FusionRuntime>(device)
+    GlobalFusionClient::load(device)
 }
 
 /// Enable dynamic operation fusion on a backend that implements [fusion backend](crate::FusionBackend).
@@ -42,51 +39,74 @@ impl<B: FusionBackend> Backend for Fusion<B> {
 
     type QuantizedTensorPrimitive = FusionTensor<B::FusionRuntime>;
 
-    type QuantizedEncoding = B::QuantizedEncoding;
-
     fn name(device: &Self::Device) -> String {
         format!("fusion<{}>", B::name(device))
     }
 
-    fn seed(seed: u64) {
-        B::seed(seed);
+    fn seed(device: &B::Device, seed: u64) {
+        let client = GlobalFusionClient::<B::FusionRuntime>::load(device);
+        let device = device.clone();
+        client.sync(move || B::seed(&device, seed));
     }
 
-    fn sync(device: &Self::Device) {
-        let client = CLIENTS.client::<B::FusionRuntime>(&device.clone());
-        client.drain();
-        B::sync(device);
+    fn sync(device: &Self::Device) -> Result<(), ExecutionError> {
+        let client = GlobalFusionClient::<B::FusionRuntime>::load(device);
+        let device = device.clone();
+        client.sync(move || B::sync(&device))
     }
 
-    fn ad_enabled() -> bool {
+    fn ad_enabled(_device: &Self::Device) -> bool {
         false
     }
 
-    fn memory_static_allocations<Output, Input, Func: Fn(Input) -> Output>(
+    fn memory_persistent_allocations<
+        Output: Send,
+        Input: Send,
+        Func: Fn(Input) -> Output + Send,
+    >(
         device: &Self::Device,
         input: Input,
         func: Func,
     ) -> Output {
-        B::memory_static_allocations(device, input, func)
+        B::memory_persistent_allocations(device, input, func)
     }
 
     fn memory_cleanup(device: &Self::Device) {
         B::memory_cleanup(device)
     }
+
+    fn staging<'a, Iter>(data: Iter, device: &Self::Device)
+    where
+        Iter: Iterator<Item = &'a mut burn_backend::TensorData>,
+    {
+        B::staging(data, device);
+    }
+
+    fn supports_dtype(device: &Self::Device, dtype: DType) -> bool {
+        B::supports_dtype(device, dtype)
+    }
+
+    fn dtype_usage(device: &Self::Device, dtype: DType) -> burn_backend::DTypeUsageSet {
+        B::dtype_usage(device, dtype)
+    }
+
+    fn device_count(type_id: u16) -> usize {
+        B::device_count(type_id)
+    }
 }
 
-/// The status of a [builder](OptimizationBuilder).
-#[derive(Clone, Debug, Copy)]
-pub enum OptimizationStatus {
+/// The status of a [fuser](OperationFuser).
+#[derive(Clone, Debug, Copy, PartialEq, Eq)]
+pub enum FuserStatus {
     /// No more operations can be fused.
     Closed,
     /// More operations can be fused.
     Open,
 }
 
-/// The properties of a [builder](OptimizationProperties).
-#[derive(Debug, Clone, Copy, Default)]
-pub struct OptimizationProperties {
+/// The properties of a [fuser](OperationFuser).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FuserProperties {
     /// The score of the optimization, higher is better.
     pub score: u64,
     /// If the operation is ready to be executed.
@@ -103,19 +123,19 @@ pub struct OptimizationProperties {
 /// the speed and efficiency of the computational graph. It doesn't mean that all registered
 /// operations should be fused, but that another way of executing them is more efficient.
 ///
-/// Also, it is important to return (OptimizationStatus::Closed) when no more registered operation can
+/// Also, it is important to return (FuserStatus::Closed) when no more registered operation can
 /// improve the performance.
-pub trait OptimizationBuilder<O>: Send {
+pub trait OperationFuser<O>: Send {
     /// Register a new [tensor operation](OperationIr).
-    fn register(&mut self, operation: &OperationIr);
+    fn fuse(&mut self, operation: &OperationIr);
     /// Finish the optimization and create a fusion operation.
-    fn build(&self) -> O;
+    fn finish(&mut self) -> O;
     /// Reset the state.
     fn reset(&mut self);
-    /// Return the builder [status](OptimizationStatus).
-    fn status(&self) -> OptimizationStatus;
-    /// Return the builder [properties](OptimizationProperties).
-    fn properties(&self) -> OptimizationProperties;
+    /// Return the builder [status](FuserStatus).
+    fn status(&self) -> FuserStatus;
+    /// Return the builder [properties](FuserProperties).
+    fn properties(&self) -> FuserProperties;
     /// The number of operation fused.
     fn len(&self) -> usize;
     /// If no operations are fused.
@@ -123,7 +143,7 @@ pub trait OptimizationBuilder<O>: Send {
         self.len() == 0
     }
     /// Clone the optimization builder.
-    fn clone_dyn(&self) -> Box<dyn OptimizationBuilder<O>>;
+    fn clone_dyn(&self) -> Box<dyn OperationFuser<O>>;
 }
 
 /// The number of operations contained in the data structure.
@@ -136,14 +156,10 @@ pub trait NumOperations: core::fmt::Debug {
     }
 }
 
-/// The operation created from the [builder](OptimizationBuilder).
+/// The optimization created from a [fuser](OperationFuser).
 pub trait Optimization<R: FusionRuntime>: Send + NumOperations {
-    /// Execute the operation.
-    fn execute(
-        &mut self,
-        context: &mut Context<'_, R::FusionHandle>,
-        execution: &OrderedExecution<R>,
-    );
+    /// Execute the optimization.
+    fn execute(&mut self, context: &mut Context<R::FusionHandle>, execution: &OrderedExecution<R>);
 
     /// Returns the state that can be serialized.
     fn to_state(&self) -> R::OptimizationState;
@@ -155,11 +171,11 @@ pub trait Optimization<R: FusionRuntime>: Send + NumOperations {
 pub type FusionDevice<R> = <R as FusionRuntime>::FusionDevice;
 /// Type alias for `<R as FusionRuntime>::FusionHandle`.
 pub type FusionHandle<R> = <R as FusionRuntime>::FusionHandle;
-/// Type alias for `<R as FusionRuntime>::FusionClient`.
-pub type Client<R> = <R as FusionRuntime>::FusionClient;
+/// Client alias.
+pub type Client<R> = GlobalFusionClient<R>;
 
 /// Trait that defines a runtime that will benefits from fused operations.
-pub trait FusionRuntime: Send + Sync + Sized + core::fmt::Debug {
+pub trait FusionRuntime: Send + Sync + Sized + core::fmt::Debug + 'static {
     /// The state that can be serialized for an optimization.
     type OptimizationState: Serialize + DeserializeOwned;
     /// Optimization type for the backend.
@@ -168,19 +184,13 @@ pub trait FusionRuntime: Send + Sync + Sized + core::fmt::Debug {
     type FusionHandle: Clone + Send;
     /// Device used by the runtime.
     type FusionDevice: DeviceOps;
-    /// The client to interact with the runtime.
-    type FusionClient: FusionClient<Self>;
-    /// The type that represents booleans on the backend.
-    type BoolRepr: Element;
 
-    /// The list of optimizations that will be used to optimize the computational graph.
-    fn optimizations(
-        device: Self::FusionDevice,
-    ) -> Vec<Box<dyn OptimizationBuilder<Self::Optimization>>>;
+    /// The list of fusers that will be used to optimize the computational graph.
+    fn fusers(device: Self::FusionDevice) -> Vec<Box<dyn OperationFuser<Self::Optimization>>>;
 }
 
 /// Trait that allows an existing [backend](Backend) to specify graph optimizations using
-/// [operation builder](crate::OptimizationBuilder).
+/// [operation fuser](crate::OperationFuser).
 pub trait FusionBackend:
     BackendIr<Handle = FusionHandle<Self::FusionRuntime>, Device = FusionDevice<Self::FusionRuntime>>
 {
@@ -188,7 +198,7 @@ pub trait FusionBackend:
     type FusionRuntime: FusionRuntime;
 
     /// Cast a float tensor and returns the resulting handle.
-    fn cast_float(tensor: FloatTensor<Self>, dtype: burn_tensor::DType) -> Self::Handle;
+    fn cast_float(tensor: FloatTensor<Self>, dtype: DType) -> Self::Handle;
 
     /// Pointer to the full precision fusion backend.
     type FullPrecisionBackend: FusionBackend<FusionRuntime = Self::FusionRuntime>;

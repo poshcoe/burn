@@ -1,11 +1,12 @@
-use core::ops::Range;
-
-use burn_tensor::{
-    Device, Shape, TensorData,
-    backend::Backend,
-    ops::{FloatTensor, IntTensor, QTensorOps, QuantizedTensor},
-    quantization::{QuantScheme, QuantizationParametersPrimitive},
+use burn_backend::{
+    Backend, ExecutionError, TensorData,
+    ops::QTensorOps,
+    tensor::{
+        Device, FloatTensor, IntTensor, QuantizedTensor,
+        quantization::QuantizationParametersPrimitive,
+    },
 };
+use burn_std::{FloatDType, IntDType, QuantScheme, Shape};
 
 use crate::{Autodiff, checkpoint::strategy::CheckpointStrategy};
 
@@ -29,7 +30,7 @@ impl<B: Backend, C: CheckpointStrategy> QTensorOps<Self> for Autodiff<B, C> {
         todo!()
     }
 
-    fn dequantize(_tensor: QuantizedTensor<Self>) -> FloatTensor<Self> {
+    fn dequantize(_tensor: QuantizedTensor<Self>, _dtype: FloatDType) -> FloatTensor<Self> {
         todo!()
     }
 
@@ -48,7 +49,7 @@ impl<B: Backend, C: CheckpointStrategy> QTensorOps<Self> for Autodiff<B, C> {
         B::q_reshape(tensor, shape)
     }
 
-    async fn q_into_data(tensor: QuantizedTensor<Self>) -> TensorData {
+    async fn q_into_data(tensor: QuantizedTensor<Self>) -> Result<TensorData, ExecutionError> {
         B::q_into_data(tensor).await
     }
 
@@ -84,16 +85,19 @@ impl<B: Backend, C: CheckpointStrategy> QTensorOps<Self> for Autodiff<B, C> {
         unimplemented!()
     }
 
-    fn q_slice(_tensor: QuantizedTensor<Self>, _ranges: &[Range<usize>]) -> QuantizedTensor<Self> {
+    fn q_slice(
+        _tensor: QuantizedTensor<Self>,
+        _slices: &[burn_std::Slice],
+    ) -> QuantizedTensor<Self> {
         unimplemented!()
     }
 
-    fn q_argmax(tensor: QuantizedTensor<Self>, dim: usize) -> IntTensor<Self> {
-        B::q_argmax(tensor, dim)
+    fn q_argmax(tensor: QuantizedTensor<Self>, dim: usize, out_dtype: IntDType) -> IntTensor<Self> {
+        B::q_argmax(tensor, dim, out_dtype)
     }
 
-    fn q_argmin(tensor: QuantizedTensor<Self>, dim: usize) -> IntTensor<Self> {
-        B::q_argmin(tensor, dim)
+    fn q_argmin(tensor: QuantizedTensor<Self>, dim: usize, out_dtype: IntDType) -> IntTensor<Self> {
+        B::q_argmin(tensor, dim, out_dtype)
     }
 
     fn q_expand(_tensor: QuantizedTensor<Self>, _shape: Shape) -> QuantizedTensor<Self> {

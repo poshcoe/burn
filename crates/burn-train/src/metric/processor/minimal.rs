@@ -1,5 +1,8 @@
 use super::{EventProcessorTraining, ItemLazy, LearnerEvent, MetricsTraining};
-use crate::{metric::store::EventStoreClient, renderer::cli::CliMetricsRenderer};
+use crate::{
+    metric::store::{EpochSummary, EventStoreClient, Split},
+    renderer::cli::CliMetricsRenderer,
+};
 use std::sync::Arc;
 
 /// An [event processor](EventProcessor) that handles:
@@ -11,12 +14,17 @@ pub(crate) struct MinimalEventProcessor<T: ItemLazy, V: ItemLazy> {
     store: Arc<EventStoreClient>,
 }
 
-impl<T: ItemLazy, V: ItemLazy> EventProcessorTraining for MinimalEventProcessor<T, V> {
-    type ItemTrain = T;
-    type ItemValid = V;
-
-    fn process_train(&mut self, event: LearnerEvent<Self::ItemTrain>) {
+impl<T: ItemLazy, V: ItemLazy> EventProcessorTraining<LearnerEvent<T>, LearnerEvent<V>>
+    for MinimalEventProcessor<T, V>
+{
+    fn process_train(&mut self, event: LearnerEvent<T>) {
         match event {
+            LearnerEvent::Start => {
+                let definitions = self.metrics.metric_definitions();
+                self.store
+                    .add_event_train(crate::metric::store::Event::MetricsInit(definitions));
+            }
+
             LearnerEvent::ProcessedItem(item) => {
                 let item = item.sync();
                 let metadata = (&item).into();
@@ -29,14 +37,18 @@ impl<T: ItemLazy, V: ItemLazy> EventProcessorTraining for MinimalEventProcessor<
             LearnerEvent::EndEpoch(epoch) => {
                 self.metrics.end_epoch_train();
                 self.store
-                    .add_event_train(crate::metric::store::Event::EndEpoch(epoch));
+                    .add_event_train(crate::metric::store::Event::EndEpoch(EpochSummary::new(
+                        epoch,
+                        Split::Train,
+                    )));
             }
-            LearnerEvent::End => {} // no-op for now
+            LearnerEvent::End(_summary) => {} // no-op for now
         }
     }
 
-    fn process_valid(&mut self, event: LearnerEvent<Self::ItemValid>) {
+    fn process_valid(&mut self, event: LearnerEvent<V>) {
         match event {
+            LearnerEvent::Start => {} // no-op for now
             LearnerEvent::ProcessedItem(item) => {
                 let item = item.sync();
                 let metadata = (&item).into();
@@ -49,9 +61,12 @@ impl<T: ItemLazy, V: ItemLazy> EventProcessorTraining for MinimalEventProcessor<
             LearnerEvent::EndEpoch(epoch) => {
                 self.metrics.end_epoch_valid();
                 self.store
-                    .add_event_valid(crate::metric::store::Event::EndEpoch(epoch));
+                    .add_event_valid(crate::metric::store::Event::EndEpoch(EpochSummary::new(
+                        epoch,
+                        Split::Valid,
+                    )));
             }
-            LearnerEvent::End => {} // no-op for now
+            LearnerEvent::End(_) => {} // no-op for now
         }
     }
     fn renderer(self) -> Box<dyn crate::renderer::MetricsRenderer> {

@@ -1,5 +1,8 @@
 use super::{AsyncLogger, FileLogger, InMemoryLogger, Logger};
-use crate::metric::{MetricEntry, NumericEntry};
+use crate::metric::{
+    MetricDefinition, MetricEntry, MetricId, NumericEntry,
+    store::{EpochSummary, MetricsUpdate, Split},
+};
 use std::{
     collections::HashMap,
     fs,
@@ -14,25 +17,33 @@ pub trait MetricLogger: Send {
     ///
     /// # Arguments
     ///
-    /// * `item` - The item.
-    fn log(&mut self, item: &MetricEntry);
-
-    /// Logs an epoch.
-    ///
-    /// # Arguments
-    ///
-    /// * `epoch` - The epoch.
-    fn end_epoch(&mut self, epoch: usize);
+    /// * `update` - Update information for all registered metrics.
+    /// * `epoch` - Current epoch.
+    /// * `split` - Current dataset split.
+    fn log(&mut self, update: MetricsUpdate, epoch: usize, split: &Split);
 
     /// Read the logs for an epoch.
-    fn read_numeric(&mut self, name: &str, epoch: usize) -> Result<Vec<NumericEntry>, String>;
+    fn read_numeric(
+        &mut self,
+        name: &str,
+        epoch: usize,
+        split: &Split,
+    ) -> Result<Vec<NumericEntry>, String>;
+
+    /// Logs the metric definition information (name, description, unit, etc.)
+    fn log_metric_definition(&mut self, definition: MetricDefinition);
+
+    /// Logs summary at the end of the epoch.
+    fn log_epoch_summary(&mut self, summary: EpochSummary);
 }
 
 /// The file metric logger.
 pub struct FileMetricLogger {
     loggers: HashMap<String, AsyncLogger<String>>,
     directory: PathBuf,
-    epoch: Option<usize>,
+    metric_definitions: HashMap<MetricId, MetricDefinition>,
+    is_eval: bool,
+    last_epoch: Option<usize>,
 }
 
 impl FileMetricLogger {
@@ -45,11 +56,13 @@ impl FileMetricLogger {
     /// # Returns
     ///
     /// The file metric logger.
-    pub fn new_train(directory: impl AsRef<Path>) -> Self {
+    pub fn new(directory: impl AsRef<Path>) -> Self {
         Self {
             loggers: HashMap::new(),
             directory: directory.as_ref().to_path_buf(),
-            epoch: Some(1),
+            metric_definitions: HashMap::default(),
+            is_eval: false,
+            last_epoch: None,
         }
     }
 
@@ -66,35 +79,60 @@ impl FileMetricLogger {
         Self {
             loggers: HashMap::new(),
             directory: directory.as_ref().to_path_buf(),
-            epoch: None,
+            metric_definitions: HashMap::default(),
+            is_eval: true,
+            last_epoch: None,
         }
+    }
+
+    pub(crate) fn split_exists(&self, split: &Split) -> bool {
+        self.split_dir(split).is_some()
+    }
+
+    pub(crate) fn split_dir(&self, split: &Split) -> Option<PathBuf> {
+        let split_path = match split {
+            Split::Test(Some(tag)) => self.directory.join(split.to_string()).join(tag.as_str()),
+            other => self.directory.join(other.to_string()),
+        };
+        (split_path.exists() && split_path.is_dir()).then_some(split_path)
+    }
+
+    pub(crate) fn is_epoch_dir<P: AsRef<str>>(dirname: P) -> bool {
+        dirname.as_ref().starts_with(EPOCH_PREFIX)
     }
 
     /// Number of epochs recorded.
     pub(crate) fn epochs(&self) -> usize {
-        if self.epoch.is_none() {
+        if self.is_eval {
             log::warn!("Number of epochs not available when testing.");
             return 0;
         }
 
         let mut max_epoch = 0;
 
+        // with split
         for path in fs::read_dir(&self.directory).unwrap() {
             let path = path.unwrap();
 
             if fs::metadata(path.path()).unwrap().is_dir() {
-                let dir_name = path.file_name().into_string().unwrap();
+                for split_path in fs::read_dir(path.path()).unwrap() {
+                    let split_path = split_path.unwrap();
 
-                if !dir_name.starts_with(EPOCH_PREFIX) {
-                    continue;
-                }
+                    if fs::metadata(split_path.path()).unwrap().is_dir() {
+                        let dir_name = split_path.file_name().into_string().unwrap();
 
-                let epoch = dir_name.replace(EPOCH_PREFIX, "").parse::<usize>().ok();
+                        if !dir_name.starts_with(EPOCH_PREFIX) {
+                            continue;
+                        }
 
-                if let Some(epoch) = epoch
-                    && epoch > max_epoch
-                {
-                    max_epoch = epoch;
+                        let epoch = dir_name.replace(EPOCH_PREFIX, "").parse::<usize>().ok();
+
+                        if let Some(epoch) = epoch
+                            && epoch > max_epoch
+                        {
+                            max_epoch = epoch;
+                        }
+                    }
                 }
             }
         }
@@ -102,95 +140,111 @@ impl FileMetricLogger {
         max_epoch
     }
 
-    fn train_directory(&self, tags: Option<&String>, epoch: usize) -> PathBuf {
+    fn train_directory(&self, epoch: usize, split: &Split) -> PathBuf {
         let name = format!("{EPOCH_PREFIX}{epoch}");
 
-        match tags {
-            Some(tags) => self.directory.join(tags).join(name),
-            None => self.directory.join(name),
+        match split {
+            Split::Train | Split::Valid | Split::Test(None) => {
+                self.directory.join(split.to_string()).join(name)
+            }
+            Split::Test(Some(tag)) => {
+                let tag = format_tag(tag);
+                self.directory.join(split.to_string()).join(tag).join(name)
+            }
         }
     }
 
-    fn eval_directory(&self, tags: Option<&String>) -> PathBuf {
-        match tags {
-            Some(tags) => self.directory.join(tags),
-            None => self.directory.clone(),
+    fn eval_directory(&self, split: &Split) -> PathBuf {
+        match split {
+            Split::Train | Split::Valid | Split::Test(None) => self.directory.clone(),
+            Split::Test(Some(tag)) => self.directory.join(split.to_string()).join(format_tag(tag)),
         }
     }
 
-    fn file_path(&self, tags: Option<&String>, name: &str, epoch: Option<usize>) -> PathBuf {
+    fn file_path(&self, name: &str, epoch: Option<usize>, split: &Split) -> PathBuf {
         let directory = match epoch {
-            Some(epoch) => self.train_directory(tags, epoch),
-            None => self.eval_directory(tags),
+            Some(epoch) => self.train_directory(epoch, split),
+            None => self.eval_directory(split),
         };
         let name = name.replace(' ', "_");
         let name = format!("{name}.log");
         directory.join(name)
     }
 
-    fn create_directory(&self, tags: Option<&String>, epoch: Option<usize>) {
+    fn create_directory(&self, epoch: Option<usize>, split: &Split) {
         let directory = match epoch {
-            Some(epoch) => self.train_directory(tags, epoch),
-            None => self.eval_directory(tags),
+            Some(epoch) => self.train_directory(epoch, split),
+            None => self.eval_directory(split),
         };
         std::fs::create_dir_all(directory).ok();
     }
 }
 
 impl FileMetricLogger {
-    fn log_item(&mut self, tags: Option<&String>, item: &MetricEntry) {
-        let key = &item.name;
-        let value = &item.serialize;
+    fn log_item(&mut self, item: &MetricEntry, epoch: Option<usize>, split: &Split) {
+        let name = &self.metric_definitions.get(&item.metric_id).unwrap().name;
+        let key = logger_key(name, split);
+        let value = &item.serialized_entry.serialized;
 
-        let logger = match self.loggers.get_mut(key.as_ref()) {
+        let logger = match self.loggers.get_mut(&key) {
             Some(val) => val,
             None => {
-                self.create_directory(tags, self.epoch);
+                self.create_directory(epoch, split);
 
-                let file_path = self.file_path(tags, key, self.epoch);
+                let file_path = self.file_path(name, epoch, split);
                 let logger = FileLogger::new(file_path);
                 let logger = AsyncLogger::new(logger);
 
-                self.loggers.insert(key.to_string(), logger);
+                self.loggers.insert(key.clone(), logger);
                 self.loggers
-                    .get_mut(key.as_ref())
+                    .get_mut(&key)
                     .expect("Can get the previously saved logger.")
             }
         };
 
         logger.log(value.clone());
     }
+}
 
-    fn log_tags(&mut self, item: &MetricEntry) {
-        let mut tags = String::new();
-        item.tags.iter().for_each(|tag| tags += tag.as_str());
-        let tags = tags.replace(" ", "-").trim().to_lowercase();
-        self.log_item(Some(&tags), item);
-    }
+fn format_tag(tag: &str) -> String {
+    tag.trim().replace(' ', "-").to_lowercase()
 }
 
 impl MetricLogger for FileMetricLogger {
-    fn log(&mut self, item: &MetricEntry) {
-        match item.tags.is_empty() {
-            true => self.log_item(None, item),
-            false => self.log_tags(item),
+    fn log(&mut self, update: MetricsUpdate, epoch: usize, split: &Split) {
+        if !self.is_eval && self.last_epoch != Some(epoch) {
+            self.loggers.clear();
+            self.last_epoch = Some(epoch);
+        }
+
+        let entries: Vec<_> = update
+            .entries
+            .iter()
+            .chain(
+                update
+                    .entries_numeric
+                    .iter()
+                    .map(|numeric_update| &numeric_update.entry),
+            )
+            .cloned()
+            .collect();
+
+        for item in entries.iter() {
+            self.log_item(item, Some(epoch), split);
         }
     }
 
-    fn end_epoch(&mut self, epoch: usize) {
-        self.loggers.clear();
-        if self.epoch.is_none() {
-            panic!("Only evaluation logger supported.");
-        }
-        self.epoch = Some(epoch + 1);
-    }
-
-    fn read_numeric(&mut self, name: &str, epoch: usize) -> Result<Vec<NumericEntry>, String> {
+    fn read_numeric(
+        &mut self,
+        name: &str,
+        epoch: usize,
+        split: &Split,
+    ) -> Result<Vec<NumericEntry>, String> {
         if let Some(value) = self.loggers.get(name) {
             value.sync()
         }
 
-        let file_path = self.file_path(None, name, Some(epoch));
+        let file_path = self.file_path(name, Some(epoch), split);
 
         let mut errors = false;
 
@@ -219,12 +273,29 @@ impl MetricLogger for FileMetricLogger {
             Ok(data)
         }
     }
+
+    fn log_metric_definition(&mut self, definition: MetricDefinition) {
+        self.metric_definitions
+            .insert(definition.metric_id.clone(), definition);
+    }
+
+    fn log_epoch_summary(&mut self, _summary: EpochSummary) {
+        if !self.is_eval {
+            self.loggers.clear();
+        }
+    }
+}
+
+fn logger_key(name: &str, split: &Split) -> String {
+    format!("{name}_{split}")
 }
 
 /// In memory metric logger, useful when testing and debugging.
 #[derive(Default)]
 pub struct InMemoryMetricLogger {
     values: HashMap<String, Vec<InMemoryLogger>>,
+    last_epoch: Option<usize>,
+    metric_definitions: HashMap<MetricId, MetricDefinition>,
 }
 
 impl InMemoryMetricLogger {
@@ -233,26 +304,54 @@ impl InMemoryMetricLogger {
         Self::default()
     }
 }
+
 impl MetricLogger for InMemoryMetricLogger {
-    fn log(&mut self, item: &MetricEntry) {
-        if !self.values.contains_key(item.name.as_ref()) {
+    fn log(&mut self, update: MetricsUpdate, epoch: usize, split: &Split) {
+        if self.last_epoch != Some(epoch) {
             self.values
-                .insert(item.name.to_string(), vec![InMemoryLogger::default()]);
+                .values_mut()
+                .for_each(|loggers| loggers.push(InMemoryLogger::default()));
+            self.last_epoch = Some(epoch);
         }
 
-        let values = self.values.get_mut(item.name.as_ref()).unwrap();
+        let entries: Vec<_> = update
+            .entries
+            .iter()
+            .chain(
+                update
+                    .entries_numeric
+                    .iter()
+                    .map(|numeric_update| &numeric_update.entry),
+            )
+            .cloned()
+            .collect();
 
-        values.last_mut().unwrap().log(item.serialize.clone());
-    }
+        for item in entries.iter() {
+            let name = &self.metric_definitions.get(&item.metric_id).unwrap().name;
+            let key = logger_key(name, split);
 
-    fn end_epoch(&mut self, _epoch: usize) {
-        for (_, values) in self.values.iter_mut() {
-            values.push(InMemoryLogger::default());
+            if !self.values.contains_key(&key) {
+                self.values
+                    .insert(key.to_string(), vec![InMemoryLogger::default()]);
+            }
+
+            let values = self.values.get_mut(&key).unwrap();
+
+            values
+                .last_mut()
+                .unwrap()
+                .log(item.serialized_entry.serialized.clone());
         }
     }
 
-    fn read_numeric(&mut self, name: &str, epoch: usize) -> Result<Vec<NumericEntry>, String> {
-        let values = match self.values.get(name) {
+    fn read_numeric(
+        &mut self,
+        name: &str,
+        epoch: usize,
+        split: &Split,
+    ) -> Result<Vec<NumericEntry>, String> {
+        let key = logger_key(name, split);
+        let values = match self.values.get(&key) {
             Some(values) => values,
             None => return Ok(Vec::new()),
         };
@@ -266,4 +365,11 @@ impl MetricLogger for InMemoryMetricLogger {
             None => Ok(Vec::new()),
         }
     }
+
+    fn log_metric_definition(&mut self, definition: MetricDefinition) {
+        self.metric_definitions
+            .insert(definition.metric_id.clone(), definition);
+    }
+
+    fn log_epoch_summary(&mut self, _summary: EpochSummary) {}
 }

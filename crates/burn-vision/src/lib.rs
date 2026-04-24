@@ -6,6 +6,7 @@
 //! Currently implemented are:
 //! - `connected_components`
 //! - `connected_components_with_stats`
+//! - `nms` (Non-Maximum Suppression)
 //!
 
 #![warn(missing_docs)]
@@ -19,10 +20,6 @@ mod ops;
 mod tensor;
 mod transform;
 
-#[cfg(feature = "export-tests")]
-#[allow(missing_docs)]
-pub mod tests;
-
 pub use base::*;
 pub use ops::*;
 pub use tensor::*;
@@ -30,5 +27,10 @@ pub use transform::*;
 
 /// Module for vision/image utilities
 pub mod utils;
+
+#[cfg(feature = "loss")]
+#[cfg_attr(docsrs, doc(cfg(feature = "loss")))]
+/// Loss module
+pub mod loss;
 
 pub use backends::{KernelShape, create_structuring_element};

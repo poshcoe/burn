@@ -1,52 +1,79 @@
 #[cfg(feature = "std")]
 mod tests {
     use burn::{
-        module::Module,
-        nn,
+        module::{Module, Param},
         record::{
             BinFileRecorder, DefaultFileRecorder, FileRecorder, FullPrecisionSettings,
             PrettyJsonFileRecorder, RecorderError,
         },
     };
     use burn_core as burn;
-    use burn_ndarray::NdArrayDevice;
-    use burn_tensor::backend::Backend;
+    use burn_flex::FlexDevice;
+    use burn_tensor::{Tensor, backend::Backend};
     use std::path::PathBuf;
 
-    type TestBackend = burn_ndarray::NdArray<f32>;
+    type TestBackend = burn_flex::Flex;
+
+    /// Simple linear module.
+    #[derive(Module, Debug)]
+    pub struct Linear<B: Backend> {
+        pub weight: Param<Tensor<B, 2>>,
+        pub bias: Option<Param<Tensor<B, 1>>>,
+    }
+
+    impl<B: Backend> Linear<B> {
+        pub fn new(in_features: usize, out_features: usize, device: &B::Device) -> Self {
+            let weight = Tensor::random(
+                [out_features, in_features],
+                burn_tensor::Distribution::Default,
+                device,
+            );
+            let bias = Tensor::random([out_features], burn_tensor::Distribution::Default, device);
+
+            Self {
+                weight: Param::from_tensor(weight),
+                bias: Some(Param::from_tensor(bias)),
+            }
+        }
+    }
 
     #[derive(Module, Debug)]
     pub struct Model<B: Backend> {
         single_const: f32,
-        linear1: nn::Linear<B>,
+        linear1: Linear<B>,
         array_const: [usize; 2],
-        linear2: nn::Linear<B>,
+        linear2: Linear<B>,
+        array_lin: [Linear<B>; 2],
     }
 
     #[derive(Module, Debug)]
     pub struct ModelNewOptionalField<B: Backend> {
         single_const: f32,
-        linear1: nn::Linear<B>,
+        linear1: Linear<B>,
         array_const: [usize; 2],
-        linear2: nn::Linear<B>,
+        linear2: Linear<B>,
+        array_lin: [Linear<B>; 2],
         new_field: Option<usize>,
     }
 
     #[derive(Module, Debug)]
     pub struct ModelNewConstantField<B: Backend> {
         single_const: f32,
-        linear1: nn::Linear<B>,
+        linear1: Linear<B>,
         array_const: [usize; 2],
-        linear2: nn::Linear<B>,
+        linear2: Linear<B>,
+        array_lin: [Linear<B>; 2],
         new_field: usize,
     }
 
     #[derive(Module, Debug)]
+    #[allow(unused)]
     pub struct ModelNewFieldOrders<B: Backend> {
         array_const: [usize; 2],
-        linear2: nn::Linear<B>,
+        linear2: Linear<B>,
         single_const: f32,
-        linear1: nn::Linear<B>,
+        array_lin: [Linear<B>; 2],
+        linear1: Linear<B>,
     }
 
     #[test]
@@ -139,8 +166,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
-    fn deserialize_with_new_optional_field_doesnt_works_with_bin_file_recorder() {
+    fn deserialize_with_new_optional_field_works_with_bin_file_recorder() {
         deserialize_with_new_optional_field("bin", BinFileRecorder::<FullPrecisionSettings>::new())
             .unwrap();
     }
@@ -170,7 +196,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
     fn deserialize_with_new_field_order_works_with_bin_file_recorder() {
         deserialize_with_new_field_order("bin", BinFileRecorder::<FullPrecisionSettings>::new())
             .unwrap();
@@ -184,7 +209,7 @@ mod tests {
     #[test]
     fn test_tensor_serde() {
         let tensor: burn_tensor::Tensor<TestBackend, 1> =
-            burn_tensor::Tensor::ones([1], &NdArrayDevice::default());
+            burn_tensor::Tensor::ones([1], &FlexDevice);
         let encoded = serde_json::to_string(&tensor).unwrap();
         let decoded: burn_tensor::Tensor<TestBackend, 1> = serde_json::from_str(&encoded).unwrap();
         assert_eq!(tensor.into_data(), decoded.into_data());
@@ -198,9 +223,13 @@ mod tests {
         let file_path: PathBuf = file_path(format!("deserialize_with_new_optional_field-{name}"));
         let model = Model {
             single_const: 32.0,
-            linear1: nn::LinearConfig::new(20, 20).init::<TestBackend>(&device),
+            linear1: Linear::<TestBackend>::new(20, 20, &device),
             array_const: [2, 2],
-            linear2: nn::LinearConfig::new(20, 20).init::<TestBackend>(&device),
+            linear2: Linear::<TestBackend>::new(20, 20, &device),
+            array_lin: [
+                Linear::<TestBackend>::new(20, 20, &device),
+                Linear::<TestBackend>::new(20, 20, &device),
+            ],
         };
 
         recorder
@@ -226,9 +255,13 @@ mod tests {
             file_path(format!("deserialize_with_removed_optional_field-{name}"));
         let model = ModelNewOptionalField {
             single_const: 32.0,
-            linear1: nn::LinearConfig::new(20, 20).init::<TestBackend>(&device),
+            linear1: Linear::<TestBackend>::new(20, 20, &device),
             array_const: [2, 2],
-            linear2: nn::LinearConfig::new(20, 20).init::<TestBackend>(&device),
+            linear2: Linear::<TestBackend>::new(20, 20, &device),
+            array_lin: [
+                Linear::<TestBackend>::new(20, 20, &device),
+                Linear::<TestBackend>::new(20, 20, &device),
+            ],
             new_field: None,
         };
 
@@ -251,8 +284,12 @@ mod tests {
         let model = Model {
             single_const: 32.0,
             array_const: [2, 2],
-            linear1: nn::LinearConfig::new(20, 20).init::<TestBackend>(&device),
-            linear2: nn::LinearConfig::new(20, 20).init::<TestBackend>(&device),
+            linear1: Linear::<TestBackend>::new(20, 20, &device),
+            linear2: Linear::<TestBackend>::new(20, 20, &device),
+            array_lin: [
+                Linear::<TestBackend>::new(20, 20, &device),
+                Linear::<TestBackend>::new(20, 20, &device),
+            ],
         };
 
         recorder
@@ -279,8 +316,12 @@ mod tests {
         let model = ModelNewConstantField {
             single_const: 32.0,
             array_const: [2, 2],
-            linear1: nn::LinearConfig::new(20, 20).init::<TestBackend>(&device),
-            linear2: nn::LinearConfig::new(20, 20).init::<TestBackend>(&device),
+            linear1: Linear::<TestBackend>::new(20, 20, &device),
+            linear2: Linear::<TestBackend>::new(20, 20, &device),
+            array_lin: [
+                Linear::<TestBackend>::new(20, 20, &device),
+                Linear::<TestBackend>::new(20, 20, &device),
+            ],
             new_field: 0,
         };
 
@@ -303,8 +344,12 @@ mod tests {
         let model = Model {
             array_const: [2, 2],
             single_const: 32.0,
-            linear1: nn::LinearConfig::new(20, 20).init::<TestBackend>(&device),
-            linear2: nn::LinearConfig::new(20, 20).init::<TestBackend>(&device),
+            linear1: Linear::<TestBackend>::new(20, 20, &device),
+            linear2: Linear::<TestBackend>::new(20, 20, &device),
+            array_lin: [
+                Linear::<TestBackend>::new(20, 20, &device),
+                Linear::<TestBackend>::new(20, 20, &device),
+            ],
         };
 
         recorder

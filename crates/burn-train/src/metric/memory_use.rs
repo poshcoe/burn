@@ -1,6 +1,6 @@
 /// RAM use metric
-use super::{MetricMetadata, Numeric};
-use crate::metric::{Metric, MetricEntry, NumericEntry};
+use super::{MetricAttributes, MetricMetadata, NumericAttributes};
+use crate::metric::{Metric, Numeric, NumericEntry, SerializedEntry};
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -66,7 +66,7 @@ impl Default for CpuMemory {
 impl Metric for CpuMemory {
     type Input = ();
 
-    fn update(&mut self, _item: &Self::Input, _metadata: &MetricMetadata) -> MetricEntry {
+    fn update(&mut self, _item: &Self::Input, _metadata: &MetricMetadata) -> SerializedEntry {
         if self.last_refresh.elapsed() >= self.refresh_frequency {
             self.refresh();
         }
@@ -78,7 +78,7 @@ impl Metric for CpuMemory {
             bytes2gb(self.ram_bytes_total),
         );
 
-        MetricEntry::new(self.name(), formatted, raw.to_string())
+        SerializedEntry::new(formatted, raw.to_string())
     }
 
     fn clear(&mut self) {}
@@ -86,10 +86,22 @@ impl Metric for CpuMemory {
     fn name(&self) -> Arc<String> {
         self.name.clone()
     }
+
+    fn attributes(&self) -> MetricAttributes {
+        NumericAttributes {
+            unit: Some("Gb".to_string()),
+            higher_is_better: false,
+        }
+        .into()
+    }
 }
 
 impl Numeric for CpuMemory {
     fn value(&self) -> NumericEntry {
+        NumericEntry::Value(bytes2gb(self.ram_bytes_used))
+    }
+
+    fn running_value(&self) -> NumericEntry {
         NumericEntry::Value(bytes2gb(self.ram_bytes_used))
     }
 }

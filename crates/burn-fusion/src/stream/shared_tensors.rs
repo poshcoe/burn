@@ -1,4 +1,4 @@
-use burn_common::id::StreamId;
+use burn_backend::StreamId;
 use burn_ir::{TensorId, TensorIr};
 use hashbrown::HashMap;
 
@@ -132,6 +132,18 @@ impl SharedTensors {
         self.register_manual_drop(to_drop)
     }
 
+    pub fn streams_of(&mut self, tensor: &TensorId) -> Vec<StreamId> {
+        let mut streams = Vec::new();
+
+        if let Some(value) = self.shared_tensors.get(tensor) {
+            for s in value.streams.keys() {
+                streams.push(*s);
+            }
+        }
+
+        streams
+    }
+
     /// Analyses the current tensor and updates its state.
     pub fn analyse<R: FusionRuntime>(
         &mut self,
@@ -140,7 +152,7 @@ impl SharedTensors {
         streams_op: &OperationStreams,
         streams: &HashMap<StreamId, Stream<R>>,
     ) -> SharedTensorAnalysis {
-        let stream_id = match streams_op.streams.get(&node.id) {
+        let stream_id = match streams_op.get(node.id) {
             Some(val) => val,
             None => {
                 return match self.shared_tensors.contains_key(&node.id) {
@@ -150,7 +162,7 @@ impl SharedTensors {
             }
         };
 
-        if stream_id == &id {
+        if stream_id == id {
             return match self.shared_tensors.contains_key(&node.id) {
                 true => SharedTensorAnalysis::SharedFromCurrentStream,
                 false => SharedTensorAnalysis::NotShared,
@@ -159,7 +171,7 @@ impl SharedTensors {
 
         // Here the node is tagged as newly shared.
         let stream_current = streams.get(&id);
-        let stream = streams.get(stream_id);
+        let stream = streams.get(&stream_id);
 
         let state = match self.shared_tensors.get_mut(&node.id) {
             Some(state) => state,
@@ -170,14 +182,12 @@ impl SharedTensors {
         };
 
         state.register_new_stream(id, stream_current);
-        match state.register_new_stream(*stream_id, stream) {
+        match state.register_new_stream(stream_id, stream) {
             Some(origin) => SharedTensorAnalysis::SharedFromExistingStream {
-                stream_id: *stream_id,
+                stream_id,
                 original_cursor: origin,
             },
-            None => SharedTensorAnalysis::SharedFromNewStream {
-                stream_id: *stream_id,
-            },
+            None => SharedTensorAnalysis::SharedFromNewStream { stream_id },
         }
     }
 

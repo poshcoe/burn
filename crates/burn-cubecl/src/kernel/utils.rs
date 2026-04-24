@@ -1,23 +1,35 @@
-use cubecl::std::{FastDivmod, FastDivmodArgs};
-use cubecl::{prelude::SequenceArg, std::tensor::StridedLayoutArgs};
+use burn_backend::Shape;
+use cubecl::prelude::SequenceArg;
+use cubecl::{
+    ir::{UIntKind, VectorSize},
+    prelude::*,
+    std::{
+        FastDivmod, FastDivmodInt,
+        tensor::layout::linear::{LinearLayoutLaunch, LinearViewLayoutLaunch},
+    },
+};
 
 use crate::{CubeRuntime, tensor::CubeTensor};
 
-pub fn shape_divmod<'a, R: CubeRuntime>(tensor: &CubeTensor<R>) -> SequenceArg<'a, R, FastDivmod> {
+pub fn shape_divmod<R: CubeRuntime>(tensor: &CubeTensor<R>) -> SequenceArg<R, FastDivmod<usize>> {
     let mut arg = SequenceArg::new();
-    for dim in tensor.shape.dims.iter() {
-        arg.push(FastDivmodArgs::new(&tensor.client, *dim as u32));
+    for dim in tensor.meta.shape().iter() {
+        arg.push(*dim);
     }
     arg
 }
 
-pub fn strided_layout<'a, R: CubeRuntime>(tensor: &CubeTensor<R>) -> StridedLayoutArgs<'a, R> {
-    let rank = tensor.shape.num_dims();
-    if rank <= 1 || tensor.shape.dims[rank - 1] == tensor.strides[rank - 2] {
-        StridedLayoutArgs::none()
-    } else {
-        StridedLayoutArgs::strided(&tensor.client, tensor.shape.dims[rank - 1] as u32)
-    }
+pub fn linear_layout<R: CubeRuntime>(
+    tensor: &CubeTensor<R>,
+    vector_size: VectorSize,
+) -> LinearLayoutLaunch<R> {
+    LinearLayoutLaunch::from_shape_strides(
+        tensor.meta.shape().clone(),
+        tensor.meta.strides().clone(),
+        // Don't care about type size, only vector size
+        Type::new(UIntKind::U32.into()).with_vector_size(vector_size),
+        LinearViewLayoutLaunch::new(),
+    )
 }
 
 pub fn split_dim<R: CubeRuntime>(
@@ -25,26 +37,105 @@ pub fn split_dim<R: CubeRuntime>(
     dim: usize,
     shape: &[usize],
 ) -> CubeTensor<R> {
-    let mut stride = tensor.strides[dim];
-    tensor.shape.dims.remove(dim);
-    tensor.strides.remove(dim);
+    let mut stride = tensor.meta.strides()[dim];
+    tensor.meta.remove(dim);
 
     for size in shape.iter().rev() {
-        tensor.shape.dims.insert(dim, *size);
-        tensor.strides.insert(dim, stride);
+        tensor.meta.insert(dim, *size, stride);
         stride *= size;
     }
 
     tensor
 }
 
-pub fn merge_dims<R: CubeRuntime>(
-    mut tensor: CubeTensor<R>,
-    dim0: usize,
-    dim1: usize,
-) -> CubeTensor<R> {
-    tensor.shape.dims[dim1] *= tensor.shape.dims[dim0];
-    tensor.shape.dims.remove(dim0);
-    tensor.strides.remove(dim0);
-    tensor
+pub fn broadcast_shape<R: CubeRuntime>(tensors: &[&CubeTensor<R>]) -> Shape {
+    let rank = tensors[0].meta.num_dims();
+    debug_assert!(
+        tensors.iter().all(|it| it.meta.num_dims() == rank),
+        "Broadcast tensors must have the same rank"
+    );
+
+    let dims = (0..rank).map(|dim| {
+        let max = tensors.iter().map(|it| it.meta.shape()[dim]).max();
+        let max = max.unwrap_or(1);
+        debug_assert!(
+            tensors
+                .iter()
+                .all(|it| it.meta.shape()[dim] == max || it.meta.shape()[dim] == 1),
+            "Broadcast dims must be size 1"
+        );
+        max
+    });
+
+    Shape::from(dims)
 }
+
+pub fn broadcast_strides<R: CubeRuntime>(
+    reference: &CubeTensor<R>,
+    tensor: &CubeTensor<R>,
+) -> SequenceArg<R, usize> {
+    if reference.meta.shape() != tensor.meta.shape() {
+        tensor
+            .meta
+            .strides()
+            .iter()
+            .zip(
+                tensor
+                    .meta
+                    .shape()
+                    .iter()
+                    .zip(reference.meta.shape().iter()),
+            )
+            .map(|(stride, (shape, ref_shape))| if *shape == *ref_shape { *stride } else { 0 })
+            .collect()
+    } else {
+        tensor.meta.strides().iter().copied().collect()
+    }
+}
+
+#[cube]
+pub(crate) fn decompose_linear<I: FastDivmodInt>(
+    pos: I,
+    shape: &Sequence<FastDivmod<I>>,
+) -> (I, Sequence<I>) {
+    let rank = comptime![shape.len()];
+    let mut offs = pos;
+    let mut out = Sequence::new();
+
+    #[unroll]
+    for i in 0..rank {
+        let dim = comptime![rank - i - 1];
+        let (rem, offs_local) = shape.index(dim).div_mod(offs);
+        out.push(offs_local);
+        offs = rem;
+    }
+
+    (offs, out.rev())
+}
+
+pub(crate) trait RequiredAddrType {
+    fn required_address_type(&self) -> AddressType;
+}
+
+impl<R: CubeRuntime> RequiredAddrType for CubeTensor<R> {
+    fn required_address_type(&self) -> AddressType {
+        self.required_address_type()
+    }
+}
+impl<R: CubeRuntime> RequiredAddrType for Option<CubeTensor<R>> {
+    fn required_address_type(&self) -> AddressType {
+        self.as_ref()
+            .map(|it| it.required_address_type())
+            .unwrap_or_default()
+    }
+}
+
+macro_rules! address_type {
+    ($($tensor: tt),*) => {
+        [$($crate::kernel::utils::RequiredAddrType::required_address_type(&$tensor)),*]
+        .into_iter()
+        .max()
+        .unwrap_or_default()
+    };
+}
+pub(crate) use address_type;

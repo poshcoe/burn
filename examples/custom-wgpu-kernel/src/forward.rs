@@ -8,7 +8,7 @@ use burn::{
     },
     tensor::Shape,
 };
-use cubecl::{CubeCount, CubeDim, prelude::KernelId, server::Bindings};
+use cubecl::{CubeCount, CubeDim, prelude::KernelId, server::KernelArguments};
 use derive_new::new;
 use std::marker::PhantomData;
 
@@ -61,15 +61,15 @@ impl<F: FloatElement, I: IntElement, BT: BoolElement> Backend
         let bias = into_contiguous(bias);
 
         // Get the matmul relevant shapes.
-        let ndims = lhs.shape.num_dims();
-        let num_rows = lhs.shape.dims[ndims - 2];
-        let num_cols = rhs.shape.dims[ndims - 1];
+        let ndims = lhs.meta.shape().num_dims();
+        let num_rows = lhs.meta.shape()[ndims - 2];
+        let num_cols = rhs.meta.shape()[ndims - 1];
 
         // Compute shape of output, while tracking number of batches.
         let mut num_batches = 1;
         let mut shape_out = vec![0; ndims];
         for i in shape_out.clone().into_iter().take(ndims - 2) {
-            shape_out[i] = usize::max(lhs.shape.dims[i], rhs.shape.dims[i]);
+            shape_out[i] = usize::max(lhs.meta.shape()[i], rhs.meta.shape()[i]);
             num_batches *= shape_out[i];
         }
         shape_out[ndims - 2] = num_rows;
@@ -95,7 +95,7 @@ impl<F: FloatElement, I: IntElement, BT: BoolElement> Backend
 
         // Build info buffer with tensor information needed by the kernel, such as shapes and strides.
         let info = build_info::<_, F>(&[&lhs, &rhs, &output]);
-        let info_handle = lhs.client.create(bytemuck::cast_slice(&info));
+        let info_handle = lhs.client.create_from_slice(bytemuck::cast_slice(&info));
 
         // Declare the wgsl workgroup with the number of cubes in x, y and z.
         let cubes_needed_in_x = f32::ceil(num_rows as f32 / cube_dim.x as f32) as u32;
@@ -104,10 +104,10 @@ impl<F: FloatElement, I: IntElement, BT: BoolElement> Backend
             CubeCount::Static(cubes_needed_in_x, cubes_needed_in_y, num_batches as u32);
 
         // Execute lazily the kernel with the launch information and the given buffers.
-        lhs.client.execute(
+        lhs.client.launch(
             Box::new(SourceKernel::new(kernel, cube_dim)),
             cube_count,
-            Bindings::new().with_buffers(vec![
+            KernelArguments::new().with_buffers(vec![
                 lhs.handle.binding(),
                 rhs.handle.binding(),
                 bias.handle.binding(),

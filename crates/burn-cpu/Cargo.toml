@@ -1,0 +1,42 @@
+[package]
+authors = ["marcantoinem <marc-antoine.m@outlook.com>"]
+categories = ["science"]
+description = "MLIR based CPU backend for the Burn framework"
+documentation = "https://docs.rs/burn-cpu"
+edition.workspace = true
+keywords = ["deep-learning", "machine-learning", "cpu"]
+license.workspace = true
+name = "burn-cpu"
+readme.workspace = true
+repository = "https://github.com/tracel-ai/burn/tree/main/crates/burn-cpu"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["std", "fusion", "autotune", "burn-cubecl/default", "cubecl/default"]
+doc = ["burn-cubecl/doc"]
+fusion = ["burn-fusion", "burn-cubecl/fusion"]
+std = ["burn-cubecl/std", "cubecl/std"]
+tracing = [
+    "burn-backend/tracing",
+    "burn-cubecl/tracing",
+    "burn-fusion?/tracing",
+    "cubecl/tracing",
+]
+
+autotune = ["burn-cubecl/autotune"]
+autotune-checks = ["burn-cubecl/autotune-checks"]
+
+[dependencies]
+burn-fusion = { path = "../burn-fusion", version = "=0.21.0-pre.3", optional = true }
+burn-cubecl = { path = "../burn-cubecl", version = "=0.21.0-pre.3", default-features = false }
+burn-backend = { path = "../burn-backend", version = "=0.21.0-pre.3", features = [
+    "cubecl-cpu",
+] }
+cubecl = { workspace = true, features = ["cpu"] }
+
+[package.metadata.docs.rs]
+features = ["doc"]
+rustdoc-args = ["--cfg", "docsrs"]

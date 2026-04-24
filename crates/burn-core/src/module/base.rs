@@ -1,9 +1,9 @@
-use super::{ParamId, Quantizer};
+use super::{Param, ParamId, Quantizer};
 use crate::{
     record::Record,
     tensor::backend::{AutodiffBackend, Backend},
 };
-use alloc::vec::Vec;
+use alloc::{string::String, vec::Vec};
 pub use burn_derive::Module;
 use burn_tensor::{Bool, Int, Tensor, ops::Device};
 
@@ -19,11 +19,12 @@ macro_rules! module {
         impl<B: Backend> ModuleMapper<B> for Mapper {
             fn map_float<const D: usize>(
                 &mut self,
-                _id: ParamId,
-                tensor: Tensor<B, D>,
-            ) -> Tensor<B, D> {
+                param: Param<Tensor<B, D>>,
+            ) -> Param<Tensor<B, D>> {
+                let (id, tensor, mapper) = param.consume();
                 let func = $item;
-                func(tensor)
+                let tensor = func(tensor);
+                Param::from_mapped_value(id, tensor, mapper)
             }
         }
         let mut mapper = Mapper;
@@ -35,9 +36,9 @@ macro_rules! module {
             backend: core::marker::PhantomData<B>,
         }
         impl<'a, B: Backend> ModuleVisitor<B> for Visitor<'a, B> {
-            fn visit_float<const D: usize>(&mut self, _id: ParamId, tensor: &Tensor<B, D>) {
+            fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<B, D>>) {
                 let func = $item;
-                func(tensor, &mut self.state)
+                func(&param.val(), &mut self.state)
             }
         }
         #[allow(clippy::redundant_closure_call)]
@@ -63,20 +64,20 @@ macro_rules! module {
 /// parameter B. This will be used by the [derive](burn_derive::Module) attribute to generate the code
 /// necessary to optimize and train the module on any backend.
 ///
-/// ```no_run
+/// ```rust, ignore
 /// // Not necessary when using the burn crate directly.
 /// use burn_core as burn;
 ///
 /// use burn::{
-///     nn,
 ///     module::Module,
+///     nn::Linear,
 ///     tensor::Tensor,
 ///     tensor::backend::Backend,
 /// };
 ///
 /// #[derive(Module, Debug)]
 /// struct MyModule<B: Backend> {
-///   my_param: nn::Linear<B>,
+///   my_param: Linear<B>,
 ///   my_other_field: usize,
 /// }
 /// ```
@@ -123,6 +124,21 @@ pub trait Module<B: Backend>: Clone + Send + core::fmt::Debug {
             map = self,
             ops = |tensor: Tensor<B, D>| tensor.set_require_grad(false)
         )
+    }
+
+    /// Move the module and all of its sub-modules to the autodiff backend.
+    ///
+    /// # Notes
+    ///
+    /// * Only plain modules (not already on an autodiff backend) can be moved.
+    /// * Calling `train()` on a module that is already on an autodiff backend
+    ///   will result in a type error, because the module's inner backend does not match.
+    fn train<AB>(self) -> <Self as HasAutodiffModule<AB>>::TrainModule
+    where
+        AB: AutodiffBackend<InnerBackend = B>,
+        Self: HasAutodiffModule<AB>,
+    {
+        <Self as HasAutodiffModule<AB>>::TrainModule::from_inner(self)
     }
 
     /// Get the number of parameters the module has, including all of its sub-modules.
@@ -209,37 +225,190 @@ pub trait Module<B: Backend>: Clone + Send + core::fmt::Debug {
     }
 }
 
-/// Module visitor trait.
+/// Module visitor trait for traversing and inspecting module parameters.
 pub trait ModuleVisitor<B: Backend> {
-    /// Visit a float tensor in the module.
-    fn visit_float<const D: usize>(&mut self, _id: ParamId, _tensor: &Tensor<B, D>) {}
-    /// Visit an int tensor in the module.
-    fn visit_int<const D: usize>(&mut self, _id: ParamId, _tensor: &Tensor<B, D, Int>) {}
-    /// Visit a bool tensor in the module.
-    fn visit_bool<const D: usize>(&mut self, _id: ParamId, _tensor: &Tensor<B, D, Bool>) {}
+    /// Visit a float parameter in the module.
+    ///
+    /// # Parameters
+    /// - `param`: The float parameter to visit
+    #[allow(unused_variables)]
+    fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<B, D>>) {}
+
+    /// Visit an int parameter in the module.
+    ///
+    /// # Parameters
+    /// - `param`: The integer parameter to visit
+    #[allow(unused_variables)]
+    fn visit_int<const D: usize>(&mut self, param: &Param<Tensor<B, D, Int>>) {}
+
+    /// Visit a bool parameter in the module.
+    ///
+    /// # Parameters
+    /// - `param`: The boolean parameter to visit
+    #[allow(unused_variables)]
+    fn visit_bool<const D: usize>(&mut self, param: &Param<Tensor<B, D, Bool>>) {}
+
+    /// Called when entering a submodule.
+    ///
+    /// # Parameters
+    /// - `name`: The name of the submodule being entered
+    /// - `container_type`: The type of the container with format:
+    ///   - For user-defined structs: "Struct:TypeName" (e.g., "Struct:Linear")
+    ///   - For user-defined enums: "Enum:TypeName" (e.g., "Enum:MyEnum")
+    ///   - For Vec containers: "Vec" (name is the index)
+    ///   - For Tuple containers: "Tuple" (name is the index)
+    ///   - For Array containers: "Array" (name is the index)
+    ///
+    /// Note: Option containers do not call enter_module/exit_module to preserve
+    /// the field name in the path (e.g., "bias" instead of "bias.Some")
+    #[allow(unused_variables)]
+    fn enter_module(&mut self, name: &str, container_type: &str) {}
+
+    /// Called when exiting a submodule.
+    ///
+    /// # Parameters
+    /// - `name`: The name of the submodule being exited
+    /// - `container_type`: The type of the container with format:
+    ///   - For user-defined structs: "Struct:TypeName" (e.g., "Struct:Linear")
+    ///   - For user-defined enums: "Enum:TypeName" (e.g., "Enum:MyEnum")
+    ///   - For Vec containers: "Vec" (name is the index)
+    ///   - For Tuple containers: "Tuple" (name is the index)
+    ///   - For Array containers: "Array" (name is the index)
+    ///
+    /// Note: Option containers do not call enter_module/exit_module to preserve
+    /// the field name in the path (e.g., "bias" instead of "bias.Some")
+    #[allow(unused_variables)]
+    fn exit_module(&mut self, name: &str, container_type: &str) {}
+
+    /// Visit a float tensor with its full module path.
+    ///
+    /// # Parameters
+    /// - `path`: The path components to the tensor as a slice (e.g., &["encoder", "layer1", "weight"]).
+    ///   Each element represents a module name in the hierarchy, with the final element
+    ///   being the parameter name. This allows efficient reuse of the path stack.
+    /// - `id`: The unique identifier of the parameter
+    /// - `tensor`: The float tensor to visit
+    #[allow(unused_variables)]
+    fn visit_float_with_path<const D: usize>(
+        &mut self,
+        path: &[String],
+        id: ParamId,
+        tensor: &Tensor<B, D>,
+    ) {
+    }
+
+    /// Visit an int tensor with its full module path.
+    ///
+    /// # Parameters
+    /// - `path`: The path components to the tensor as a slice (e.g., &["encoder", "layer1", "weight"]).
+    ///   Each element represents a module name in the hierarchy, with the final element
+    ///   being the parameter name. This allows efficient reuse of the path stack.
+    /// - `id`: The unique identifier of the parameter
+    /// - `tensor`: The integer tensor to visit
+    #[allow(unused_variables)]
+    fn visit_int_with_path<const D: usize>(
+        &mut self,
+        path: &[String],
+        id: ParamId,
+        tensor: &Tensor<B, D, Int>,
+    ) {
+    }
+
+    /// Visit a bool tensor with its full module path.
+    ///
+    /// # Parameters
+    /// - `path`: The path components to the tensor as a slice (e.g., &["encoder", "layer1", "weight"]).
+    ///   Each element represents a module name in the hierarchy, with the final element
+    ///   being the parameter name. This allows efficient reuse of the path stack.
+    /// - `id`: The unique identifier of the parameter
+    /// - `tensor`: The boolean tensor to visit
+    #[allow(unused_variables)]
+    fn visit_bool_with_path<const D: usize>(
+        &mut self,
+        path: &[String],
+        id: ParamId,
+        tensor: &Tensor<B, D, Bool>,
+    ) {
+    }
 }
 
-/// Module mapper trait.
+/// Module mapper trait for transforming module parameters.
 pub trait ModuleMapper<B: Backend> {
-    /// Map a float tensor in the module.
-    fn map_float<const D: usize>(&mut self, _id: ParamId, tensor: Tensor<B, D>) -> Tensor<B, D> {
-        tensor
+    /// Called when entering a submodule.
+    ///
+    /// # Parameters
+    /// - `name`: The name of the submodule being entered
+    /// - `container_type`: The type of the container with format:
+    ///   - For user-defined structs: "Struct:TypeName" (e.g., "Struct:Linear")
+    ///   - For user-defined enums: "Enum:TypeName" (e.g., "Enum:MyEnum")
+    ///   - For Vec containers: "Vec" (name is the index)
+    ///   - For Tuple containers: "Tuple" (name is the index)
+    ///   - For Array containers: "Array" (name is the index)
+    ///
+    /// Note: Option containers do not call enter_module/exit_module to preserve
+    /// the field name in the path (e.g., "bias" instead of "bias.Some")
+    #[allow(unused_variables)]
+    fn enter_module(&mut self, name: &str, container_type: &str) {}
+
+    /// Called when exiting a submodule.
+    ///
+    /// # Parameters
+    /// - `name`: The name of the submodule being exited
+    /// - `container_type`: The type of the container with format:
+    ///   - For user-defined structs: "Struct:TypeName" (e.g., "Struct:Linear")
+    ///   - For user-defined enums: "Enum:TypeName" (e.g., "Enum:MyEnum")
+    ///   - For Vec containers: "Vec" (name is the index)
+    ///   - For Tuple containers: "Tuple" (name is the index)
+    ///   - For Array containers: "Array" (name is the index)
+    ///
+    /// Note: Option containers do not call enter_module/exit_module to preserve
+    /// the field name in the path (e.g., "bias" instead of "bias.Some")
+    #[allow(unused_variables)]
+    fn exit_module(&mut self, name: &str, container_type: &str) {}
+
+    /// Map a float parameter in the module.
+    ///
+    /// # Parameters
+    /// - `param`: The float parameter to transform
+    ///
+    /// # Returns
+    /// The transformed parameter
+    #[allow(unused_variables)]
+    fn map_float<const D: usize>(&mut self, param: Param<Tensor<B, D>>) -> Param<Tensor<B, D>> {
+        let (id, tensor, mapper) = param.consume();
+        Param::from_mapped_value(id, tensor, mapper)
     }
-    /// Map an int tensor in the module.
+
+    /// Map an int parameter in the module.
+    ///
+    /// # Parameters
+    /// - `param`: The integer parameter to transform
+    ///
+    /// # Returns
+    /// The transformed parameter
+    #[allow(unused_variables)]
     fn map_int<const D: usize>(
         &mut self,
-        _id: ParamId,
-        tensor: Tensor<B, D, Int>,
-    ) -> Tensor<B, D, Int> {
-        tensor
+        param: Param<Tensor<B, D, Int>>,
+    ) -> Param<Tensor<B, D, Int>> {
+        let (id, tensor, mapper) = param.consume();
+        Param::from_mapped_value(id, tensor, mapper)
     }
-    /// Map a bool tensor in the module.
+
+    /// Map a bool parameter in the module.
+    ///
+    /// # Parameters
+    /// - `param`: The boolean parameter to transform
+    ///
+    /// # Returns
+    /// The transformed parameter
+    #[allow(unused_variables)]
     fn map_bool<const D: usize>(
         &mut self,
-        _id: ParamId,
-        tensor: Tensor<B, D, Bool>,
-    ) -> Tensor<B, D, Bool> {
-        tensor
+        param: Param<Tensor<B, D, Bool>>,
+    ) -> Param<Tensor<B, D, Bool>> {
+        let (id, tensor, mapper) = param.consume();
+        Param::from_mapped_value(id, tensor, mapper)
     }
 }
 
@@ -248,6 +417,54 @@ pub trait AutodiffModule<B: AutodiffBackend>: Module<B> + Send + core::fmt::Debu
     /// Inner module without auto-differentiation.
     type InnerModule: Module<B::InnerBackend>;
 
-    /// Get the same module, but on the inner backend without auto-differentiation.
+    /// Returns the same module, but on the inner backend without auto-differentiation.
     fn valid(&self) -> Self::InnerModule;
+
+    /// Wraps an inner module back into an auto-diff module.
+    fn from_inner(module: Self::InnerModule) -> Self;
+}
+
+/// Helper trait to associate a module with its autodiff version.
+pub trait HasAutodiffModule<B: AutodiffBackend> {
+    /// The module with auto-differentiation.
+    type TrainModule: AutodiffModule<B, InnerModule = Self>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::TestAutodiffBackend;
+    use crate::test_utils::SimpleLinear;
+
+    #[test]
+    fn test_module_val_train_stateful() {
+        let device = Default::default();
+        let module = SimpleLinear::<TestAutodiffBackend>::new(4, 4, &device);
+
+        assert!(module.weight.is_require_grad());
+        assert!(module.weight.require_grad);
+
+        let module = module.valid();
+        assert!(!module.weight.is_require_grad());
+        assert!(module.weight.require_grad); // stateful
+
+        // Without `HasAutodiffModule`, we would need to specify the module type as well, which would be annoying
+        // let module: SimpleLinear<TestAutodiffBackend> = module.train();
+        let module = module.train::<TestAutodiffBackend>();
+        assert!(module.weight.is_require_grad());
+        assert!(module.weight.require_grad); // stateful
+
+        let module = module.no_grad();
+        assert!(!module.weight.is_require_grad());
+        assert!(!module.weight.require_grad); // stateful
+
+        let module = module.valid();
+        assert!(!module.weight.is_require_grad()); // always
+        assert!(!module.weight.require_grad); // stateful
+
+        let module = module.train::<TestAutodiffBackend>();
+        assert!(!module.weight.is_require_grad());
+        assert!(!module.weight.require_grad); // stateful
+    }
 }

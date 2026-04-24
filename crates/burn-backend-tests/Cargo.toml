@@ -1,0 +1,179 @@
+[package]
+authors = ["nathanielsimard <nathaniel.simard.42@gmail.com>"]
+categories = ["science", "no-std", "embedded", "wasm"]
+description = "Tensor tests for Burn backends"
+documentation = "https://docs.rs/burn-backend-tests"
+edition.workspace = true
+keywords = ["deep-learning", "machine-learning", "tensor", "pytorch", "ndarray"]
+license.workspace = true
+name = "burn-backend-tests"
+readme.workspace = true
+repository = "https://github.com/tracel-ai/burn/tree/main/crates/burn-backend-tests"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = [
+    "burn-tensor/default",
+    "burn-dispatch/default",
+    # Default
+    # "ndarray",
+    "std",
+]
+std = ["burn-tensor/std", "burn-dispatch/std"]
+
+# Backends
+cuda = ["burn-dispatch/cuda", "quantization", "cube"]
+flex = ["burn-dispatch/flex", "quantization"]
+rocm = ["burn-dispatch/rocm", "quantization", "cube"]
+ndarray = ["burn-dispatch/ndarray", "quantization"]
+tch = ["burn-dispatch/tch"]
+vulkan = ["wgpu", "burn-dispatch/vulkan"]
+webgpu = ["wgpu", "burn-dispatch/webgpu"]
+metal = ["wgpu", "burn-dispatch/metal"]
+wgpu = ["burn-dispatch/wgpu", "quantization", "cube"]
+cpu = ["burn-dispatch/cpu", "cube"]
+
+autotune = ["burn-dispatch/autotune"]
+autotune-checks = ["burn-dispatch/autotune-checks"]
+fusion = ["burn-dispatch/fusion"]
+distributed = [
+    "std",
+    "burn-dispatch/distributed"
+]
+
+# CubeCL backends
+cube = [
+    "cubek",
+    "autotune",
+    "burn-dispatch/ndarray",
+    "burn-ndarray",
+    # Not used directly, but included to avoid recompiling with and without fusion
+    "burn-cubecl",
+]
+
+# Test configs
+quantization = []
+
+[dependencies]
+burn-tensor = { path = "../burn-tensor", version = "=0.21.0-pre.3", default-features = false }
+burn-tensor-testgen = { path = "../burn-tensor-testgen", version = "=0.21.0-pre.3" }
+burn-dispatch = { path = "../burn-dispatch", version = "=0.21.0-pre.3", default-features = false, features = [
+    "autodiff",
+] }
+
+# For random tests
+cubek = { workspace = true, features = ["random"], optional = true }
+
+# Explicitly enable test-only checks
+burn-autodiff = { path = "../burn-autodiff", version = "=0.21.0-pre.3", default-features = false, features = [
+    "export_tests",
+] }
+burn-ndarray = { path = "../burn-ndarray", version = "=0.21.0-pre.3", optional = true, default-features = false, features = [
+    "export_tests",
+] }
+
+# Manually enable so running the tests again with fusion feature doesn't have to compile other crates
+burn-cubecl = { path = "../burn-cubecl", version = "=0.21.0-pre.3", optional = true, features = [
+    "fusion",
+] }
+
+num-traits = { workspace = true }
+serial_test = { workspace = true }
+rand.workspace = true
+
+
+[dev-dependencies]
+# Used to initialize device settings (test dtypes)
+ctor = "0.10.0"
+divan = "0.1"
+
+[[bench]]
+name = "attention"
+harness = false
+
+[[bench]]
+name = "binary_ops"
+harness = false
+
+[[bench]]
+name = "cat_max_min_ops"
+harness = false
+
+[[bench]]
+name = "comparison_ops"
+harness = false
+
+[[bench]]
+name = "conv_ops"
+harness = false
+
+[[bench]]
+name = "conv_transpose_ops"
+harness = false
+
+[[bench]]
+name = "cross_unfold_ops"
+harness = false
+
+[[bench]]
+name = "cumulative_ops"
+harness = false
+
+[[bench]]
+name = "default_ops"
+harness = false
+
+[[bench]]
+name = "deform_conv_ops"
+harness = false
+
+[[bench]]
+name = "fft_ops"
+harness = false
+
+[[bench]]
+name = "gather_scatter_ops"
+harness = false
+
+[[bench]]
+name = "int_ops"
+harness = false
+
+[[bench]]
+name = "interpolate_ops"
+harness = false
+
+[[bench]]
+name = "matmul"
+harness = false
+
+[[bench]]
+name = "norm_ops"
+harness = false
+
+[[bench]]
+name = "pool_ops"
+harness = false
+
+[[bench]]
+name = "quantization_ops"
+harness = false
+
+[[bench]]
+name = "reduce_ops"
+harness = false
+
+[[bench]]
+name = "slice_ops"
+harness = false
+
+[[bench]]
+name = "softmax_ops"
+harness = false
+
+[[bench]]
+name = "unary_ops"
+harness = false

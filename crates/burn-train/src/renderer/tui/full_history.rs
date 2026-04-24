@@ -4,7 +4,7 @@ use crate::{
     renderer::tui::{TuiSplit, TuiTag},
 };
 use ratatui::{
-    style::{Color, Style, Stylize},
+    style::{Color, Style},
     symbols,
     widgets::{Bar, Dataset, GraphType},
 };
@@ -140,7 +140,7 @@ impl FullHistoryPoints {
     }
 
     fn push(&mut self, (x, y): (f64, NumericEntry)) {
-        if x as usize % self.step_size != 0 {
+        if !(x as usize).is_multiple_of(self.step_size) {
             return;
         }
 
@@ -151,13 +151,12 @@ impl FullHistoryPoints {
                 val
             }
             NumericEntry::Aggregated {
-                sum,
+                aggregated_value,
                 count,
-                current,
             } => {
-                self.avg_sum = sum;
-                self.avg_counter = count as f64;
-                current
+                self.avg_sum += aggregated_value * count as f64;
+                self.avg_counter += count as f64;
+                aggregated_value
             }
         };
 
@@ -245,7 +244,7 @@ impl FullHistoryPoints {
                 .value((avg * factor) as u64)
                 .style(tag.split.color())
                 .text_value(format!("{:.2}", avg))
-                .label(label.into()),
+                .label(label),
             width,
         ))
     }

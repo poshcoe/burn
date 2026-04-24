@@ -1,19 +1,21 @@
 use crate::metric::processor::{EvaluatorEvent, EventProcessorEvaluation};
 
-use super::{EventProcessorTraining, LearnerEvent};
+use super::EventProcessorTraining;
 use async_channel::{Receiver, Sender};
 
-pub struct AsyncProcessorTraining<P: EventProcessorTraining> {
-    sender: Sender<Message<P>>,
+/// Event processor for the training process.
+pub struct AsyncProcessorTraining<ET, EV> {
+    sender: Sender<Message<ET, EV>>,
 }
 
+/// Event processor for the model evaluation.
 pub struct AsyncProcessorEvaluation<P: EventProcessorEvaluation> {
     sender: Sender<EvalMessage<P>>,
 }
 
-struct WorkerTraining<P: EventProcessorTraining> {
+struct WorkerTraining<ET, EV, P: EventProcessorTraining<ET, EV>> {
     processor: P,
-    rec: Receiver<Message<P>>,
+    rec: Receiver<Message<ET, EV>>,
 }
 
 struct WorkerEvaluation<P: EventProcessorEvaluation> {
@@ -21,44 +23,52 @@ struct WorkerEvaluation<P: EventProcessorEvaluation> {
     rec: Receiver<EvalMessage<P>>,
 }
 
-impl<P: EventProcessorTraining + 'static> WorkerTraining<P> {
-    pub fn start(processor: P, rec: Receiver<Message<P>>) {
+impl<ET: Send + 'static, EV: Send + 'static, P: EventProcessorTraining<ET, EV> + 'static>
+    WorkerTraining<ET, EV, P>
+{
+    pub fn start(processor: P, rec: Receiver<Message<ET, EV>>) {
         let mut worker = Self { processor, rec };
-
-        std::thread::spawn(move || {
-            while let Ok(msg) = worker.rec.recv_blocking() {
-                match msg {
-                    Message::Train(event) => worker.processor.process_train(event),
-                    Message::Valid(event) => worker.processor.process_valid(event),
-                    Message::Renderer(callback) => {
-                        callback.send_blocking(worker.processor.renderer()).unwrap();
-                        return;
+        std::thread::Builder::new()
+            .name("train-worker".into())
+            .spawn(move || {
+                while let Ok(msg) = worker.rec.recv_blocking() {
+                    match msg {
+                        Message::Train(event) => worker.processor.process_train(event),
+                        Message::Valid(event) => worker.processor.process_valid(event),
+                        Message::Renderer(callback) => {
+                            callback.send_blocking(worker.processor.renderer()).unwrap();
+                            return;
+                        }
                     }
                 }
-            }
-        });
+            })
+            .unwrap();
     }
 }
 impl<P: EventProcessorEvaluation + 'static> WorkerEvaluation<P> {
     pub fn start(processor: P, rec: Receiver<EvalMessage<P>>) {
         let mut worker = Self { processor, rec };
 
-        std::thread::spawn(move || {
-            while let Ok(event) = worker.rec.recv_blocking() {
-                match event {
-                    EvalMessage::Test(event) => worker.processor.process_test(event),
-                    EvalMessage::Renderer(sender) => {
-                        sender.send_blocking(worker.processor.renderer()).unwrap();
-                        return;
+        std::thread::Builder::new()
+            .name("evel-worker".into())
+            .spawn(move || {
+                while let Ok(event) = worker.rec.recv_blocking() {
+                    match event {
+                        EvalMessage::Test(event) => worker.processor.process_test(event),
+                        EvalMessage::Renderer(sender) => {
+                            sender.send_blocking(worker.processor.renderer()).unwrap();
+                            return;
+                        }
                     }
                 }
-            }
-        });
+            })
+            .unwrap();
     }
 }
 
-impl<P: EventProcessorTraining + 'static> AsyncProcessorTraining<P> {
-    pub fn new(processor: P) -> Self {
+impl<ET: Send + 'static, EV: Send + 'static> AsyncProcessorTraining<ET, EV> {
+    /// Create an event processor for training.
+    pub fn new<P: EventProcessorTraining<ET, EV> + 'static>(processor: P) -> Self {
         let (sender, rec) = async_channel::bounded(1);
 
         WorkerTraining::start(processor, rec);
@@ -68,6 +78,7 @@ impl<P: EventProcessorTraining + 'static> AsyncProcessorTraining<P> {
 }
 
 impl<P: EventProcessorEvaluation + 'static> AsyncProcessorEvaluation<P> {
+    /// Create an event processor for model evaluation.
     pub fn new(processor: P) -> Self {
         let (sender, rec) = async_channel::bounded(1);
 
@@ -77,9 +88,9 @@ impl<P: EventProcessorEvaluation + 'static> AsyncProcessorEvaluation<P> {
     }
 }
 
-enum Message<P: EventProcessorTraining> {
-    Train(LearnerEvent<P::ItemTrain>),
-    Valid(LearnerEvent<P::ItemValid>),
+enum Message<EventTrain, EventValid> {
+    Train(EventTrain),
+    Valid(EventValid),
     Renderer(Sender<Box<dyn crate::renderer::MetricsRenderer>>),
 }
 
@@ -88,15 +99,12 @@ enum EvalMessage<P: EventProcessorEvaluation> {
     Renderer(Sender<Box<dyn crate::renderer::MetricsRenderer>>),
 }
 
-impl<P: EventProcessorTraining> EventProcessorTraining for AsyncProcessorTraining<P> {
-    type ItemTrain = P::ItemTrain;
-    type ItemValid = P::ItemValid;
-
-    fn process_train(&mut self, event: LearnerEvent<Self::ItemTrain>) {
+impl<ET: Send, EV: Send> EventProcessorTraining<ET, EV> for AsyncProcessorTraining<ET, EV> {
+    fn process_train(&mut self, event: ET) {
         self.sender.send_blocking(Message::Train(event)).unwrap();
     }
 
-    fn process_valid(&mut self, event: LearnerEvent<Self::ItemValid>) {
+    fn process_valid(&mut self, event: EV) {
         self.sender.send_blocking(Message::Valid(event)).unwrap();
     }
 

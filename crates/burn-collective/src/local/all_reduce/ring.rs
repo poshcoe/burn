@@ -1,12 +1,17 @@
 use super::tree::all_reduce_sum_tree;
-use crate::PeerId;
-use burn_tensor::{Shape, TensorMetadata, backend::Backend};
+use crate::local::tensor_map::CollectiveTensorMap;
+use crate::{PeerId, local::tensor_map};
+use burn_backend::{Backend, Shape, Slice, TensorMetadata};
 use std::{collections::HashMap, ops::Range};
 
 /// Ring implementation of All-Reduce (Ring-Reduce)
+#[cfg_attr(
+    feature = "tracing",
+    tracing::instrument(level = "trace", skip(tensors))
+)]
 pub(crate) fn all_reduce_sum_ring<B: Backend>(
-    tensors: &mut HashMap<PeerId, B::FloatTensorPrimitive>,
-) {
+    tensors: CollectiveTensorMap<B>,
+) -> CollectiveTensorMap<B> {
     // https://blog.dailydoseofds.com/p/all-reduce-and-ring-reduce-for-model
 
     // Example: tensors=3, slices=3
@@ -38,21 +43,21 @@ pub(crate) fn all_reduce_sum_ring<B: Backend>(
     // 2  2  2
 
     // Verify all shapes are the same
-    let shape = get_shape::<B>(tensors).expect("Cannot aggregate tensors with different sizes");
+    let shape = tensor_map::get_common_shape::<B>(&tensors)
+        .expect("Cannot aggregate tensors with different sizes");
 
     // Chose an axis
     let slice_dim = get_slice_dim(&shape);
 
-    let slice_dim_size = shape.dims[slice_dim];
+    let slice_dim_size = shape[slice_dim];
     let tensor_count = tensors.len();
     if slice_dim_size < tensor_count {
         // Tensor cannot be split into N slices! Use a fallback algorithm: binary tree
-        all_reduce_sum_tree::<B>(tensors, 2);
-        return;
+        return all_reduce_sum_tree::<B>(tensors, 2);
     }
 
     // Split tensors into slices
-    let mut sliced_tensors = slice_tensors::<B>(core::mem::take(tensors), shape, slice_dim);
+    let mut sliced_tensors = slice_tensors::<B>(tensors, shape, slice_dim);
 
     // phase 1: aggregate in ring N-1 times (Reduce-Scatter)
     ring_cycles::<B>(&mut sliced_tensors, true);
@@ -61,36 +66,21 @@ pub(crate) fn all_reduce_sum_ring<B: Backend>(
     ring_cycles::<B>(&mut sliced_tensors, false);
 
     // merge slices and put back in result
-    for (id, slices) in sliced_tensors {
-        tensors.insert(id, B::float_cat(slices, slice_dim));
-    }
+    sliced_tensors
+        .into_iter()
+        .map(|(id, slices)| (id, B::float_cat(slices, slice_dim)))
+        .collect()
 }
 
 /// Get the dimension to slice across: the largest dimension of the shape
 pub(crate) fn get_slice_dim(shape: &Shape) -> usize {
-    // get dimension with greatest size
+    // get dimension with the greatest size.
     shape
-        .dims
         .iter()
         .enumerate()
         .max_by(|(_, a), (_, b)| a.cmp(b))
         .map(|(index, _)| index)
         .unwrap()
-}
-
-/// Get the shape of the tensors. They should have all the same shape, otherwise None is returned.
-fn get_shape<B: Backend>(tensors: &HashMap<PeerId, B::FloatTensorPrimitive>) -> Option<Shape> {
-    let mut shape = None;
-
-    for tensor in tensors.values() {
-        if shape.is_none() {
-            shape = Some(tensor.shape());
-        } else if tensor.shape() != *shape.as_ref().unwrap() {
-            return None;
-        }
-    }
-
-    shape
 }
 
 /// With a ring of N tensors, send the tensors N-1 times, either for the first of second phase.
@@ -121,16 +111,15 @@ fn ring_cycles<B: Backend>(
             if is_phase_one {
                 dest_slice = B::float_add(dest_slice, src_slice_on_dest);
             } else {
-                let ranges: Vec<Range<usize>> = dest_slice
+                let slices: Vec<Slice> = dest_slice
                     .shape()
-                    .dims
                     .iter()
-                    .map(|d| Range { start: 0, end: *d })
+                    .map(|&d| Slice::new(0, Some(d as isize), 1))
                     .collect();
 
                 // in phase 2, we don't sum the two slices, we replace with the new one.
                 dest_slice =
-                    B::float_slice_assign(dest_slice, ranges.as_slice(), src_slice_on_dest);
+                    B::float_slice_assign(dest_slice, slices.as_slice(), src_slice_on_dest);
             }
 
             sliced_tensors[src_tensor_idx]
@@ -151,7 +140,7 @@ fn slice_tensors<B: Backend>(
     slice_dim: usize,
 ) -> Vec<(PeerId, Vec<<B as Backend>::FloatTensorPrimitive>)> {
     // Get slice index ranges
-    let ranges = get_ring_reduce_slice_ranges(shape.dims[slice_dim], tensors.len());
+    let ranges = get_ring_reduce_slice_ranges(shape[slice_dim], tensors.len());
 
     // Slice tensors
     let mut sliced_tensors = vec![];
@@ -159,17 +148,13 @@ fn slice_tensors<B: Backend>(
         let mut slices = vec![];
         for range in &ranges {
             let full_range = shape
-                .dims
                 .iter()
                 .enumerate()
                 .map(|(dim_idx, dim)| {
                     if dim_idx == slice_dim {
-                        range.clone()
+                        Slice::from(range.clone())
                     } else {
-                        Range {
-                            start: 0,
-                            end: *dim,
-                        }
+                        Slice::from(0..*dim)
                     }
                 })
                 .collect::<Vec<_>>();

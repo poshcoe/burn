@@ -1,5 +1,5 @@
 #![warn(missing_docs)]
-#![cfg_attr(docsrs, feature(doc_auto_cfg))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 //! A library for training neural networks using the burn crate.
 
@@ -20,6 +20,8 @@ pub mod logger;
 /// The metric module.
 pub mod metric;
 
+pub use metric::processor::*;
+
 mod learner;
 
 pub use learner::*;
@@ -28,14 +30,18 @@ mod evaluator;
 
 pub use evaluator::*;
 
+pub use components::*;
+
 #[cfg(test)]
-pub(crate) type TestBackend = burn_ndarray::NdArray<f32>;
+pub(crate) type TestBackend = burn_flex::Flex;
 
 #[cfg(test)]
 pub(crate) mod tests {
     use crate::TestBackend;
     use burn_core::{prelude::Tensor, tensor::Bool};
     use std::default::Default;
+
+    pub type TestAutodiffBackend = burn_autodiff::Autodiff<TestBackend>;
 
     /// Probability of tp before adding errors
     pub const THRESHOLD: f64 = 0.5;

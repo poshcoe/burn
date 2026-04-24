@@ -1,10 +1,12 @@
-use std::fmt::Display;
-
-use burn_common::id::{IdGenerator, StreamId};
+use burn_backend::{DTypeUsageSet, ExecutionError, TensorData};
 use burn_communication::{Address, data_service::TensorTransferId};
 use burn_ir::{OperationIr, TensorId, TensorIr};
-use burn_tensor::TensorData;
+use burn_std::{
+    DType,
+    id::{IdGenerator, StreamId},
+};
 use serde::{Deserialize, Serialize};
+use std::fmt::Display;
 
 #[allow(missing_docs)]
 #[derive(new, Serialize, Deserialize, Debug, Hash, PartialEq, Eq, Clone, Copy, PartialOrd, Ord)]
@@ -53,6 +55,7 @@ pub struct TensorRemote {
 #[allow(missing_docs)]
 #[derive(Serialize, Deserialize, Debug)]
 pub enum ComputeTask {
+    Seed(u64),
     RegisterOperation(Box<OperationIr>),
     RegisterTensor(TensorId, TensorData),
     RegisterTensorRemote(TensorRemote, TensorId),
@@ -63,12 +66,7 @@ pub enum ComputeTask {
     },
     ReadTensor(TensorIr),
     SyncBackend,
-}
-
-/// Used by a server to request a tensor from another server
-#[derive(Serialize, Deserialize, Debug)]
-pub struct RemoteTensorReq {
-    pub id: TensorId,
+    DTypeUsage(DType),
 }
 
 #[allow(missing_docs)]
@@ -81,6 +79,7 @@ pub struct TaskResponse {
 #[allow(missing_docs)]
 #[derive(Serialize, Deserialize, Debug)]
 pub enum TaskResponseContent {
-    ReadTensor(TensorData),
-    SyncBackend,
+    ReadTensor(Result<TensorData, ExecutionError>),
+    SyncBackend(Result<(), ExecutionError>),
+    DTypeUsage(DTypeUsageSet),
 }

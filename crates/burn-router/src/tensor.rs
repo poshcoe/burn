@@ -1,15 +1,16 @@
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use alloc::format;
 use alloc::{sync::Arc, vec::Vec};
 
 use super::RunnerClient;
+use burn_backend::{DType, Shape, TensorData, TensorMetadata, backend::ExecutionError};
 use burn_ir::{TensorId, TensorIr, TensorStatus};
-use burn_tensor::{DType, Shape, TensorData, TensorMetadata};
 
 /// Tensor primitive for the [router backend](crate::BackendRouter).
 pub struct RouterTensor<C: RunnerClient> {
     pub(crate) id: TensorId,
-    pub(crate) shape: Vec<usize>,
+    pub(crate) shape: Shape,
     pub(crate) dtype: DType,
     /// The client that has this tensor
     pub client: C,
@@ -22,13 +23,17 @@ impl<C: RunnerClient> TensorMetadata for RouterTensor<C> {
     }
 
     fn shape(&self) -> Shape {
-        Shape::from(self.shape.clone())
+        self.shape.clone()
+    }
+
+    fn rank(&self) -> usize {
+        self.shape.num_dims()
     }
 }
 
 impl<C: RunnerClient> RouterTensor<C> {
     /// Create a new router tensor.
-    pub fn new(id: TensorId, shape: Vec<usize>, dtype: DType, client: C) -> Self {
+    pub fn new(id: TensorId, shape: Shape, dtype: DType, client: C) -> Self {
         Self {
             id,
             shape,
@@ -38,15 +43,15 @@ impl<C: RunnerClient> RouterTensor<C> {
         }
     }
 
-    pub(crate) async fn into_data(self) -> TensorData {
-        self.client.clone().read_tensor(self.into_ir()).await
+    pub(crate) async fn into_data(self) -> Result<TensorData, ExecutionError> {
+        self.client.clone().read_tensor_async(self.into_ir()).await
     }
 
     /// Get the ir for this tensor
     pub fn into_ir(mut self) -> TensorIr {
         let count = self.count.load(Ordering::Relaxed);
         let status = self.status(count);
-        let mut shape_out = Vec::new();
+        let mut shape_out = Shape::from(Vec::<usize>::new());
         core::mem::swap(&mut self.shape, &mut shape_out);
 
         if let TensorStatus::ReadWrite = status {
@@ -119,7 +124,7 @@ impl<C: RunnerClient> Drop for RouterTensor<C> {
         match self.status(count) {
             TensorStatus::ReadWrite => {
                 let id = self.id;
-                let mut shape = Vec::new();
+                let mut shape = Shape::from(Vec::<usize>::new());
                 core::mem::swap(&mut shape, &mut self.shape);
 
                 let ir = TensorIr {
@@ -128,7 +133,7 @@ impl<C: RunnerClient> Drop for RouterTensor<C> {
                     status: TensorStatus::ReadWrite,
                     dtype: self.dtype,
                 };
-                self.client.register(burn_ir::OperationIr::Drop(ir));
+                self.client.register_op(burn_ir::OperationIr::Drop(ir));
             }
             TensorStatus::ReadOnly => {}
             TensorStatus::NotInit => {}

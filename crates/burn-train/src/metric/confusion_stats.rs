@@ -1,5 +1,8 @@
 use super::classification::{ClassReduction, ClassificationMetricConfig, DecisionRule};
-use burn_core::prelude::{Backend, Bool, Int, Tensor};
+use burn_core::{
+    prelude::{Backend, Bool, Int, Tensor},
+    tensor::IndexingUpdateOp,
+};
 use std::fmt::{self, Debug};
 
 /// Input for confusion statistics error types.
@@ -63,7 +66,8 @@ impl<B: Backend> ConfusionStats<B> {
                         .argsort_descending(1)
                         .narrow(1, 0, top_k.get());
                 let values = indexes.ones_like().float();
-                mask.scatter(1, indexes, values).bool()
+                mask.scatter(1, indexes, values, IndexingUpdateOp::Add)
+                    .bool()
             }
         };
         Self {
@@ -80,7 +84,7 @@ impl<B: Backend> ConfusionStats<B> {
         use ClassReduction::{Macro, Micro};
         match class_reduction {
             Micro => sample_class_mask.float().sum(),
-            Macro => sample_class_mask.float().sum_dim(0).squeeze(0),
+            Macro => sample_class_mask.float().sum_dim(0).squeeze_dim(0),
         }
     }
 
@@ -196,7 +200,7 @@ mod tests {
     fn test_true_positive(
         #[case] classification_type: ClassificationType,
         #[case] config: ClassificationMetricConfig,
-        #[case] expected: Vec<i64>,
+        #[case] expected: Vec<i32>,
     ) {
         let input: ConfusionStatsInput<TestBackend> =
             dummy_classification_input(&classification_type).into();
@@ -219,7 +223,7 @@ mod tests {
     fn test_true_negative(
         #[case] classification_type: ClassificationType,
         #[case] config: ClassificationMetricConfig,
-        #[case] expected: Vec<i64>,
+        #[case] expected: Vec<i32>,
     ) {
         let input: ConfusionStatsInput<TestBackend> =
             dummy_classification_input(&classification_type).into();
@@ -242,7 +246,7 @@ mod tests {
     fn test_false_positive(
         #[case] classification_type: ClassificationType,
         #[case] config: ClassificationMetricConfig,
-        #[case] expected: Vec<i64>,
+        #[case] expected: Vec<i32>,
     ) {
         let input: ConfusionStatsInput<TestBackend> =
             dummy_classification_input(&classification_type).into();
@@ -265,7 +269,7 @@ mod tests {
     fn test_false_negatives(
         #[case] classification_type: ClassificationType,
         #[case] config: ClassificationMetricConfig,
-        #[case] expected: Vec<i64>,
+        #[case] expected: Vec<i32>,
     ) {
         let input: ConfusionStatsInput<TestBackend> =
             dummy_classification_input(&classification_type).into();
@@ -288,7 +292,7 @@ mod tests {
     fn test_positive(
         #[case] classification_type: ClassificationType,
         #[case] config: ClassificationMetricConfig,
-        #[case] expected: Vec<i64>,
+        #[case] expected: Vec<i32>,
     ) {
         let input: ConfusionStatsInput<TestBackend> =
             dummy_classification_input(&classification_type).into();
@@ -311,7 +315,7 @@ mod tests {
     fn test_negative(
         #[case] classification_type: ClassificationType,
         #[case] config: ClassificationMetricConfig,
-        #[case] expected: Vec<i64>,
+        #[case] expected: Vec<i32>,
     ) {
         let input: ConfusionStatsInput<TestBackend> =
             dummy_classification_input(&classification_type).into();
@@ -334,7 +338,7 @@ mod tests {
     fn test_predicted_positive(
         #[case] classification_type: ClassificationType,
         #[case] config: ClassificationMetricConfig,
-        #[case] expected: Vec<i64>,
+        #[case] expected: Vec<i32>,
     ) {
         let input: ConfusionStatsInput<TestBackend> =
             dummy_classification_input(&classification_type).into();

@@ -22,8 +22,8 @@ edition = "2024"
 
 [dependencies]
 # Disable autotune default for convolutions
-burn = { version = "~0.19", features = ["std", "tui", "train", "vision", "wgpu", "fusion"], default-features = false }
-# burn = { version = "~0.19", features = ["train", "vision", "wgpu"] }
+burn = { version = "~0.21", features = ["std", "tui", "train", "vision", "wgpu", "fusion"], default-features = false }
+# burn = { version = "~0.21", features = ["train", "vision", "wgpu"] }
 ```
 
 Our goal will be to create a basic convolutional neural network used for image classification. We
@@ -145,7 +145,7 @@ There are two major things going on in this code sample.
    // Choose from any of the supported backends.
    // type Backend = Candle<f32, i64>;
    // type Backend = LibTorch<f32>;
-   // type Backend = NdArray<f32>;
+   // type Backend = Flex;
    type Backend = Wgpu;
 
    // Creation of two tensors.

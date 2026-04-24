@@ -227,24 +227,37 @@ Burn comes with built-in modules that you can use to build your own modules.
 
 ### General
 
-| Burn API        | PyTorch Equivalent                            |
-| --------------- | --------------------------------------------- |
-| `BatchNorm`     | `nn.BatchNorm1d`, `nn.BatchNorm2d` etc.       |
-| `Dropout`       | `nn.Dropout`                                  |
-| `Embedding`     | `nn.Embedding`                                |
-| `Gelu`          | `nn.Gelu`                                     |
-| `GroupNorm`     | `nn.GroupNorm`                                |
-| `HardSigmoid`   | `nn.Hardsigmoid`                              |
-| `InstanceNorm`  | `nn.InstanceNorm1d`, `nn.InstanceNorm2d` etc. |
-| `LayerNorm`     | `nn.LayerNorm`                                |
-| `LeakyRelu`     | `nn.LeakyReLU`                                |
-| `Linear`        | `nn.Linear`                                   |
-| `Prelu`         | `nn.PReLu`                                    |
-| `Relu`          | `nn.ReLU`                                     |
-| `RmsNorm`       | _No direct equivalent_                        |
-| `SwiGlu`        | _No direct equivalent_                        |
-| `Interpolate1d` | _No direct equivalent_                        |
-| `Interpolate2d` | _No direct equivalent_                        |
+| Burn API          | PyTorch Equivalent                            |
+| ----------------- | --------------------------------------------- |
+| `BatchNorm`       | `nn.BatchNorm1d`, `nn.BatchNorm2d` etc.       |
+| `Celu`            | `nn.CELU`                                     |
+| `Dropout`         | `nn.Dropout`                                  |
+| `Elu`             | `nn.ELU`                                      |
+| `Embedding`       | `nn.Embedding`                                |
+| `GaussianNoise`   | _No direct equivalent_                        |
+| `Gelu`            | `nn.Gelu`                                     |
+| `Glu`             | `nn.Glu`                                      |
+| `GroupNorm`       | `nn.GroupNorm`                                |
+| `HardShrink`      | `nn.Hardshrink`                               |
+| `HardSigmoid`     | `nn.Hardsigmoid`                              |
+| `HardSwish`       | `nn.Hardswish`                                |
+| `InstanceNorm`    | `nn.InstanceNorm1d`, `nn.InstanceNorm2d` etc. |
+| `LayerNorm`       | `nn.LayerNorm`                                |
+| `LocalResponseNorm` | `nn.LocalResponseNorm`                      |
+| `LeakyRelu`       | `nn.LeakyReLU`                                |
+| `Linear`          | `nn.Linear`                                   |
+| `Prelu`           | `nn.PReLu`                                    |
+| `Relu`            | `nn.ReLU`                                     |
+| `Selu`            | `nn.SELU`                                     |
+| `Sigmoid`         | `nn.Sigmoid`                                  |
+| `Softplus`        | `nn.Softplus`                                 |
+| `SoftShrink`      | `nn.Softshrink`                               |
+| `Softsign`        | `nn.Softsign`                                 |
+| `Shrink`          | _No direct equivalent_                        |
+| `RmsNorm`         | _No direct equivalent_                        |
+| `SwiGlu`          | _No direct equivalent_                        |
+| `Tanh`            | `nn.Tanh`                                     |
+| `ThresholdedRelu` | _No direct equivalent_                        |
 
 ### Convolutions
 
@@ -269,11 +282,36 @@ Burn comes with built-in modules that you can use to build your own modules.
 | `MaxPool1d`         | `nn.MaxPool1d`         |
 | `MaxPool2d`         | `nn.MaxPool2d`         |
 
+### Interpolation
+
+| Burn API        | PyTorch Equivalent |
+| --------------- | ------------------ |
+| `Interpolate1d` | `nn.Upsample`     |
+| `Interpolate2d` | `nn.Upsample`     |
+
+Interpolation modules resize tensors using one of the available `InterpolateMode` options:
+
+| Mode      | Description                                              |
+| --------- | -------------------------------------------------------- |
+| `Nearest` | Nearest-neighbor interpolation                           |
+| `Linear`  | Linear interpolation (bilinear for 2D)                   |
+| `Cubic`   | Cubic interpolation (bicubic for 2D)                     |
+| `Lanczos` | Lanczos3 resampling (6-tap sinc-based filter, a=3)       |
+
+Configuration is done via `Interpolate1dConfig` / `Interpolate2dConfig` with these options:
+
+| Option          | Type                                     | Default   | Description                                              |
+| --------------- |------------------------------------------| --------- | -------------------------------------------------------- |
+| `output_size`   | `Option<usize>` / `Option<[usize; 2]>`   | `None`    | Target output size (takes precedence over scale_factor)  |
+| `scale_factor`  | `Option<f32>` / `Option<[f32; 2]>`       | `None`    | Scale factor for resizing                                |
+| `mode`          | `InterpolateMode`                        | `Nearest` | Interpolation algorithm                                  |
+| `align_corners` | `bool`                                   | `true`    | Align input/output corner pixels                         |
+
 ### RNNs
 
 | Burn API         | PyTorch Equivalent     |
 | ---------------- | ---------------------- |
-| `Gru`            | `nn.GRU`               |
+| `Gru`/`BiGru`    | `nn.GRU`               |
 | `Lstm`/`BiLstm`  | `nn.LSTM`              |
 | `GateController` | _No direct equivalent_ |
 
@@ -294,6 +332,12 @@ Burn comes with built-in modules that you can use to build your own modules.
 | `BinaryCrossEntropyLoss` | `nn.BCELoss`             |
 | `CosineEmbeddingLoss`    | `nn.CosineEmbeddingLoss` |
 | `CrossEntropyLoss`       | `nn.CrossEntropyLoss`    |
+| `CTCLoss`                | `nn.CTCLoss`             |
+| `GramMatrixLoss`         | _No direct equivalent_   |
 | `HuberLoss`              | `nn.HuberLoss`           |
+| `KLDivLoss`              | `nn.KLDivLoss`           |
+| `LpLoss`                 | _No direct equivalent_   |
 | `MseLoss`                | `nn.MSELoss`             |
 | `PoissonNllLoss`         | `nn.PoissonNLLLoss`      |
+| `RNNTLoss`               | `torchaudio.functional.rnnt_loss` |
+| `SmoothL1Loss`           | `nn.SmoothL1Loss`        |

@@ -1,15 +1,21 @@
 use std::collections::HashMap;
 
-use burn_tensor::backend::Backend;
-
-use crate::PeerId;
+use crate::{
+    PeerId,
+    local::tensor_map::{CollectiveTensorMap, PeerDeviceMap},
+};
+use burn_backend::Backend;
 
 /// Broadcasts the tensor from one device in a map to all the others
+#[cfg_attr(
+    feature = "tracing",
+    tracing::instrument(level = "trace", skip(devices, tensor))
+)]
 pub(crate) fn broadcast_centralized<B: Backend>(
-    mut devices: HashMap<PeerId, B::Device>,
+    mut devices: PeerDeviceMap<B>,
     central: PeerId,
     tensor: B::FloatTensorPrimitive,
-) -> HashMap<PeerId, B::FloatTensorPrimitive> {
+) -> CollectiveTensorMap<B> {
     let mut output = HashMap::new();
 
     devices

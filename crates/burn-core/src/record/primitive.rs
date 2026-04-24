@@ -83,7 +83,7 @@ where
 /// A macro for generating implementations for tuple records of different sizes.
 /// For example: `impl_record_tuple!([R0, R1][0, 1])`.
 /// Would generate an implementation for a tuple of size 2.
-/// For this macro to work properly, please adhear to the convention:
+/// For this macro to work properly, please adhere to the convention:
 /// `impl_record_tuple!([R0, R1, ..., Rn][0, 1, ..., n])`.
 macro_rules! impl_record_tuple {
     // `$r` represents the generic records.
@@ -107,6 +107,7 @@ macro_rules! impl_record_tuple {
     };
 }
 
+impl_record_tuple!([R0][0]);
 impl_record_tuple!([R0, R1][0, 1]);
 impl_record_tuple!([R0, R1, R2][0, 1, 2]);
 impl_record_tuple!([R0, R1, R2, R3][0, 1, 2, 3]);
@@ -161,11 +162,13 @@ where
     }
 
     fn from_item<S: PrecisionSettings>(item: Self::Item<S>, device: &B::Device) -> Self {
-        Param::initialized(
-            ParamId::deserialize(&item.id),
-            Tensor::from_item(item.param, device).require_grad(), // Same behavior as when we create a new
-                                                                  // Param from a tensor.
-        )
+        B::memory_persistent_allocations(device, item, |item| {
+            Param::initialized(
+                ParamId::deserialize(&item.id),
+                Tensor::from_item(item.param, device).require_grad(), // Same behavior as when we create a new
+                                                                      // Param from a tensor.
+            )
+        })
     }
 }
 
@@ -182,10 +185,12 @@ where
     }
 
     fn from_item<S: PrecisionSettings>(item: Self::Item<S>, device: &B::Device) -> Self {
-        Param::initialized(
-            ParamId::deserialize(&item.id),
-            Tensor::from_item(item.param, device),
-        )
+        B::memory_persistent_allocations(device, item, |item| {
+            Param::initialized(
+                ParamId::deserialize(&item.id),
+                Tensor::from_item(item.param, device),
+            )
+        })
     }
 }
 
@@ -202,10 +207,12 @@ where
     }
 
     fn from_item<S: PrecisionSettings>(item: Self::Item<S>, device: &B::Device) -> Self {
-        Param::initialized(
-            ParamId::deserialize(&item.id),
-            Tensor::from_item::<S>(item.param, device),
-        )
+        B::memory_persistent_allocations(device, item, |item| {
+            Param::initialized(
+                ParamId::deserialize(&item.id),
+                Tensor::from_item::<S>(item.param, device),
+            )
+        })
     }
 }
 

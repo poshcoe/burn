@@ -1,26 +1,38 @@
 use alloc::{format, string::ToString};
 use core::{fmt::Display, marker::PhantomData};
 
+use crate as burn;
 use crate::{
-    self as burn,
     module::{
         AutodiffModule, Content, Devices, Module, ModuleDisplay, ModuleDisplayDefault,
         ModuleMapper, ModuleVisitor,
     },
-    record::Record,
+    record::{PrecisionSettings, Record},
 };
-use burn::record::PrecisionSettings;
 use burn_tensor::{
     BasicAutodiffOps, BasicOps, Tensor,
     backend::{AutodiffBackend, Backend},
     ops::Device,
 };
 
-/// Record used for constant type implementing the [module](crate::module::Module) trait.
-#[derive(Debug, Clone, Copy, new, Default)]
-pub struct ConstantRecord;
+#[deprecated(
+    since = "0.21.0",
+    note = "ConstantRecord is misleading as it doesn't persist data. Use EmptyRecord instead."
+)]
+/// A record representing the absence of persistent module state.
+pub type ConstantRecord = EmptyRecord;
 
-impl serde::Serialize for ConstantRecord {
+/// A record representing the absence of persistent module state.
+///
+/// `EmptyRecord` is used for modules that do not store any data to be
+/// serialized or restored (e.g., modules marked with `#[module(skip)]`
+/// or modules without parameters).
+///
+/// This record contains no fields and serializes to `None`.
+#[derive(Debug, Clone, Copy, new, Default, PartialEq, Eq)]
+pub struct EmptyRecord;
+
+impl serde::Serialize for EmptyRecord {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
@@ -30,18 +42,18 @@ impl serde::Serialize for ConstantRecord {
     }
 }
 
-impl<'de> serde::Deserialize<'de> for ConstantRecord {
+impl<'de> serde::Deserialize<'de> for EmptyRecord {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
         deserializer.deserialize_option(serde::de::IgnoredAny).ok();
-        Ok(ConstantRecord::new())
+        Ok(EmptyRecord::new())
     }
 }
 
-impl<B: Backend> Record<B> for ConstantRecord {
-    type Item<S: PrecisionSettings> = ConstantRecord;
+impl<B: Backend> Record<B> for EmptyRecord {
+    type Item<S: PrecisionSettings> = EmptyRecord;
 
     fn into_item<S: PrecisionSettings>(self) -> Self::Item<S> {
         self
@@ -53,9 +65,9 @@ impl<B: Backend> Record<B> for ConstantRecord {
 }
 /// Constant macro.
 #[macro_export]
-macro_rules! constant {
+macro_rules! empty {
     (module) => {
-        type Record = burn::module::ConstantRecord;
+        type Record = burn::module::EmptyRecord;
 
         fn visit<V: burn::module::ModuleVisitor<B>>(&self, _visitor: &mut V) {
             // Nothing to do
@@ -70,7 +82,7 @@ macro_rules! constant {
         }
 
         fn into_record(self) -> Self::Record {
-            burn::module::ConstantRecord::new()
+            burn::module::EmptyRecord::new()
         }
 
         fn to_device(self, _: &B::Device) -> Self {
@@ -92,15 +104,19 @@ macro_rules! constant {
         fn valid(&self) -> Self::InnerModule {
             self.clone()
         }
+
+        fn from_inner(module: Self::InnerModule) -> Self {
+            module
+        }
     };
 
     ($type:ty) => {
         impl<B: burn::tensor::backend::Backend> burn::module::Module<B> for $type {
-            constant!(module);
+            empty!(module);
         }
 
         impl<B: burn::tensor::backend::AutodiffBackend> burn::module::AutodiffModule<B> for $type {
-            constant!(ad_module, $type);
+            empty!(ad_module, $type);
         }
 
         impl burn::module::ModuleDisplayDefault for $type {
@@ -114,29 +130,31 @@ macro_rules! constant {
     };
 }
 
+// TODO: breaking change for these constant types (currently empty record, non-persistent)?
+
 // General Types
-constant!(alloc::string::String);
-constant!(bool);
+empty!(alloc::string::String);
+empty!(bool);
 
 // Float Types
-constant!(f64);
-constant!(f32);
-constant!(half::bf16);
-constant!(half::f16);
+empty!(f64);
+empty!(f32);
+empty!(half::bf16);
+empty!(half::f16);
 
 // Unsigned Integer Types
-constant!(usize);
-constant!(u64);
-constant!(u32);
-constant!(u16);
-constant!(u8);
+empty!(usize);
+empty!(u64);
+empty!(u32);
+empty!(u16);
+empty!(u8);
 
 // Signed Integer Types
-constant!(isize);
-constant!(i64);
-constant!(i32);
-constant!(i16);
-constant!(i8);
+empty!(isize);
+empty!(i64);
+empty!(i32);
+empty!(i16);
+empty!(i8);
 
 impl burn::module::ModuleDisplay for str {}
 impl burn::module::ModuleDisplayDefault for str {
@@ -145,8 +163,9 @@ impl burn::module::ModuleDisplayDefault for str {
     }
 }
 
+// TODO: tensor record should persist
 impl<const D: usize, B: Backend, K: BasicOps<B>> Module<B> for Tensor<B, D, K> {
-    type Record = ConstantRecord;
+    type Record = EmptyRecord;
 
     fn visit<V: ModuleVisitor<B>>(&self, _visitor: &mut V) {}
 
@@ -155,7 +174,7 @@ impl<const D: usize, B: Backend, K: BasicOps<B>> Module<B> for Tensor<B, D, K> {
     }
 
     fn into_record(self) -> Self::Record {
-        ConstantRecord
+        EmptyRecord
     }
 
     fn load_record(self, _record: Self::Record) -> Self {
@@ -183,7 +202,7 @@ impl<const D: usize, B: Backend, K: BasicOps<B>> Module<B> for Tensor<B, D, K> {
 
 impl<const D: usize, B: Backend, K: BasicOps<B>> ModuleDisplayDefault for Tensor<B, D, K> {
     fn content(&self, content: Content) -> Option<Content> {
-        let string = format!("Tensor {{rank: {D}, shape: {:?}}}", self.shape().dims);
+        let string = format!("Tensor {{rank: {D}, shape: {:?}}}", self.shape().as_slice());
         content.add_single(&string).optional()
     }
 }
@@ -198,10 +217,14 @@ impl<const D: usize, B: AutodiffBackend, K: BasicAutodiffOps<B>> AutodiffModule<
     fn valid(&self) -> Self::InnerModule {
         self.clone().inner()
     }
+
+    fn from_inner(tensor: Self::InnerModule) -> Self {
+        Tensor::from_inner(tensor)
+    }
 }
 
 impl<B: Backend> Module<B> for PhantomData<B> {
-    type Record = ConstantRecord;
+    type Record = EmptyRecord;
 
     fn visit<V: ModuleVisitor<B>>(&self, _visitor: &mut V) {
         // Nothing to do
@@ -216,7 +239,7 @@ impl<B: Backend> Module<B> for PhantomData<B> {
     }
 
     fn into_record(self) -> Self::Record {
-        ConstantRecord::new()
+        EmptyRecord::new()
     }
 
     fn to_device(self, _: &Device<B>) -> Self {
@@ -246,18 +269,27 @@ impl<B: AutodiffBackend> AutodiffModule<B> for PhantomData<B> {
     fn valid(&self) -> Self::InnerModule {
         PhantomData
     }
+
+    fn from_inner(_module: Self::InnerModule) -> Self {
+        PhantomData
+    }
 }
 
 /// Container to satisfy the Module trait for types that are not modules.
 #[derive(Clone, Debug)]
+#[deprecated(
+    since = "0.21.0",
+    note = "Ignored<T> is deprecated. Use #[module(skip)] for non-persistent fields (same behavior)."
+)]
 pub struct Ignored<T>(pub T);
 
+#[allow(deprecated)]
 impl<B, T> Module<B> for Ignored<T>
 where
     B: Backend,
     T: Sync + Send + core::fmt::Debug + Clone,
 {
-    type Record = ConstantRecord;
+    type Record = EmptyRecord;
 
     fn visit<V: ModuleVisitor<B>>(&self, _visitor: &mut V) {
         // Nothing to do
@@ -272,7 +304,7 @@ where
     }
 
     fn into_record(self) -> Self::Record {
-        ConstantRecord::new()
+        EmptyRecord::new()
     }
 
     fn to_device(self, _: &Device<B>) -> Self {
@@ -288,6 +320,7 @@ where
     }
 }
 
+#[allow(deprecated)]
 impl<T> ModuleDisplayDefault for Ignored<T>
 where
     T: Sync + Send + core::fmt::Debug + Clone,
@@ -298,8 +331,10 @@ where
     }
 }
 
+#[allow(deprecated)]
 impl<T> ModuleDisplay for Ignored<T> where T: Sync + Send + core::fmt::Debug + Clone {}
 
+#[allow(deprecated)]
 impl<T> Display for Ignored<T>
 where
     T: Sync + Send + core::fmt::Debug + Clone,
@@ -309,6 +344,7 @@ where
     }
 }
 
+#[allow(deprecated)]
 impl<B: AutodiffBackend, T> AutodiffModule<B> for Ignored<T>
 where
     B: AutodiffBackend,
@@ -319,8 +355,13 @@ where
     fn valid(&self) -> Self::InnerModule {
         self.clone()
     }
+
+    fn from_inner(module: Self::InnerModule) -> Self {
+        module
+    }
 }
 
+#[allow(deprecated)]
 // Implement deref for Ignored
 impl<T> core::ops::Deref for Ignored<T> {
     type Target = T;

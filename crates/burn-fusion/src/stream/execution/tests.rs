@@ -8,14 +8,14 @@
 //! understanding the process of optimizing streams.
 use std::sync::Arc;
 
+use burn_backend::{DType, Shape};
 use burn_ir::{
-    BinaryOpIr, FloatOperationIr, NumericOperationIr, OperationIr, ScalarOpIr, TensorId, TensorIr,
-    TensorStatus, UnaryOpIr,
+    BinaryOpIr, FloatOperationIr, NumericOperationIr, OperationIr, ScalarIr, ScalarOpIr, TensorId,
+    TensorIr, TensorStatus, UnaryOpIr,
 };
-use burn_tensor::DType;
 
 use crate::{
-    NumOperations, OptimizationBuilder, OptimizationProperties, OptimizationStatus,
+    FuserProperties, FuserStatus, NumOperations, OperationFuser,
     search::BlockOptimization,
     stream::store::{
         ExecutionPlan, ExecutionPlanId, ExecutionPlanStore, ExecutionStrategy, ExecutionTrigger,
@@ -432,7 +432,7 @@ fn should_support_overlapping_optimizations() {
 
 impl TestStream {
     /// Create a new stream with the given optimization builders.
-    fn new(optimizations: Vec<Box<dyn OptimizationBuilder<TestOptimization>>>) -> Self {
+    fn new(optimizations: Vec<Box<dyn OperationFuser<TestOptimization>>>) -> Self {
         Self {
             processor: Processor::<TestOptimization>::new(optimizations),
             store: ExecutionPlanStore::<TestOptimization>::new(),
@@ -477,7 +477,7 @@ impl TestStream {
 
     /// Assert the number of executions since the start of the stream.
     fn assert_number_of_executions(&self, number: usize) {
-        assert_eq!(self.executed.len(), number);
+        assert_eq!(self.executed.len(), number, "Number of execution match");
     }
 
     /// Assert the number of operations queued.
@@ -497,14 +497,14 @@ impl TestOptimizationBuilder {
     }
 }
 
-impl OptimizationBuilder<TestOptimization> for TestOptimizationBuilder {
+impl OperationFuser<TestOptimization> for TestOptimizationBuilder {
     /// Register a new operation.
-    fn register(&mut self, operation: &OperationIr) {
+    fn fuse(&mut self, operation: &OperationIr) {
         self.actual.push(operation.clone());
     }
 
     /// Build the optimization.
-    fn build(&self) -> TestOptimization {
+    fn finish(&mut self) -> TestOptimization {
         TestOptimization::new(self.builder_id, self.len())
     }
 
@@ -514,26 +514,26 @@ impl OptimizationBuilder<TestOptimization> for TestOptimizationBuilder {
     }
 
     /// Return the optimization status.
-    fn status(&self) -> OptimizationStatus {
+    fn status(&self) -> FuserStatus {
         if self.actual.len() < self.expected_operations.len() {
             let operations = &self.expected_operations[0..self.actual.len()];
 
             return match self.actual == operations {
                 // Still optimizing.
-                true => OptimizationStatus::Open,
+                true => FuserStatus::Open,
                 // Never gonna be possible on that stream.
-                false => OptimizationStatus::Closed,
+                false => FuserStatus::Closed,
             };
         }
 
-        OptimizationStatus::Closed
+        FuserStatus::Closed
     }
 
     /// Return the properties of this optimization.
-    fn properties(&self) -> OptimizationProperties {
+    fn properties(&self) -> FuserProperties {
         if self.actual.len() < self.expected_operations.len() {
             // Optimization not possible.
-            return OptimizationProperties {
+            return FuserProperties {
                 score: 0,
                 ready: false,
             };
@@ -544,15 +544,15 @@ impl OptimizationBuilder<TestOptimization> for TestOptimizationBuilder {
 
         if !stream_is_ok {
             // Optimization not possible.
-            return OptimizationProperties {
+            return FuserProperties {
                 score: 0,
                 ready: false,
             };
         }
 
         // Optimization possible.
-        OptimizationProperties {
-            score: 1,
+        FuserProperties {
+            score: self.expected_operations.len() as u64,
             ready: true,
         }
     }
@@ -561,7 +561,7 @@ impl OptimizationBuilder<TestOptimization> for TestOptimizationBuilder {
     fn len(&self) -> usize {
         self.expected_operations.len()
     }
-    fn clone_dyn(&self) -> Box<dyn OptimizationBuilder<TestOptimization>> {
+    fn clone_dyn(&self) -> Box<dyn OperationFuser<TestOptimization>> {
         Box::new(self.clone())
     }
 }
@@ -607,19 +607,19 @@ pub fn operation_1() -> OperationIr {
         NumericOperationIr::Add(BinaryOpIr {
             lhs: TensorIr {
                 id: TensorId::new(0),
-                shape: vec![32, 32],
+                shape: Shape::new([32, 32]),
                 status: TensorStatus::ReadOnly,
                 dtype: DType::F32,
             },
             rhs: TensorIr {
                 id: TensorId::new(1),
-                shape: vec![32, 32],
+                shape: Shape::new([32, 32]),
                 status: TensorStatus::ReadOnly,
                 dtype: DType::F32,
             },
             out: TensorIr {
                 id: TensorId::new(2),
-                shape: vec![32, 32],
+                shape: Shape::new([32, 32]),
                 status: TensorStatus::NotInit,
                 dtype: DType::F32,
             },
@@ -634,14 +634,14 @@ pub fn operation_2() -> OperationIr {
         NumericOperationIr::AddScalar(ScalarOpIr {
             lhs: TensorIr {
                 id: TensorId::new(0),
-                shape: vec![32, 32],
+                shape: Shape::new([32, 32]),
                 status: TensorStatus::ReadOnly,
                 dtype: DType::F32,
             },
-            rhs: 5.0,
+            rhs: ScalarIr::Float(5.0),
             out: TensorIr {
                 id: TensorId::new(2),
-                shape: vec![32, 32],
+                shape: Shape::new([32, 32]),
                 status: TensorStatus::NotInit,
                 dtype: DType::F32,
             },
@@ -656,13 +656,13 @@ pub fn operation_3() -> OperationIr {
         FloatOperationIr::Log(UnaryOpIr {
             input: TensorIr {
                 id: TensorId::new(0),
-                shape: vec![32, 32],
+                shape: Shape::new([32, 32]),
                 status: TensorStatus::ReadOnly,
                 dtype: DType::F32,
             },
             out: TensorIr {
                 id: TensorId::new(0),
-                shape: vec![32, 32],
+                shape: Shape::new([32, 32]),
                 status: TensorStatus::NotInit,
                 dtype: DType::F32,
             },

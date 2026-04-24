@@ -1,22 +1,53 @@
-use crate::{LibTorch, QuantElement, TchTensor, element::TchElement};
-use burn_tensor::{
+use crate::{LibTorch, TchTensor, element::TchElement};
+use burn_backend::{
     TensorMetadata,
     ops::{
-        ConvOptions, ConvTransposeOptions, DeformConv2dBackward, DeformConvOptions,
-        InterpolateMode, InterpolateOptions, MaxPool1dWithIndices, MaxPool2dBackward,
-        MaxPool2dWithIndices, ModuleOps, rnn::RnnOps,
+        AttentionModuleOptions, ConvOptions, ConvTransposeOptions, DeformConv2dBackward,
+        DeformConvOptions, InterpolateMode, InterpolateOptions, MaxPool1dWithIndices,
+        MaxPool2dBackward, MaxPool2dWithIndices, ModuleOps, attention::attention_fallback,
     },
+    tensor::FloatTensor,
 };
 
-impl<E: TchElement, Q: QuantElement> ModuleOps<Self> for LibTorch<E, Q> {
+impl<E: TchElement> ModuleOps<Self> for LibTorch<E> {
     fn embedding(weights: TchTensor, indices: TchTensor) -> TchTensor {
-        let tensor = tch::Tensor::embedding(&weights.tensor, &indices.tensor, -1, false, false);
+        // Workaround for MPS "Placeholder storage has not been allocated" error.
+        // See: https://github.com/pytorch/pytorch/issues/123995
+        // MPS uses lazy allocation and the embedding operation (which uses index_select)
+        // can fail if the tensors haven't been materialized yet.
+        // We work around this by performing the embedding on CPU and transferring back to MPS.
+        if matches!(weights.tensor.device(), tch::Device::Mps) {
+            let cpu_weights = weights.tensor.to(tch::Device::Cpu);
+            let cpu_indices = indices.tensor.to(tch::Device::Cpu);
+            let result = tch::Tensor::embedding(&cpu_weights, &cpu_indices, -1, false, false)
+                .to(tch::Device::Mps);
+            return TchTensor::new(result);
+        }
 
+        let tensor = tch::Tensor::embedding(&weights.tensor, &indices.tensor, -1, false, false);
         TchTensor::new(tensor)
     }
 
     fn embedding_backward(weights: TchTensor, output: TchTensor, indices: TchTensor) -> TchTensor {
         let [n_embedding, _d_model] = weights.shape().dims();
+
+        // Workaround for MPS "Placeholder storage has not been allocated" error.
+        // See: https://github.com/pytorch/pytorch/issues/123995
+        if matches!(output.tensor.device(), tch::Device::Mps) {
+            let cpu_output = output.tensor.to(tch::Device::Cpu);
+            let cpu_indices = indices.tensor.to(tch::Device::Cpu);
+            let result = tch::Tensor::embedding_backward(
+                &cpu_output,
+                &cpu_indices,
+                n_embedding as i64,
+                -1,
+                false,
+                false,
+            )
+            .to(tch::Device::Mps);
+            return TchTensor::new(result);
+        }
+
         let tensor = tch::Tensor::embedding_backward(
             &output.tensor,
             &indices.tensor,
@@ -175,13 +206,14 @@ impl<E: TchElement, Q: QuantElement> ModuleOps<Self> for LibTorch<E, Q> {
         stride: usize,
         padding: usize,
         count_include_pad: bool,
+        ceil_mode: bool,
     ) -> TchTensor {
         let tensor = tch::Tensor::avg_pool1d(
             &x.tensor,
             [kernel_size as i64],
             [stride as i64],
             [padding as i64],
-            false,
+            ceil_mode,
             count_include_pad,
         );
 
@@ -193,13 +225,14 @@ impl<E: TchElement, Q: QuantElement> ModuleOps<Self> for LibTorch<E, Q> {
         stride: [usize; 2],
         padding: [usize; 2],
         count_include_pad: bool,
+        ceil_mode: bool,
     ) -> TchTensor {
         let tensor = tch::Tensor::avg_pool2d(
             &x.tensor,
             [kernel_size[0] as i64, kernel_size[1] as i64],
             [stride[0] as i64, stride[1] as i64],
             [padding[0] as i64, padding[1] as i64],
-            false,
+            ceil_mode,
             count_include_pad,
             None,
         );
@@ -214,6 +247,7 @@ impl<E: TchElement, Q: QuantElement> ModuleOps<Self> for LibTorch<E, Q> {
         stride: [usize; 2],
         padding: [usize; 2],
         count_include_pad: bool,
+        ceil_mode: bool,
     ) -> TchTensor {
         let tensor = tch::Tensor::avg_pool2d_backward(
             &x.tensor,
@@ -221,7 +255,7 @@ impl<E: TchElement, Q: QuantElement> ModuleOps<Self> for LibTorch<E, Q> {
             [kernel_size[0] as i64, kernel_size[1] as i64],
             [stride[0] as i64, stride[1] as i64],
             [padding[0] as i64, padding[1] as i64],
-            false,
+            ceil_mode,
             count_include_pad,
             None,
         );
@@ -235,6 +269,7 @@ impl<E: TchElement, Q: QuantElement> ModuleOps<Self> for LibTorch<E, Q> {
         stride: usize,
         padding: usize,
         dilation: usize,
+        ceil_mode: bool,
     ) -> TchTensor {
         let tensor = tch::Tensor::max_pool1d(
             &x.tensor,
@@ -242,7 +277,7 @@ impl<E: TchElement, Q: QuantElement> ModuleOps<Self> for LibTorch<E, Q> {
             stride as i64,
             padding as i64,
             dilation as i64,
-            false,
+            ceil_mode,
         );
 
         TchTensor::new(tensor)
@@ -254,14 +289,15 @@ impl<E: TchElement, Q: QuantElement> ModuleOps<Self> for LibTorch<E, Q> {
         stride: usize,
         padding: usize,
         dilation: usize,
-    ) -> MaxPool1dWithIndices<LibTorch<E, Q>> {
+        ceil_mode: bool,
+    ) -> MaxPool1dWithIndices<Self> {
         let (tensor, indices) = tch::Tensor::max_pool1d_with_indices(
             &x.tensor,
             kernel_size as i64,
             stride as i64,
             padding as i64,
             dilation as i64,
-            false,
+            ceil_mode,
         );
 
         MaxPool1dWithIndices::new(TchTensor::new(tensor), TchTensor::new(indices))
@@ -273,6 +309,7 @@ impl<E: TchElement, Q: QuantElement> ModuleOps<Self> for LibTorch<E, Q> {
         stride: [usize; 2],
         padding: [usize; 2],
         dilation: [usize; 2],
+        ceil_mode: bool,
     ) -> TchTensor {
         let tensor = tch::Tensor::max_pool2d(
             &x.tensor,
@@ -280,7 +317,7 @@ impl<E: TchElement, Q: QuantElement> ModuleOps<Self> for LibTorch<E, Q> {
             [stride[0] as i64, stride[1] as i64],
             [padding[0] as i64, padding[1] as i64],
             [dilation[0] as i64, dilation[1] as i64],
-            false,
+            ceil_mode,
         );
 
         TchTensor::new(tensor)
@@ -292,14 +329,15 @@ impl<E: TchElement, Q: QuantElement> ModuleOps<Self> for LibTorch<E, Q> {
         stride: [usize; 2],
         padding: [usize; 2],
         dilation: [usize; 2],
-    ) -> MaxPool2dWithIndices<LibTorch<E, Q>> {
+        ceil_mode: bool,
+    ) -> MaxPool2dWithIndices<Self> {
         let (tensor, indices) = tch::Tensor::max_pool2d_with_indices(
             &x.tensor,
             [kernel_size[0] as i64, kernel_size[1] as i64],
             [stride[0] as i64, stride[1] as i64],
             [padding[0] as i64, padding[1] as i64],
             [dilation[0] as i64, dilation[1] as i64],
-            false,
+            ceil_mode,
         );
 
         MaxPool2dWithIndices::new(TchTensor::new(tensor), TchTensor::new(indices))
@@ -311,9 +349,10 @@ impl<E: TchElement, Q: QuantElement> ModuleOps<Self> for LibTorch<E, Q> {
         stride: [usize; 2],
         padding: [usize; 2],
         dilation: [usize; 2],
+        ceil_mode: bool,
         output_grad: TchTensor,
         indices: TchTensor,
-    ) -> MaxPool2dBackward<LibTorch<E, Q>> {
+    ) -> MaxPool2dBackward<Self> {
         let grad = tch::Tensor::max_pool2d_with_indices_backward(
             &x.tensor,
             &output_grad.tensor,
@@ -321,7 +360,7 @@ impl<E: TchElement, Q: QuantElement> ModuleOps<Self> for LibTorch<E, Q> {
             [stride[0] as i64, stride[1] as i64],
             [padding[0] as i64, padding[1] as i64],
             [dilation[0] as i64, dilation[1] as i64],
-            false,
+            ceil_mode,
             &indices.tensor,
         );
 
@@ -353,15 +392,19 @@ impl<E: TchElement, Q: QuantElement> ModuleOps<Self> for LibTorch<E, Q> {
     ) -> TchTensor {
         let output_size = output_size.map(|e| e as i64);
 
+        let align_corners = options.align_corners;
         let tensor = match options.mode {
             InterpolateMode::Nearest => {
                 tch::Tensor::upsample_nearest2d(&x.tensor, output_size, None, None)
             }
             InterpolateMode::Bilinear => {
-                tch::Tensor::upsample_bilinear2d(&x.tensor, output_size, true, None, None)
+                tch::Tensor::upsample_bilinear2d(&x.tensor, output_size, align_corners, None, None)
             }
             InterpolateMode::Bicubic => {
-                tch::Tensor::upsample_bicubic2d(&x.tensor, output_size, true, None, None)
+                tch::Tensor::upsample_bicubic2d(&x.tensor, output_size, align_corners, None, None)
+            }
+            InterpolateMode::Lanczos3 => {
+                panic!("lanczos3 interpolation is not supported by PyTorch/tch backend")
             }
         };
 
@@ -377,6 +420,7 @@ impl<E: TchElement, Q: QuantElement> ModuleOps<Self> for LibTorch<E, Q> {
         let output_size = output_size.map(|e| e as i64);
         let [n, c, h_in, w_in] = x.shape().dims();
         let input_size = [n as i64, c as i64, h_in as i64, w_in as i64];
+        let align_corners = options.align_corners;
 
         let tensor = match options.mode {
             InterpolateMode::Nearest => tch::Tensor::upsample_nearest2d_backward(
@@ -390,7 +434,7 @@ impl<E: TchElement, Q: QuantElement> ModuleOps<Self> for LibTorch<E, Q> {
                 &grad.tensor,
                 output_size,
                 input_size,
-                true,
+                align_corners,
                 None,
                 None,
             ),
@@ -398,13 +442,83 @@ impl<E: TchElement, Q: QuantElement> ModuleOps<Self> for LibTorch<E, Q> {
                 &grad.tensor,
                 output_size,
                 input_size,
-                true,
+                align_corners,
                 None,
                 None,
             ),
+            InterpolateMode::Lanczos3 => {
+                panic!("lanczos3 interpolation backward is not supported by PyTorch/tch backend")
+            }
         };
 
         TchTensor::new(tensor)
+    }
+
+    fn attention(
+        query: TchTensor,
+        key: TchTensor,
+        value: TchTensor,
+        mask: Option<TchTensor>,
+        attn_bias: Option<TchTensor>,
+        options: AttentionModuleOptions,
+    ) -> TchTensor {
+        if attn_bias.is_some() {
+            return attention_fallback::<Self>(query, key, value, mask, attn_bias, options);
+        }
+
+        TchTensor::new(tch::Tensor::scaled_dot_product_attention(
+            &query.tensor,
+            &key.tensor,
+            &value.tensor,
+            mask.map(|m| m.tensor),
+            0.,
+            options.is_causal,
+            options.scale,
+            false,
+        ))
+    }
+
+    fn layer_norm(
+        tensor: TchTensor,
+        gamma: TchTensor,
+        beta: Option<TchTensor>,
+        epsilon: f64,
+    ) -> TchTensor {
+        let shape = tensor.shape();
+        let last_dim = shape[shape.num_dims() - 1] as i64;
+
+        let tensor = tensor.tensor.layer_norm(
+            [last_dim],
+            Some(&gamma.tensor),
+            beta.as_ref().map(|b| &b.tensor),
+            epsilon,
+            true,
+        );
+
+        TchTensor::new(tensor)
+    }
+
+    fn rfft(
+        signal: FloatTensor<Self>,
+        dim: usize,
+        n: Option<usize>,
+    ) -> (FloatTensor<Self>, FloatTensor<Self>) {
+        let complex = signal
+            .tensor
+            .fft_rfft(n.map(|v| v as i64), dim as i64, "backward");
+        let re = TchTensor::new(complex.real().contiguous());
+        let im = TchTensor::new(complex.imag().contiguous());
+        (re, im)
+    }
+
+    fn irfft(
+        spectrum_re: FloatTensor<Self>,
+        spectrum_im: FloatTensor<Self>,
+        dim: usize,
+        n: Option<usize>,
+    ) -> FloatTensor<Self> {
+        let complex = tch::Tensor::complex(&spectrum_re.tensor, &spectrum_im.tensor);
+        TchTensor::new(complex.fft_irfft(n.map(|v| v as i64), dim as i64, "backward"))
     }
 }
 

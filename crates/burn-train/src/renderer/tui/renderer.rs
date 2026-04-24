@@ -1,10 +1,11 @@
-use crate::Interrupter;
+use crate::metric::{MetricDefinition, MetricId};
 use crate::renderer::tui::TuiSplit;
 use crate::renderer::{
     EvaluationName, EvaluationProgress, MetricState, MetricsRenderer, MetricsRendererEvaluation,
-    TrainingProgress,
+    ProgressType, TrainingProgress,
 };
 use crate::renderer::{MetricsRendererTraining, tui::NumericMetricsState};
+use crate::{Interrupter, LearnerSummary};
 use ratatui::{
     Terminal,
     crossterm::{
@@ -14,8 +15,11 @@ use ratatui::{
     },
     prelude::*,
 };
+use std::collections::HashMap;
 use std::panic::{set_hook, take_hook};
-use std::sync::Arc;
+use std::sync::mpsc::{Receiver, Sender};
+use std::sync::{Arc, Mutex, mpsc};
+use std::thread::JoinHandle;
 use std::{
     error::Error,
     io::{self, Stdout},
@@ -36,72 +40,200 @@ type PanicHook = Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + 'static + Sync + S
 
 const MAX_REFRESH_RATE_MILLIS: u64 = 100;
 
+enum TuiRendererEvent {
+    MetricRegistration(MetricDefinition),
+    MetricsUpdate((TuiSplit, TuiGroup, MetricState)),
+    StatusUpdateTrain((TuiSplit, TrainingProgress, Vec<ProgressType>)),
+    StatusUpdateTest((EvaluationProgress, Vec<ProgressType>)),
+    ProcessEnd {
+        summary: Option<LearnerSummary>,
+        /// Interrupter reset.
+        reset: bool,
+    },
+    ManualClose,
+    Close,
+    Persistent,
+}
+
 /// The terminal UI metrics renderer.
-pub struct TuiMetricsRenderer {
+pub struct TuiMetricsRendererWrapper {
+    sender: mpsc::Sender<TuiRendererEvent>,
+    interrupter: Interrupter,
+    handle_join: Option<JoinHandle<()>>,
+    kill_signal: Arc<Mutex<Receiver<()>>>,
+}
+
+impl TuiMetricsRendererWrapper {
+    /// Create a new terminal UI renderer.
+    pub fn new(interrupter: Interrupter, checkpoint: Option<usize>) -> Self {
+        let (sender, receiver) = mpsc::channel();
+        let (kill_signal_sender, kill_signal_receiver) = mpsc::channel();
+
+        let interrupter_clone = interrupter.clone();
+        let handle_join = std::thread::Builder::new()
+            .name("train-renderer".into())
+            .spawn(move || {
+                let mut renderer =
+                    TuiMetricsRenderer::new(interrupter_clone, checkpoint, kill_signal_sender);
+
+                let tick_rate = Duration::from_millis(MAX_REFRESH_RATE_MILLIS);
+                loop {
+                    match receiver.try_recv() {
+                        Ok(event) => renderer.handle_event(event),
+                        Err(mpsc::TryRecvError::Empty) => (),
+                        Err(mpsc::TryRecvError::Disconnected) => {
+                            log::error!("Renderer thread disconnected.");
+                            break;
+                        }
+                    }
+
+                    // Render
+                    if renderer.last_update.elapsed() >= tick_rate
+                        && let Err(err) = renderer.render()
+                    {
+                        log::error!("Render error: {err}");
+                        break;
+                    }
+
+                    if (renderer.manual_close && renderer.interrupter.should_stop())
+                        || renderer.close
+                    {
+                        break;
+                    }
+                }
+            })
+            .unwrap();
+
+        Self {
+            sender,
+            interrupter,
+            handle_join: Some(handle_join),
+            kill_signal: Arc::new(Mutex::new(kill_signal_receiver)),
+        }
+    }
+
+    fn send_event(&self, event: TuiRendererEvent) {
+        if self.kill_signal.lock().unwrap().try_recv().is_ok() {
+            panic!("Killing training from user input.")
+        }
+        if let Err(e) = self.sender.send(event) {
+            log::warn!("Failed to send TUI event: {e}");
+        }
+    }
+
+    /// Set the renderer to persistent mode.
+    pub fn persistent(self) -> Self {
+        self.send_event(TuiRendererEvent::Persistent);
+        self
+    }
+}
+
+struct TuiMetricsRenderer {
     terminal: Terminal<TerminalBackend>,
     last_update: std::time::Instant,
     progress: ProgressBarState,
+    metric_definitions: HashMap<MetricId, MetricDefinition>,
     metrics_numeric: NumericMetricsState,
     metrics_text: TextMetricsState,
     status: StatusState,
-    interuptor: Interrupter,
+    interrupter: Interrupter,
     popup: PopupState,
     previous_panic_hook: Option<Arc<PanicHook>>,
     persistent: bool,
+    manual_close: bool,
+    close: bool,
+    summary: Option<LearnerSummary>,
+    kill_signal: Sender<()>,
 }
 
-impl MetricsRendererEvaluation for TuiMetricsRenderer {
+impl MetricsRendererEvaluation for TuiMetricsRendererWrapper {
     fn update_test(&mut self, name: EvaluationName, state: MetricState) {
-        self.update_metric(TuiSplit::Test, TuiGroup::Named(name.name), state);
+        self.send_event(TuiRendererEvent::MetricsUpdate((
+            TuiSplit::Test,
+            TuiGroup::Named(name.name),
+            state,
+        )));
     }
 
-    fn render_test(&mut self, item: EvaluationProgress) {
-        self.progress.update_test(&item);
-        self.metrics_numeric.update_progress_test(&item);
-        self.status.update_test(item);
-        self.render().unwrap();
+    fn render_test(&mut self, item: EvaluationProgress, progress_indicators: Vec<ProgressType>) {
+        self.send_event(TuiRendererEvent::StatusUpdateTest((
+            item,
+            progress_indicators,
+        )));
+    }
+
+    fn on_test_end(&mut self, summary: Option<LearnerSummary>) -> Result<(), Box<dyn Error>> {
+        // Update the summary
+        self.send_event(TuiRendererEvent::ProcessEnd {
+            summary,
+            reset: false,
+        });
+        Ok(())
     }
 }
 
-impl MetricsRenderer for TuiMetricsRenderer {
+impl MetricsRenderer for TuiMetricsRendererWrapper {
     fn manual_close(&mut self) {
-        loop {
-            self.render().unwrap();
-            if self.interuptor.should_stop() {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
+        self.send_event(TuiRendererEvent::ManualClose);
+        let _ = self.handle_join.take().unwrap().join();
+    }
+
+    fn register_metric(&mut self, definition: MetricDefinition) {
+        self.send_event(TuiRendererEvent::MetricRegistration(definition));
     }
 }
 
-impl MetricsRendererTraining for TuiMetricsRenderer {
+impl MetricsRendererTraining for TuiMetricsRendererWrapper {
     fn update_train(&mut self, state: MetricState) {
-        self.update_metric(TuiSplit::Train, TuiGroup::Default, state);
+        self.send_event(TuiRendererEvent::MetricsUpdate((
+            TuiSplit::Train,
+            TuiGroup::Default,
+            state,
+        )));
     }
 
     fn update_valid(&mut self, state: MetricState) {
-        self.update_metric(TuiSplit::Valid, TuiGroup::Default, state);
+        self.send_event(TuiRendererEvent::MetricsUpdate((
+            TuiSplit::Valid,
+            TuiGroup::Default,
+            state,
+        )));
     }
 
-    fn render_train(&mut self, item: TrainingProgress) {
-        self.progress.update_train(&item);
-        self.metrics_numeric.update_progress_train(&item);
-        self.status.update_train(item);
-        self.render().unwrap();
+    fn render_train(&mut self, item: TrainingProgress, progress_indicators: Vec<ProgressType>) {
+        self.send_event(TuiRendererEvent::StatusUpdateTrain((
+            TuiSplit::Train,
+            item,
+            progress_indicators,
+        )));
     }
 
-    fn render_valid(&mut self, item: TrainingProgress) {
-        self.progress.update_valid(&item);
-        self.metrics_numeric.update_progress_valid(&item);
-        self.status.update_valid(item);
-        self.render().unwrap();
+    fn render_valid(&mut self, item: TrainingProgress, progress_indicators: Vec<ProgressType>) {
+        self.send_event(TuiRendererEvent::StatusUpdateTrain((
+            TuiSplit::Valid,
+            item,
+            progress_indicators,
+        )));
     }
 
-    fn on_train_end(&mut self) -> Result<(), Box<dyn Error>> {
+    fn on_train_end(&mut self, summary: Option<LearnerSummary>) -> Result<(), Box<dyn Error>> {
         // Reset for following steps.
-        self.interuptor.reset();
+        self.interrupter.reset();
+        // Update the summary
+        self.send_event(TuiRendererEvent::ProcessEnd {
+            summary,
+            reset: true,
+        });
         Ok(())
+    }
+}
+
+impl Drop for TuiMetricsRendererWrapper {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            self.send_event(TuiRendererEvent::Close);
+            let _ = self.handle_join.take().unwrap().join();
+        }
     }
 }
 
@@ -109,21 +241,35 @@ impl TuiMetricsRenderer {
     fn update_metric(&mut self, split: TuiSplit, group: TuiGroup, state: MetricState) {
         match state {
             MetricState::Generic(entry) => {
-                self.metrics_text.update(split, group, entry);
+                let name = self
+                    .metric_definitions
+                    .get(&entry.metric_id)
+                    .unwrap()
+                    .name
+                    .clone()
+                    .into();
+                self.metrics_text.update(split, group, entry, name);
             }
             MetricState::Numeric(entry, value) => {
-                self.metrics_numeric.push(
-                    TuiTag::new(split, group.clone()),
-                    entry.name.clone(),
-                    value,
-                );
-                self.metrics_text.update(split, group, entry);
+                let name: Arc<String> = self
+                    .metric_definitions
+                    .get(&entry.metric_id)
+                    .unwrap()
+                    .name
+                    .clone()
+                    .into();
+                self.metrics_numeric
+                    .push(TuiTag::new(split, group.clone()), name.clone(), value);
+                self.metrics_text.update(split, group, entry, name);
             }
         };
     }
 
-    /// Create a new terminal UI renderer.
-    pub fn new(interuptor: Interrupter, checkpoint: Option<usize>) -> Self {
+    pub fn new(
+        interrupter: Interrupter,
+        checkpoint: Option<usize>,
+        kill_signal: Sender<()>,
+    ) -> Self {
         let mut stdout = io::stdout();
         execute!(stdout, EnterAlternateScreen).unwrap();
         enable_raw_mode().unwrap();
@@ -145,30 +291,70 @@ impl TuiMetricsRenderer {
             terminal,
             last_update: Instant::now(),
             progress: ProgressBarState::new(checkpoint),
+            metric_definitions: HashMap::default(),
             metrics_numeric: NumericMetricsState::default(),
             metrics_text: TextMetricsState::default(),
             status: StatusState::default(),
-            interuptor,
+            interrupter,
             popup: PopupState::Empty,
             previous_panic_hook: Some(previous_panic_hook),
             persistent: false,
+            manual_close: false,
+            close: false,
+            summary: None,
+            kill_signal,
         }
     }
 
-    /// Set the renderer to persistent mode.
-    pub fn persistent(mut self) -> Self {
-        self.persistent = true;
-        self
+    fn handle_event(&mut self, event: TuiRendererEvent) {
+        match event {
+            TuiRendererEvent::MetricRegistration(definition) => {
+                self.metric_definitions
+                    .insert(definition.metric_id.clone(), definition);
+            }
+            TuiRendererEvent::MetricsUpdate((split, group, state)) => {
+                self.update_metric(split, group, state);
+            }
+            TuiRendererEvent::StatusUpdateTrain((split, item, status)) => match split {
+                TuiSplit::Train => {
+                    self.progress.update_train(&item);
+                    self.metrics_numeric.update_progress_train(&item);
+                    self.status.update_train(status);
+                }
+                TuiSplit::Valid => {
+                    self.progress.update_valid(&item);
+                    self.metrics_numeric.update_progress_valid(&item);
+                    self.status.update_valid(status);
+                }
+                _ => (),
+            },
+            TuiRendererEvent::StatusUpdateTest((item, status)) => {
+                self.progress.update_test(&item);
+                self.metrics_numeric.update_progress_test(&item);
+                self.status.update_test(status);
+            }
+            TuiRendererEvent::ProcessEnd { summary, reset } => {
+                match (self.summary.take(), summary) {
+                    (None, Some(summary)) => {
+                        self.summary = Some(summary);
+                    }
+                    (Some(current), Some(other)) => self.summary = Some(current.merge(other)),
+                    (_, _) => { /* nothing to update */ }
+                }
+
+                if reset {
+                    self.interrupter.reset();
+                }
+            }
+            TuiRendererEvent::ManualClose => self.manual_close = true,
+            TuiRendererEvent::Persistent => self.persistent = true,
+            TuiRendererEvent::Close => self.close = true,
+        }
     }
 
     fn render(&mut self) -> Result<(), Box<dyn Error>> {
-        let tick_rate = Duration::from_millis(MAX_REFRESH_RATE_MILLIS);
-        if self.last_update.elapsed() < tick_rate {
-            return Ok(());
-        }
-
         self.draw()?;
-        self.handle_events()?;
+        self.handle_user_input()?;
 
         self.last_update = Instant::now();
 
@@ -198,7 +384,7 @@ impl TuiMetricsRenderer {
         Ok(())
     }
 
-    fn handle_events(&mut self) -> Result<(), Box<dyn Error>> {
+    fn handle_user_input(&mut self) -> Result<(), Box<dyn Error>> {
         while event::poll(Duration::from_secs(0))? {
             let event = event::read()?;
             self.popup.on_event(&event);
@@ -218,7 +404,7 @@ impl TuiMetricsRenderer {
                                      training loop, but any remaining code after the loop will be \
                                      executed.",
                                 's',
-                                QuitPopupAccept(self.interuptor.clone()),
+                                QuitPopupAccept(self.interrupter.clone()),
                             ),
                             Callback::new(
                                 "Stop the training immediately.",
@@ -226,7 +412,7 @@ impl TuiMetricsRenderer {
                                      the current training fails. Any code following the training \
                                      won't be executed.",
                                 'k',
-                                KillPopupAccept,
+                                KillPopupAccept(self.kill_signal.clone()),
                             ),
                             Callback::new(
                                 "Cancel",
@@ -313,18 +499,19 @@ impl TuiMetricsRenderer {
 }
 
 struct QuitPopupAccept(Interrupter);
-struct KillPopupAccept;
+struct KillPopupAccept(Sender<()>);
 struct PopupCancel;
 
 impl CallbackFn for KillPopupAccept {
     fn call(&self) -> bool {
+        self.0.send(()).unwrap();
         panic!("Killing training from user input.");
     }
 }
 
 impl CallbackFn for QuitPopupAccept {
     fn call(&self) -> bool {
-        self.0.stop();
+        self.0.stop(Some("Stopping training from user input."));
         true
     }
 }
@@ -341,6 +528,11 @@ impl Drop for TuiMetricsRenderer {
         // panicking because the panic hook has already reset the terminal
         if !std::thread::panicking() {
             self.reset().unwrap();
+
+            if let Some(summary) = &self.summary {
+                println!("{summary}");
+                log::info!("{summary}");
+            }
         }
     }
 }

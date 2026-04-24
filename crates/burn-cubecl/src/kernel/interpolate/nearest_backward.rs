@@ -1,35 +1,42 @@
-use cubecl::std::FastDivmod;
-use cubecl::{calculate_cube_count_elemwise, prelude::*, std::tensor::StridedLayout};
+use cubecl::{calculate_cube_count_elemwise, prelude::*};
+use cubecl::{
+    num_traits::Zero,
+    std::{
+        FastDivmod,
+        tensor::layout::{linear::LinearLayout, *},
+    },
+};
 
 use crate::{
-    CubeRuntime, FloatElement,
-    kernel::utils::{shape_divmod, strided_layout},
-    ops::max_line_size,
+    CubeRuntime,
+    kernel::utils::{address_type, linear_layout, shape_divmod},
+    ops::max_vector_size,
     tensor::CubeTensor,
 };
 
-#[cube(launch_unchecked)]
-fn interpolate_nearest_backward_kernel<F: Float>(
-    grad: &Tensor<Line<F>>,
-    output: &mut Tensor<Line<F>>,
-    shape_out: Sequence<FastDivmod>,
-    out_layout: StridedLayout,
+#[cube(launch_unchecked, address_type = "dynamic")]
+fn interpolate_nearest_backward_kernel<F: Float, N: Size>(
+    grad: &Tensor<Vector<F, N>>,
+    output: &mut Tensor<Vector<F, N>>,
+    shape_out: Sequence<FastDivmod<usize>>,
+    out_layout: LinearLayout,
+    #[define(F)] _dtype: StorageType,
 ) {
     if ABSOLUTE_POS >= output.len() {
         terminate!();
     }
 
-    let line_size = grad.line_size();
-    let out_idx = out_layout.index(output, ABSOLUTE_POS);
+    let vector_size = grad.vector_size();
+    let out_idx = out_layout.to_source_pos(ABSOLUTE_POS);
 
     let out_h = output.shape(1);
     let out_w = output.shape(2);
     let grad_h = grad.shape(1);
     let grad_w = grad.shape(2);
 
-    let (rem, c) = shape_out.index(3).div_mod(ABSOLUTE_POS * line_size);
-    let (rem, out_x) = shape_out.index(2).div_mod(rem);
-    let (b, out_y) = shape_out.index(1).div_mod(rem);
+    let (rem, c) = shape_out[3].div_mod(ABSOLUTE_POS * vector_size);
+    let (rem, out_x) = shape_out[2].div_mod(rem);
+    let (b, out_y) = shape_out[1].div_mod(rem);
 
     let grad_y_start = start_index::<F>(out_y, grad_h, out_h);
     let grad_y_end = end_index::<F>(out_y, grad_h, out_h);
@@ -38,7 +45,7 @@ fn interpolate_nearest_backward_kernel<F: Float>(
 
     let index_grad_base = b * grad.stride(0) + c * grad.stride(3);
 
-    let mut sum = Line::empty(line_size).fill(F::new(0.0));
+    let mut sum = Vector::zero();
 
     for grad_y in grad_y_start..grad_y_end {
         for grad_x in grad_x_start..grad_x_end {
@@ -52,43 +59,46 @@ fn interpolate_nearest_backward_kernel<F: Float>(
 }
 
 #[cube]
-fn start_index<F: Float>(input_index: u32, output_size: u32, input_size: u32) -> u32 {
+fn start_index<F: Float>(input_index: usize, output_size: usize, input_size: usize) -> usize {
     let numerator = F::cast_from(input_index * output_size);
-    let div: F = Ceil::ceil(numerator / F::cast_from(input_size));
+    let div = (numerator / F::cast_from(input_size)).ceil();
 
-    u32::cast_from(div)
+    usize::cast_from(div)
 }
 
 #[cube]
-fn end_index<F: Float>(input_index: u32, output_size: u32, input_size: u32) -> u32 {
+fn end_index<F: Float>(input_index: usize, output_size: usize, input_size: usize) -> usize {
     let numerator = F::cast_from((input_index + 1) * output_size);
-    let div: F = Ceil::ceil(numerator / F::cast_from(input_size));
-    let index = u32::cast_from(div);
+    let div = (numerator / F::cast_from(input_size)).ceil();
+    let index = usize::cast_from(div);
 
-    Min::min(output_size, index)
+    clamp_max(index, output_size)
 }
 
-pub(crate) fn interpolate_nearest_backward_launch<R: CubeRuntime, E: FloatElement>(
+pub(crate) fn interpolate_nearest_backward_launch<R: CubeRuntime>(
     out_grad: CubeTensor<R>,
     output: CubeTensor<R>,
 ) -> CubeTensor<R> {
-    let line_size = max_line_size(&out_grad);
+    let vector_size = max_vector_size(&out_grad);
     let out_shape = shape_divmod(&output);
-    let out_layout = strided_layout(&output);
+    let out_layout = linear_layout(&output, vector_size);
 
-    let cube_dim = CubeDim::default();
-    let cube_count =
-        calculate_cube_count_elemwise(output.shape.num_elements() / line_size as usize, cube_dim);
+    let working_units = output.meta.num_elements() / vector_size as usize;
+    let cube_dim = CubeDim::new(&out_grad.client, working_units);
+    let cube_count = calculate_cube_count_elemwise(&out_grad.client, working_units, cube_dim);
 
     unsafe {
-        interpolate_nearest_backward_kernel::launch_unchecked::<E, R>(
-            &out_grad.client,
+        interpolate_nearest_backward_kernel::launch_unchecked(
+            &output.client,
             cube_count,
             cube_dim,
-            out_grad.as_tensor_arg::<E>(line_size),
-            output.as_tensor_arg::<E>(line_size),
+            address_type!(out_grad, output),
+            vector_size,
+            out_grad.into_tensor_arg(),
+            output.clone().into_tensor_arg(),
             out_shape,
             out_layout,
+            output.dtype.into(),
         )
     };
 

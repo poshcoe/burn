@@ -1,17 +1,16 @@
-use std::sync::Arc;
-
 use burn_ir::{HandleContainer, OperationIr, TensorId, TensorIr, TensorStatus};
 use hashbrown::{HashMap, HashSet};
+use smallvec::SmallVec;
 
 use super::{
     StreamId,
-    execution::{ExecutionMode, Operation, Processor, StreamSegment},
+    execution::{ExecutionMode, Processor, StreamSegment},
     queue::OperationQueue,
     shared_tensors::SharedTensors,
     store::{ExecutionPlanId, ExecutionPlanStore},
 };
 use crate::{
-    DropOp, FusionRuntime,
+    DropOp, FusionRuntime, UnfusedOp,
     stream::shared_tensors::{SharedTensorAnalysis, SharedTensorDropAction},
 };
 
@@ -49,7 +48,7 @@ impl<R: FusionRuntime> MultiStream<R> {
         &mut self,
         streams: OperationStreams,
         mut repr: OperationIr,
-        operation: Arc<dyn Operation<R>>,
+        operation: UnfusedOp<R>,
         handles: &mut HandleContainer<R::FusionHandle>,
     ) {
         let id = self.resolve_streams(&streams, handles, &mut repr);
@@ -135,7 +134,7 @@ impl<R: FusionRuntime> MultiStream<R> {
         id: StreamId,
         repr: OperationIr,
         streams: &OperationStreams,
-        operation: Arc<dyn Operation<R>>,
+        operation: UnfusedOp<R>,
         handles: &mut HandleContainer<R::FusionHandle>,
     ) -> usize {
         let stream = match self.streams.get_mut(&id) {
@@ -194,21 +193,23 @@ impl<R: FusionRuntime> MultiStream<R> {
 
     /// Drain a stream
     pub fn drain(&mut self, handles: &mut HandleContainer<R::FusionHandle>, id: StreamId) {
-        if let Some(stream) = self.streams.get_mut(&id) {
-            let num_executed = stream.queue.global.len();
-            stream.processor.process(
-                Segment::new(&mut stream.queue, handles),
-                &mut self.optimizations,
-                ExecutionMode::Sync,
-            );
-            stream.cursor += num_executed as u64;
+        id.executes(|| {
+            if let Some(stream) = self.streams.get_mut(&id) {
+                let num_executed = stream.queue.global.len();
+                stream.processor.process(
+                    Segment::new(&mut stream.queue, handles),
+                    &mut self.optimizations,
+                    ExecutionMode::Sync,
+                );
+                stream.cursor += num_executed as u64;
 
-            let cleared = self.shared_tensors.on_executed_ops(id, stream);
-            self.clear_shared_tensors(&cleared, id);
-            let to_drop = self.shared_tensors.clear_tensors(cleared);
+                let cleared = self.shared_tensors.on_executed_ops(id, stream);
+                self.clear_shared_tensors(&cleared, id);
+                let to_drop = self.shared_tensors.clear_tensors(cleared);
 
-            self.drop_shared_tensors(to_drop, handles, id);
-        }
+                self.drop_shared_tensors(to_drop, handles, id);
+            }
+        });
     }
 
     /// When one of the provided streams is different from the current stream, we drain them.
@@ -263,7 +264,7 @@ impl<R: FusionRuntime> MultiStream<R> {
                 .analyse(current, node, streams, &self.streams);
             match analysis {
                 SharedTensorAnalysis::SharedFromCurrentStream => {
-                    shared_analysis.current.push(node.id);
+                    shared_analysis.current.push((node.id, node.status));
                 }
                 SharedTensorAnalysis::NotShared => {}
                 SharedTensorAnalysis::SharedFromExistingStream {
@@ -291,7 +292,7 @@ impl<R: FusionRuntime> MultiStream<R> {
         nodes: &[&TensorIr],
     ) {
         // If we only have current tensors that are shared, we're safe to not sync the timelines.
-        if analysis.new.is_empty() && analysis.existing.is_empty() {
+        if analysis.new.is_empty() && analysis.existing.is_empty() && analysis.current.is_empty() {
             return;
         }
 
@@ -310,7 +311,16 @@ impl<R: FusionRuntime> MultiStream<R> {
             }
         }
 
+        for (tensor_id, status) in analysis.current.iter() {
+            if let TensorStatus::ReadWrite = status {
+                for stream in self.shared_tensors.streams_of(tensor_id) {
+                    streams_to_sync.insert(stream);
+                }
+            }
+        }
+
         for id in streams_to_sync.drain() {
+            log::trace!("Drain stream {id} for use in current {current}");
             self.resolve_stream(handles, id, nodes);
         }
     }
@@ -328,8 +338,10 @@ impl<R: FusionRuntime> MultiStream<R> {
         for (tensor_id, _stream_id, _cursor) in analysis.existing.iter() {
             readonly_tensors.push(*tensor_id);
         }
-        for tensor_id in analysis.current.iter() {
-            readonly_tensors.push(*tensor_id);
+        for (tensor_id, status) in analysis.current.iter() {
+            if let TensorStatus::ReadOnly = status {
+                readonly_tensors.push(*tensor_id);
+            }
         }
 
         self.shared_tensors
@@ -353,11 +365,11 @@ impl<R: FusionRuntime> MultiStream<R> {
         }
         for tensor in tensors {
             let streams = OperationStreams {
-                streams: HashMap::new(),
+                streams: SmallVec::new(),
                 current,
             };
 
-            let op = Arc::new(DropOp { id: tensor.id });
+            let op = UnfusedOp::new(DropOp { id: tensor.id }, current);
             self.register(streams, OperationIr::Drop(tensor), op, handles);
         }
     }
@@ -404,7 +416,7 @@ impl<R: FusionRuntime> StreamSegment<R::Optimization> for Segment<'_, R> {
 impl<R: FusionRuntime> Stream<R> {
     fn new(device: R::FusionDevice) -> Self {
         Self {
-            processor: Processor::new(R::optimizations(device)),
+            processor: Processor::new(R::fusers(device)),
             queue: OperationQueue::new(),
             cursor: 0,
         }
@@ -414,14 +426,14 @@ impl<R: FusionRuntime> Stream<R> {
 #[derive(Debug)]
 /// Manage the streams used for the current [operation](OperationIr).
 pub struct OperationStreams {
-    pub(crate) streams: HashMap<TensorId, StreamId>,
+    pub(crate) streams: SmallVec<[(TensorId, StreamId); 5]>,
     pub(crate) current: StreamId,
 }
 
 impl Default for OperationStreams {
     fn default() -> Self {
         Self {
-            streams: HashMap::new(),
+            streams: SmallVec::new(),
             current: StreamId::current(),
         }
     }
@@ -433,11 +445,36 @@ impl OperationStreams {
     /// You only need to register input tensors, not the outputs.
     /// So init tensor operations should have no streams registered.
     pub fn tensor<R: FusionRuntime>(&mut self, tensor: &crate::FusionTensor<R>) {
-        self.streams.insert(tensor.id, tensor.stream);
+        for (id, _) in self.streams.iter() {
+            if *id == tensor.id {
+                return;
+            }
+        }
+        self.streams.push((tensor.id, tensor.stream));
     }
 
     pub(crate) fn get(&self, id: TensorId) -> Option<StreamId> {
-        self.streams.get(&id).cloned()
+        for (tensor_id, stream) in self.streams.iter() {
+            if *tensor_id == id {
+                return Some(*stream);
+            }
+        }
+
+        None
+    }
+
+    /// Create new operation streams with the given inputs.
+    ///
+    /// The inputs are automatically registered.
+    pub fn with_inputs<'a, R: FusionRuntime + 'a, I>(tensors: I) -> Self
+    where
+        I: IntoIterator<Item = &'a crate::FusionTensor<R>>,
+    {
+        let mut streams = OperationStreams::default();
+        for tensor in tensors.into_iter() {
+            streams.tensor(tensor)
+        }
+        streams
     }
 }
 
@@ -445,7 +482,7 @@ impl OperationStreams {
 struct MultiSharedTensorAnalysis {
     /// Tensors that are shared with other streams, but we're currently executing on the same stream
     /// the tensor was originally created.
-    current: Vec<TensorId>,
+    current: Vec<(TensorId, TensorStatus)>,
     /// Tensors that are shared with new streams.
     new: Vec<(TensorId, StreamId)>,
     /// Tensors that are shared with existing streams.

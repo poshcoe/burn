@@ -1,6 +1,6 @@
 use crate::renderer::{
     EvaluationProgress, MetricState, MetricsRenderer, MetricsRendererEvaluation,
-    MetricsRendererTraining, TrainingProgress,
+    MetricsRendererTraining, ProgressType, TrainingProgress,
 };
 
 /// A simple renderer for when the cli feature is not enabled.
@@ -19,17 +19,17 @@ impl MetricsRendererTraining for CliMetricsRenderer {
 
     fn update_valid(&mut self, _state: MetricState) {}
 
-    fn render_train(&mut self, item: TrainingProgress) {
+    fn render_train(&mut self, item: TrainingProgress, _progress_indicators: Vec<ProgressType>) {
         println!("{item:?}");
     }
 
-    fn render_valid(&mut self, item: TrainingProgress) {
+    fn render_valid(&mut self, item: TrainingProgress, _progress_indicators: Vec<ProgressType>) {
         println!("{item:?}");
     }
 }
 
 impl MetricsRendererEvaluation for CliMetricsRenderer {
-    fn render_test(&mut self, item: EvaluationProgress) {
+    fn render_test(&mut self, item: EvaluationProgress, _progress_indicators: Vec<ProgressType>) {
         println!("{item:?}");
     }
 
@@ -40,4 +40,6 @@ impl MetricsRenderer for CliMetricsRenderer {
     fn manual_close(&mut self) {
         // Nothing to do.
     }
+
+    fn register_metric(&mut self, _definition: crate::metric::MetricDefinition) {}
 }

@@ -3,13 +3,20 @@ use crate::{
     element::BoolElement,
     kernel::{self, conv::ConvTranspose2dStrategy},
 };
-use burn_backend::tensor::{BoolTensor, FloatTensor, IntTensor};
 use burn_backend::{
     TensorMetadata,
     ops::{
         AttentionModuleOptions, ConvOptions, ConvTransposeOptions, DeformConv2dBackward,
         DeformConvOptions, InterpolateOptions, MaxPool2dBackward, MaxPool2dWithIndices, ModuleOps,
+        rnn::{
+            RnnSize,
+            lstm::{LstmElemwise, LstmElemwiseBackward, LstmOps},
+        },
     },
+};
+use burn_backend::{
+    ops::rnn::RnnOps,
+    tensor::{BoolTensor, FloatTensor, IntTensor},
 };
 
 impl<R, F, I, BT> ModuleOps<Self> for CubeBackend<R, F, I, BT>
@@ -357,4 +364,45 @@ where
     ) -> FloatTensor<Self> {
         kernel::fft::irfft(spectrum_re, spectrum_im, dim, n)
     }
+}
+
+impl<R, F, I, BT> LstmOps<Self> for CubeBackend<R, F, I, BT>
+where
+    R: CubeRuntime,
+    F: FloatElement,
+    I: IntElement,
+    BT: BoolElement,
+{
+    fn lstm_elemwise(
+        wx_rh: FloatTensor<Self>,
+        c: FloatTensor<Self>,
+        size: &RnnSize,
+        tracked: bool,
+    ) -> LstmElemwise<Self> {
+        let ([h, c], gates) = kernel::rnn::lstm::lstm_elemwise::<R>(wx_rh, c, size, tracked);
+        LstmElemwise::new(h, c, gates)
+    }
+
+    fn lstm_elemwise_backward(
+        h_out_grad: FloatTensor<Self>,
+        h_int_grad: FloatTensor<Self>,
+        c: FloatTensor<Self>,
+        c_out: FloatTensor<Self>,
+        c_int_grad: FloatTensor<Self>,
+        gates: FloatTensor<Self>,
+        size: &RnnSize,
+    ) -> LstmElemwiseBackward<Self> {
+        let (gates_grad, c_int_grad) = kernel::rnn::lstm::lstm_elemwise_backward::<R>(
+            h_out_grad, h_int_grad, c, c_out, c_int_grad, gates, size,
+        );
+        LstmElemwiseBackward::new(gates_grad, c_int_grad)
+    }
+}
+impl<R, F, I, BT> RnnOps<Self> for CubeBackend<R, F, I, BT>
+where
+    R: CubeRuntime,
+    F: FloatElement,
+    I: IntElement,
+    BT: BoolElement,
+{
 }

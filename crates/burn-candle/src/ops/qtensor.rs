@@ -1,8 +1,8 @@
 use burn_backend::{
-    Backend, DType, ExecutionError, FloatDType, Shape, Slice, TensorData,
+    Backend, DType, ExecutionError, FloatDType, Shape, TensorData,
     ops::QTensorOps,
     quantization::{QuantScheme, QuantizationParametersPrimitive},
-    tensor::{Device, FloatTensor, IntTensor, QuantizedTensor},
+    tensor::{Device, FloatTensor, QuantizedTensor},
 };
 
 use crate::{
@@ -10,7 +10,7 @@ use crate::{
     element::{FloatCandleElement, IntCandleElement},
 };
 
-impl<F: FloatCandleElement, I: IntCandleElement> QTensorOps<Self> for Candle<F, I> {
+impl QTensorOps<Self> for Candle {
     fn q_from_data(data: TensorData, device: &Device<Self>) -> QuantizedTensor<Self> {
         unimplemented!()
     }
@@ -24,10 +24,6 @@ impl<F: FloatCandleElement, I: IntCandleElement> QTensorOps<Self> for Candle<F, 
     }
 
     fn dequantize(_tensor: QuantizedTensor<Self>, _dtype: FloatDType) -> FloatTensor<Self> {
-        unimplemented!()
-    }
-
-    fn q_device(_tensor: &QuantizedTensor<Self>) -> Device<Self> {
         unimplemented!()
     }
 
@@ -59,30 +55,6 @@ impl<F: FloatCandleElement, I: IntCandleElement> QTensorOps<Self> for Candle<F, 
     }
 
     fn q_flip(_tensor: QuantizedTensor<Self>, _axes: &[usize]) -> QuantizedTensor<Self> {
-        unimplemented!()
-    }
-
-    fn q_gather(
-        _dim: usize,
-        _tensor: QuantizedTensor<Self>,
-        _indices: IntTensor<Self>,
-    ) -> QuantizedTensor<Self> {
-        unimplemented!()
-    }
-
-    fn q_select(
-        _tensor: QuantizedTensor<Self>,
-        _dim: usize,
-        _indices: IntTensor<Self>,
-    ) -> QuantizedTensor<Self> {
-        unimplemented!()
-    }
-
-    fn q_slice(_tensor: QuantizedTensor<Self>, _slices: &[Slice]) -> QuantizedTensor<Self> {
-        unimplemented!()
-    }
-
-    fn q_expand(_tensor: QuantizedTensor<Self>, _shape: Shape) -> QuantizedTensor<Self> {
         unimplemented!()
     }
 }

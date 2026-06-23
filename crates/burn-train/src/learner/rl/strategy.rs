@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use burn_core::tensor::Device;
+
 use crate::{
     Interrupter, LearnerSummaryConfig, OffPolicyConfig, RLCheckpointer, RLComponentsTypes, RLEvent,
     RLEventProcessorType, RLResult,
@@ -24,6 +26,8 @@ pub struct RLComponents<RLC: RLComponentsTypes> {
     pub event_store: Arc<EventStoreClient>,
     /// Config for creating a summary of the learning
     pub summary: Option<LearnerSummaryConfig>,
+    /// Device used for running inference during environmment sampling or validation.
+    pub inference_device: Device,
 }
 
 /// The strategy for reinforcement learning.
@@ -47,26 +51,15 @@ pub trait RLStrategy<RLC: RLComponentsTypes> {
         mut training_components: RLComponents<RLC>,
         env_init: RLC::EnvInit,
     ) -> RLResult<RLC::Policy> {
-        let starting_epoch = match training_components.checkpoint {
-            Some(checkpoint) => {
-                if let Some(checkpointer) = &mut training_components.checkpointer {
-                    learner_agent = checkpointer.load_checkpoint(
-                        learner_agent,
-                        &Default::default(),
-                        checkpoint,
-                    );
-                }
-                checkpoint + 1
-            }
-            None => 1,
-        };
-
+        let starting_epoch = training_components.checkpoint.unwrap_or(0) + 1;
         let summary_config = training_components.summary.clone();
 
         // Event processor start training
         training_components
             .event_processor
-            .process_train(RLEvent::Start);
+            .process_train(RLEvent::Start {
+                total_items: training_components.num_steps,
+            });
 
         // Training loop
         let (policy, mut event_processor) = self.train_loop(

@@ -15,65 +15,23 @@ version.workspace = true
 workspace = true
 
 [features]
-default = [
-    "std",
-    "burn-core/default",
-]
+default = ["std", "burn-core/default"]
 doc = [
     "std",
     # Doc features
     "burn-core/doc",
 ]
-std = [
-    "burn-core/std",
-    "num-traits/std",
-    "serde/std",
-    "log",
-]
-tracing = [
-    "burn-collective?/tracing",
-    "burn-core/tracing",
-    "burn-cuda?/tracing",
-    "burn-fusion?/tracing",
-    "burn-remote?/tracing",
-    "burn-rocm?/tracing",
-    "burn-router?/tracing",
-    "burn-tch?/tracing",
-    "burn-wgpu?/tracing",
-]
+std = ["burn-core/std", "burn-pack/std", "num-traits/std", "serde/std", "log"]
+tracing = ["burn-core/tracing"]
 
-distributed = ["std", "burn-core/distributed"]
-collective = ["burn-collective"]
-
-test-cuda = [
-    "burn-cuda/default",
-] # To use cuda during testing, default uses flex.
-test-rocm = [
-    "burn-rocm/default",
-] # To use hip during testing, default uses flex.
-test-tch = [
-    "burn-tch/default",
-] # To use tch during testing, default uses flex.
-test-wgpu = [
-    "burn-wgpu/default",
-] # To use wgpu during testing, default uses flex.
-test-vulkan = [
-    "test-wgpu",
-    "burn-wgpu/vulkan",
-] # To use wgpu-spirv during testing, default uses flex.
-test-metal = [
-    "test-wgpu",
-    "burn-wgpu/metal",
-] # To use wgpu-spirv during testing, default uses flex.
-
-# Memory checks are disabled by default
-test-memory-checks = ["burn-fusion/memory-checks"]
+# collective = ["burn-collective"]
 
 [dependencies]
 
 # ** Please make sure all dependencies support no_std when std is disabled **
-burn-core = { path = "../burn-core", version = "=0.21.0-pre.3", default-features = false }
-burn-collective = { path = "../burn-collective", version = "=0.21.0-pre.3", optional = true, default-features = false }
+burn-core = { workspace = true, features = ["autodiff", "extension"] }
+burn-derive = { workspace = true }
+burn-pack = { workspace = true, default-features = false }
 
 num-traits = { workspace = true }
 derive-new = { workspace = true }
@@ -83,19 +41,10 @@ serde = { workspace = true, features = ["derive"] }
 # The same implementation of HashMap in std but with no_std support (only alloc crate is needed)
 hashbrown = { workspace = true, features = ["serde"] } # no_std compatible
 
-# FOR TESTING
-burn-cuda = { path = "../burn-cuda", version = "=0.21.0-pre.3", optional = true, default-features = false }
-burn-rocm = { path = "../burn-rocm", version = "=0.21.0-pre.3", optional = true, default-features = false }
-burn-remote = { path = "../burn-remote", version = "=0.21.0-pre.3", default-features = false, optional = true }
-burn-router = { path = "../burn-router", version = "=0.21.0-pre.3", default-features = false, optional = true }
-burn-tch = { path = "../burn-tch", version = "=0.21.0-pre.3", optional = true }
-burn-wgpu = { path = "../burn-wgpu", version = "=0.21.0-pre.3", optional = true, default-features = false }
-burn-fusion = { path = "../burn-fusion", version = "=0.21.0-pre.3", optional = true }
-
 [dev-dependencies]
-burn-nn = { path = "../burn-nn", version = "=0.21.0-pre.3" }
-burn-flex = { path = "../burn-flex", version = "=0.21.0-pre.3" }
-burn-autodiff = { path = "../burn-autodiff", version = "=0.21.0-pre.3" }
+burn-nn = { workspace = true, features = ["default"] }
+burn-flex = { workspace = true, features = ["default"] }
+burn-autodiff = { workspace = true, features = ["default"] }
 rstest = { workspace = true }
 
 [package.metadata.docs.rs]

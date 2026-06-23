@@ -1,10 +1,9 @@
-use std::marker::PhantomData;
-
 use burn_backend::{
-    BackTrace, Backend, DType, DTypeUsage, DeviceId, DeviceOps, ExecutionError, QTensorPrimitive,
+    BackTrace, Backend, BackendTypes, DType, DTypeUsage, DeviceId, DeviceOps, ExecutionError,
     tensor::Device,
 };
 use burn_std::{
+    BoolStore, DeviceSettings,
     rand::{SeedableRng, StdRng},
     stub::Mutex,
 };
@@ -20,14 +19,7 @@ use crate::{
 /// It is compatible with a wide range of hardware configurations, including CPUs and GPUs
 /// that support CUDA or Metal. Additionally, the backend can be compiled to `wasm` when using the CPU.
 #[derive(Clone, Default, Debug)]
-pub struct Candle<F = f32, I = i64>
-where
-    F: FloatCandleElement,
-    I: IntCandleElement,
-{
-    _float: PhantomData<F>,
-    _int: PhantomData<I>,
-}
+pub struct Candle {}
 
 // Seed for CPU device
 pub(crate) static SEED: Mutex<Option<StdRng>> = Mutex::new(None);
@@ -190,22 +182,30 @@ impl burn_backend::Device for CandleDevice {
         }
     }
 }
-impl DeviceOps for CandleDevice {}
+impl DeviceOps for CandleDevice {
+    fn defaults(&self) -> DeviceSettings {
+        DeviceSettings::new(
+            DType::F32,
+            DType::I64,
+            DType::Bool(BoolStore::U8),
+            Default::default(),
+        )
+    }
+}
 
-impl<F: FloatCandleElement, I: IntCandleElement> Backend for Candle<F, I> {
+impl BackendTypes for Candle {
     type Device = CandleDevice;
 
     type FloatTensorPrimitive = CandleTensor;
-    type FloatElem = F;
 
     type IntTensorPrimitive = CandleTensor;
-    type IntElem = I;
 
     type BoolTensorPrimitive = CandleTensor;
-    type BoolElem = u8;
 
     type QuantizedTensorPrimitive = CandleTensor;
+}
 
+impl Backend for Candle {
     fn ad_enabled(_device: &Self::Device) -> bool {
         false
     }
@@ -263,6 +263,8 @@ impl<F: FloatCandleElement, I: IntCandleElement> Backend for Candle<F, I> {
     fn device_count(_: u16) -> usize {
         1
     }
+
+    fn flush(_device: &Self::Device) {}
 }
 
 #[cfg(test)]
@@ -273,7 +275,7 @@ mod tests {
 
     #[test]
     fn should_support_dtypes() {
-        type B = Candle<f32>;
+        type B = Candle;
         let device = Default::default();
 
         assert!(B::supports_dtype(&device, DType::F64));

@@ -14,13 +14,17 @@ use crate::{
     },
     tensor::CubeTensor,
 };
+use burn_backend::cubecl::{dtype_to_elem_type, dtype_to_storage_type};
 use burn_backend::{DType, Shape, TensorMetadata, ops::DeformConvOptions};
 use cubecl::{
     CubeDim, CubeLaunch, calculate_cube_count_elemwise, cube,
     features::AtomicUsage,
     ir::FloatKind,
     prelude::*,
-    std::{FastDivmod, tensor::layout::linear::LinearView},
+    std::{
+        FastDivmod,
+        tensor::layout::linear::{LinearView, LinearViewMut},
+    },
 };
 use cubek::{
     convolution::components::ConvSetupError,
@@ -248,7 +252,7 @@ fn compute_offset_and_mask_gradient<R: CubeRuntime>(
     let cube_dim = CubeDim::new(&image.client, num_elements_offset);
     let cube_count = calculate_cube_count_elemwise(&image.client, num_elements_offset, cube_dim);
 
-    let dtype: StorageType = image.dtype.into();
+    let dtype: StorageType = dtype_to_storage_type(image.dtype);
     unsafe {
         deform_col2img_coord_kernel::launch_unchecked(
             &grad_offset.client,
@@ -301,10 +305,10 @@ struct DeformConv2dCol2ImgCoordArgs {
 fn deform_col2img_coord_kernel<F: Float>(
     image: &Tensor<F>,
     offset: &Tensor<F>,
-    mask: &ComptimeOption<Tensor<F>>,
+    mask: ComptimeOption<&Tensor<F>>,
     columns: &Tensor<F>,
-    grad_offset: &mut LinearView<F, ReadWrite>,
-    grad_mask: &mut ComptimeOption<Tensor<F>>,
+    mut grad_offset: LinearViewMut<'_, F>,
+    grad_mask: ComptimeOption<&mut Tensor<F>>,
     pos_shape: Sequence<FastDivmod<usize>>,
     args: &DeformConv2dCol2ImgCoordArgs,
     #[define(F)] _dtype: StorageType,
@@ -395,7 +399,7 @@ fn deform_col2img_coord_kernel<F: Float>(
         image_base_idx += image.stride(1);
     }
 
-    grad_offset[ABSOLUTE_POS] = grad_offset_val;
+    grad_offset.write(ABSOLUTE_POS, grad_offset_val);
 
     #[comptime]
     if let ComptimeOption::Some(grad_mask) = grad_mask {
@@ -479,11 +483,11 @@ fn compute_input_grad<R: CubeRuntime>(
 
     let supports_fadd = client
         .properties()
-        .atomic_type_usage(Type::new(StorageType::Atomic(FloatKind::F32.into())))
+        .atomic_type_usage(Type::atomic(FloatKind::F32))
         .contains(AtomicUsage::Add);
     let supports_same_type = client
         .properties()
-        .atomic_type_usage(Type::new(StorageType::Atomic(columns.dtype.into())))
+        .atomic_type_usage(Type::atomic(dtype_to_elem_type(columns.dtype)))
         .contains(AtomicUsage::Add);
 
     let [batches, in_channels, height, width] = input_shape.dims();
@@ -512,8 +516,11 @@ fn compute_input_grad<R: CubeRuntime>(
     };
     let dtype = offset.dtype;
     let dtypes: [StorageType; 2] = match supports_same_type {
-        true => [dtype.into(), dtype.into()],
-        false => [dtype.into(), DType::F32.into()],
+        true => [dtype_to_storage_type(dtype), dtype_to_storage_type(dtype)],
+        false => [
+            dtype_to_storage_type(dtype),
+            dtype_to_storage_type(DType::F32),
+        ],
     };
 
     unsafe {
@@ -565,8 +572,8 @@ struct DeformConv2dCol2ImgArgs {
 #[cube(launch_unchecked, address_type = "dynamic")]
 fn deform_col2img_kernel<F: Float, FP: Float, FAdd: FloatAtomicAddFamily>(
     offset: &Tensor<F>,
-    mask: &ComptimeOption<Tensor<F>>,
-    columns: &LinearView<F>,
+    mask: ComptimeOption<&Tensor<F>>,
+    columns: LinearView<'_, F>,
     grad_input: &mut Tensor<Atomic<ProxyType<FAdd, FP>>>,
     pos_shape: Sequence<FastDivmod<usize>>,
     args: &DeformConv2dCol2ImgArgs,
@@ -644,7 +651,7 @@ fn deform_col2img_kernel<F: Float, FP: Float, FAdd: FloatAtomicAddFamily>(
 
                 let weight = (F::new(1.0) - F::abs(y - yp)) * (F::new(1.0) - F::abs(x - xp));
 
-                let value = mask_value * F::cast_from(weight) * columns[ABSOLUTE_POS];
+                let value = mask_value * F::cast_from(weight) * columns.read(ABSOLUTE_POS);
 
                 FAdd::Op::<FP>::float_atomic_add::<F>(&mut grad_input[gradient_pos], value);
             }

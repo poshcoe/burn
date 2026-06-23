@@ -2,7 +2,7 @@ use burn_backend::{
     DType, Distribution, ElementConversion, ExecutionError, IntDType, Scalar, Shape, Slice,
     TensorData, TensorMetadata,
     ops::{FloatTensorOps, IntTensorOps},
-    tensor::{Bool, BoolTensor, Device, FloatTensor, IntElem, IntTensor},
+    tensor::{BoolTensor, Device, FloatTensor, IntTensor},
 };
 use burn_std::{BoolDType, FloatDType};
 
@@ -13,7 +13,7 @@ use crate::{
 
 use super::base::{cpu_random, expand, permute, sign, unfold};
 
-impl<F: FloatCandleElement, I: IntCandleElement> IntTensorOps<Self> for Candle<F, I> {
+impl IntTensorOps<Self> for Candle {
     fn int_empty(shape: Shape, device: &Device<Self>, dtype: IntDType) -> IntTensor<Self> {
         super::base::empty(shape, device, dtype.into_dtype())
     }
@@ -29,10 +29,6 @@ impl<F: FloatCandleElement, I: IntCandleElement> IntTensorOps<Self> for Candle<F
             DType::U8 => super::base::from_data::<u8>(data, device),
             _ => unimplemented!("Unsupported dtype for `int_from_data`"),
         }
-    }
-
-    fn int_device(tensor: &IntTensor<Self>) -> Device<Self> {
-        super::base::device(tensor)
     }
 
     fn int_to_device(tensor: IntTensor<Self>, device: &Device<Self>) -> IntTensor<Self> {
@@ -75,7 +71,7 @@ impl<F: FloatCandleElement, I: IntCandleElement> IntTensorOps<Self> for Candle<F
         CandleTensor::new(
             mask.tensor
                 .where_cond(
-                    &super::candle_utils::fill_like::<I>(value.elem(), &tensor.tensor),
+                    &super::candle_utils::fill_like::<i64>(value.elem(), &tensor.tensor),
                     &tensor.tensor,
                 )
                 .unwrap(),
@@ -104,6 +100,19 @@ impl<F: FloatCandleElement, I: IntCandleElement> IntTensorOps<Self> for Candle<F
                 .scatter_add(&indices.tensor, &value.tensor, dim)
                 .unwrap(),
         )
+    }
+
+    fn int_scatter_nd(
+        data: IntTensor<Self>,
+        indices: IntTensor<Self>,
+        values: IntTensor<Self>,
+        reduction: burn_backend::tensor::IndexingUpdateOp,
+    ) -> IntTensor<Self> {
+        super::base::scatter_nd(data, indices, values, reduction)
+    }
+
+    fn int_gather_nd(data: IntTensor<Self>, indices: IntTensor<Self>) -> IntTensor<Self> {
+        super::base::gather_nd(data, indices)
     }
 
     fn int_select(
@@ -147,7 +156,7 @@ impl<F: FloatCandleElement, I: IntCandleElement> IntTensorOps<Self> for Candle<F
         rhs: Scalar,
         _out_dtype: BoolDType,
     ) -> BoolTensor<Self> {
-        CandleTensor::new(lhs.tensor.eq(rhs.elem::<I>()).unwrap())
+        CandleTensor::new(lhs.tensor.eq(rhs.elem::<i64>()).unwrap())
     }
 
     fn int_greater(
@@ -167,7 +176,7 @@ impl<F: FloatCandleElement, I: IntCandleElement> IntTensorOps<Self> for Candle<F
     ) -> BoolTensor<Self> {
         CandleTensor::new(
             lhs.tensor
-                .gt(&super::candle_utils::fill_like::<I>(
+                .gt(&super::candle_utils::fill_like::<i64>(
                     rhs.elem(),
                     &lhs.tensor,
                 ))
@@ -192,7 +201,7 @@ impl<F: FloatCandleElement, I: IntCandleElement> IntTensorOps<Self> for Candle<F
     ) -> BoolTensor<Self> {
         CandleTensor::new(
             lhs.tensor
-                .ge(&super::candle_utils::fill_like::<I>(
+                .ge(&super::candle_utils::fill_like::<i64>(
                     rhs.elem(),
                     &lhs.tensor,
                 ))
@@ -217,7 +226,7 @@ impl<F: FloatCandleElement, I: IntCandleElement> IntTensorOps<Self> for Candle<F
     ) -> BoolTensor<Self> {
         CandleTensor::new(
             lhs.tensor
-                .lt(&super::candle_utils::fill_like::<I>(
+                .lt(&super::candle_utils::fill_like::<i64>(
                     rhs.elem(),
                     &lhs.tensor,
                 ))
@@ -242,7 +251,7 @@ impl<F: FloatCandleElement, I: IntCandleElement> IntTensorOps<Self> for Candle<F
     ) -> BoolTensor<Self> {
         CandleTensor::new(
             lhs.tensor
-                .le(&super::candle_utils::fill_like::<I>(
+                .le(&super::candle_utils::fill_like::<i64>(
                     rhs.elem(),
                     &lhs.tensor,
                 ))
@@ -320,11 +329,8 @@ impl<F: FloatCandleElement, I: IntCandleElement> IntTensorOps<Self> for Candle<F
     }
 
     fn int_sum(tensor: IntTensor<Self>) -> IntTensor<Self> {
-        let sum = tensor.tensor.sum_all().unwrap().to_scalar::<I>().unwrap();
-        CandleTensor::from_data::<I>(
-            TensorData::new([sum].into(), [1]),
-            Self::int_device(&tensor),
-        )
+        let sum = tensor.tensor.sum_all().unwrap().reshape((1,)).unwrap();
+        CandleTensor::new(sum)
     }
 
     fn int_sum_dim(tensor: IntTensor<Self>, dim: usize) -> IntTensor<Self> {
@@ -387,25 +393,15 @@ impl<F: FloatCandleElement, I: IntCandleElement> IntTensorOps<Self> for Candle<F
     }
 
     fn int_argmax(tensor: IntTensor<Self>, dim: usize) -> IntTensor<Self> {
-        CandleTensor::new(
-            tensor
-                .tensor
-                .argmax_keepdim(dim)
-                .unwrap()
-                .to_dtype(I::DTYPE)
-                .unwrap(),
-        )
+        CandleTensor::new(tensor.tensor.argmax_keepdim(dim).unwrap())
+    }
+
+    fn int_argtopk(tensor: IntTensor<Self>, dim: usize, k: usize) -> IntTensor<Self> {
+        panic!("argtopk not implemented for candle backend")
     }
 
     fn int_argmin(tensor: IntTensor<Self>, dim: usize) -> IntTensor<Self> {
-        CandleTensor::new(
-            tensor
-                .tensor
-                .argmin_keepdim(dim)
-                .unwrap()
-                .to_dtype(I::DTYPE)
-                .unwrap(),
-        )
+        CandleTensor::new(tensor.tensor.argmin_keepdim(dim).unwrap())
     }
 
     fn int_abs(tensor: IntTensor<Self>) -> IntTensor<Self> {
@@ -415,7 +411,7 @@ impl<F: FloatCandleElement, I: IntCandleElement> IntTensorOps<Self> for Candle<F
             candle_core::DType::I64 => CandleTensor::new(
                 tensor
                     .tensor
-                    .to_dtype(F::DTYPE)
+                    .to_dtype(candle_core::DType::F32)
                     .unwrap()
                     .abs()
                     .unwrap()
@@ -450,26 +446,36 @@ impl<F: FloatCandleElement, I: IntCandleElement> IntTensorOps<Self> for Candle<F
         let device = &(device.clone()).into();
         match distribution {
             Distribution::Default => CandleTensor::new(
-                candle_core::Tensor::rand(0.elem::<F>(), 255.elem::<F>(), shape, device)
+                candle_core::Tensor::rand(0f32, 255f32, shape, device)
                     .unwrap()
-                    .to_dtype(I::DTYPE)
+                    .to_dtype(dtype.into_dtype())
                     .unwrap(),
             ),
             Distribution::Bernoulli(prob) => CandleTensor::new(
-                candle_core::Tensor::rand(0.elem::<F>(), 1.elem::<F>(), shape.clone(), device)
+                candle_core::Tensor::rand(0f32, 1f32, shape.clone(), device)
                     .unwrap()
-                    .to_dtype(I::DTYPE)
+                    .to_dtype(dtype.into_dtype())
                     .unwrap()
-                    .lt(&super::candle_utils::fill(prob, shape, I::DTYPE, device))
+                    .lt(&super::candle_utils::fill(
+                        prob,
+                        shape,
+                        dtype.into_dtype(),
+                        device,
+                    ))
                     .unwrap()
-                    .to_dtype(I::DTYPE)
+                    .to_dtype(dtype.into_dtype())
                     .unwrap(),
             ),
             Distribution::Uniform(from, to) => CandleTensor::new(
-                candle_core::Tensor::rand(from.elem::<F>(), to.elem::<F>(), shape, device).unwrap(),
+                candle_core::Tensor::rand(from, to, shape, device)
+                    .unwrap()
+                    .to_dtype(dtype.into_dtype())
+                    .unwrap(),
             ),
             Distribution::Normal(mean, std) => CandleTensor::new(
-                candle_core::Tensor::randn(mean.elem::<F>(), std.elem::<F>(), shape, device)
+                candle_core::Tensor::randn(mean, std, shape, device)
+                    .unwrap()
+                    .to_dtype(dtype.into_dtype())
                     .unwrap(),
             ),
         }

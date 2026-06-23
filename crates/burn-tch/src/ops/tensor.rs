@@ -1,5 +1,5 @@
 use super::TchOps;
-use crate::{IntoKind, LibTorch, LibTorchDevice, TchShape, TchTensor, element::TchElement};
+use crate::{IntoKind, LibTorch, LibTorchDevice, TchShape, TchTensor};
 use burn_backend::backend::ExecutionError;
 use burn_backend::tensor::{BoolTensor, FloatTensor, IntTensor};
 use burn_backend::{BoolDType, IntDType, Scalar, bf16, f16};
@@ -7,7 +7,7 @@ use burn_backend::{
     DType, Distribution, FloatDType, Shape, TensorData, TensorMetadata, ops::FloatTensorOps,
 };
 
-impl<E: TchElement> FloatTensorOps<Self> for LibTorch<E> {
+impl FloatTensorOps<Self> for LibTorch {
     fn float_from_data(data: TensorData, device: &LibTorchDevice) -> TchTensor {
         match data.dtype {
             DType::F64 => TchTensor::from_data::<f64>(data, (*device).into()),
@@ -88,10 +88,6 @@ impl<E: TchElement> FloatTensorOps<Self> for LibTorch<E> {
             }
             _ => panic!("Not a valid float kind"),
         })
-    }
-
-    fn float_device(tensor: &TchTensor) -> LibTorchDevice {
-        tensor.tensor.device().into()
     }
 
     fn float_to_device(tensor: TchTensor, device: &LibTorchDevice) -> TchTensor {
@@ -205,6 +201,19 @@ impl<E: TchElement> FloatTensorOps<Self> for LibTorch<E> {
         value: TchTensor,
     ) -> TchTensor {
         TchOps::scatter(dim, tensor, indices, value)
+    }
+
+    fn float_scatter_nd(
+        data: TchTensor,
+        indices: TchTensor,
+        values: TchTensor,
+        reduction: burn_backend::tensor::IndexingUpdateOp,
+    ) -> TchTensor {
+        TchOps::scatter_nd(data, indices, values, reduction)
+    }
+
+    fn float_gather_nd(data: TchTensor, indices: TchTensor) -> TchTensor {
+        TchOps::gather_nd(data, indices)
     }
 
     fn float_select(tensor: TchTensor, dim: usize, indices: TchTensor) -> TchTensor {
@@ -329,6 +338,19 @@ impl<E: TchElement> FloatTensorOps<Self> for LibTorch<E> {
 
     fn float_argmax(tensor: TchTensor, dim: usize, _indices_dtype: IntDType) -> TchTensor {
         TchOps::argmax(tensor, dim)
+    }
+
+    fn float_argtopk(
+        tensor: TchTensor,
+        dim: usize,
+        k: usize,
+        _indices_dtype: IntDType,
+    ) -> TchTensor {
+        TchOps::argtopk(tensor, dim, k)
+    }
+
+    fn float_topk(tensor: TchTensor, dim: usize, k: usize) -> TchTensor {
+        TchOps::topk(tensor, dim, k)
     }
 
     fn float_argmin(tensor: TchTensor, dim: usize, _out_dtype: IntDType) -> TchTensor {

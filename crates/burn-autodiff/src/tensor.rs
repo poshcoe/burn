@@ -1,23 +1,31 @@
 use crate::{
     checkpoint::{base::Checkpointer, builder::CheckpointerBuilder},
-    grads::Gradients,
+    grads::{BackwardMode, Gradients},
     graph::{ComputingProperty, Node, NodeId, NodeRef, Parent, Requirement, Step},
     runtime::{AutodiffClient, AutodiffClientImpl},
 };
-use alloc::{boxed::Box, sync::Arc, vec};
-use burn_backend::{Backend, TensorMetadata};
+#[cfg(feature = "std")]
+use crate::{distributed::DistributedGradientRegistration, grads::GradSyncContext};
+use alloc::{boxed::Box, vec};
+use burn_backend::{Backend, BackendTypes, TensorMetadata};
 
-#[cfg(feature = "distributed")]
-use burn_backend::distributed::{DistributedBackend, DistributedParamId, DistributedParams};
+#[cfg(target_has_atomic = "ptr")]
+use alloc::sync::Arc;
+
+#[cfg(not(target_has_atomic = "ptr"))]
+use portable_atomic_util::Arc;
+
+use burn_backend::distributed::{DistributedParamId, DistributedParams};
 
 #[derive(Debug, Clone)]
-pub struct AutodiffTensor<B: Backend> {
+pub struct AutodiffTensor<B: BackendTypes> {
     pub primitive: B::FloatTensorPrimitive,
     pub node: NodeRef,
     pub rc: NodeRefCount,
 }
 
-impl<B: Backend> TensorMetadata for AutodiffTensor<B> {
+impl<B: BackendTypes> TensorMetadata for AutodiffTensor<B> {
+    type Device = B::Device;
     fn dtype(&self) -> burn_std::DType {
         self.primitive.dtype()
     }
@@ -28,6 +36,9 @@ impl<B: Backend> TensorMetadata for AutodiffTensor<B> {
 
     fn rank(&self) -> usize {
         self.primitive.rank()
+    }
+    fn device(&self) -> B::Device {
+        self.primitive.device()
     }
 }
 
@@ -55,7 +66,6 @@ impl Step for RootStep {
         self.node.order
     }
 
-    #[cfg(feature = "distributed")]
     fn distributed_params(&self) -> Option<DistributedParams> {
         self.node.distributed_params.clone()
     }
@@ -72,7 +82,6 @@ impl<B: Backend> AutodiffTensor<B> {
             Requirement::None,
             ComputingProperty::Ambiguous,
             AutodiffClientImpl::new(),
-            #[cfg(feature = "distributed")]
             None,
         )
         .into();
@@ -107,7 +116,6 @@ impl<B: Backend> AutodiffTensor<B> {
                     Requirement::Grad,
                     self.node.properties.clone(),
                     self.node.client.clone(),
-                    #[cfg(feature = "distributed")]
                     self.node.distributed_params.clone(),
                 )
                 .into();
@@ -148,7 +156,6 @@ impl<B: Backend> AutodiffTensor<B> {
             requirement,
             computing_properties,
             client,
-            #[cfg(feature = "distributed")]
             None,
         )
         .into();
@@ -182,11 +189,11 @@ impl<B: Backend> AutodiffTensor<B> {
         self.primitive
     }
 
-    #[cfg(not(feature = "distributed"))]
+    #[cfg(not(feature = "std"))]
     pub fn backward(self) -> Gradients {
         let client = self.node.client.clone();
 
-        AutodiffClient::backward::<B>(&client, self)
+        AutodiffClient::backward::<B>(&client, self, BackwardMode::default())
     }
 
     pub fn grad(&self, grads: &Gradients) -> Option<B::FloatTensorPrimitive> {
@@ -202,7 +209,6 @@ impl<B: Backend> AutodiffTensor<B> {
         grads.register::<B>(self.node.id, grad);
     }
 
-    #[cfg(feature = "distributed")]
     /// Mark the tensor as distributed across multiple devices.
     /// Its gradients will be automatically aggregated from those devices after the backward pass.
     ///
@@ -226,14 +232,24 @@ impl<B: Backend> AutodiffTensor<B> {
     }
 }
 
-#[cfg(feature = "distributed")]
-impl<B: DistributedBackend> AutodiffTensor<B> {
+#[cfg(feature = "std")]
+impl<B: Backend> AutodiffTensor<B> {
     pub fn backward(self) -> Gradients {
-        let device = B::float_device(&self.primitive);
+        let device = self.primitive.device();
+        let device_cloned = device.clone();
         let client = self.node.client.clone();
 
-        let grads = AutodiffClient::backward::<B>(&client, self);
-        grads.sync_collective::<B>(&device);
+        let mode = BackwardMode::Distributed(Box::new(|ctx: GradSyncContext| {
+            let registration = DistributedGradientRegistration::<B>::new(
+                ctx.n_required_map,
+                ctx.distributed_params,
+                device_cloned,
+            );
+            Box::new(registration)
+        }));
+
+        let grads = AutodiffClient::backward::<B>(&client, self, mode);
+        B::submit_sync_collective(&device);
         grads
     }
 }

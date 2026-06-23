@@ -10,7 +10,6 @@ use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use burn_tensor::backend::Backend;
 use core::fmt;
 use std::path::PathBuf;
 
@@ -328,10 +327,7 @@ impl PytorchStore {
 impl ModuleStore for PytorchStore {
     type Error = PytorchStoreError;
 
-    fn collect_from<B: Backend, M: ModuleSnapshot<B>>(
-        &mut self,
-        _module: &M,
-    ) -> Result<(), Self::Error> {
+    fn collect_from<M: ModuleSnapshot>(&mut self, _module: &M) -> Result<(), Self::Error> {
         // Saving to PyTorch format is not yet supported
         Err(PytorchStoreError::Other(
             "Saving to PyTorch format is not yet supported. Use other formats for saving."
@@ -339,10 +335,7 @@ impl ModuleStore for PytorchStore {
         ))
     }
 
-    fn apply_to<B: Backend, M: ModuleSnapshot<B>>(
-        &mut self,
-        module: &mut M,
-    ) -> Result<ApplyResult, Self::Error> {
+    fn apply_to<M: ModuleSnapshot>(&mut self, module: &mut M) -> Result<ApplyResult, Self::Error> {
         // Get snapshots from cache
         let snapshots: Vec<TensorSnapshot> = self.get_all_snapshots()?.values().cloned().collect();
 
@@ -374,7 +367,11 @@ impl ModuleStore for PytorchStore {
         }
 
         if !self.allow_partial && !result.missing.is_empty() {
-            return Err(PytorchStoreError::TensorNotFound(format!("\n{}", result)));
+            return Err(PytorchStoreError::TensorNotFound(format!(
+                "\n{}\n\nHint: Use `.allow_partial(true)` on the store to get an `ApplyResult` \
+                with structured missing/error info instead of a hard failure.",
+                result
+            )));
         }
 
         Ok(result)

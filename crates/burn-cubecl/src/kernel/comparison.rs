@@ -4,8 +4,13 @@ use crate::{
     ops::{max_vector_size, numeric::empty_device_dtype},
     tensor::CubeTensor,
 };
+use burn_backend::cubecl::dtype_to_storage_type;
 use burn_backend::{DType, TensorMetadata};
-use cubecl::{calculate_cube_count_elemwise, prelude::*, std::tensor::layout::linear::LinearView};
+use cubecl::{
+    calculate_cube_count_elemwise,
+    prelude::*,
+    std::tensor::layout::linear::{LinearView, LinearViewMut},
+};
 
 #[cube]
 pub(crate) trait ComparisonOpFamily: 'static + Send + Sync {
@@ -81,36 +86,42 @@ impl<T: Numeric, N: Size> ComparisonOp<T, N> for LowerOp {
 
 #[cube(launch_unchecked, address_type = "dynamic")]
 pub(crate) fn kernel_scalar_cmp<T: Numeric, Bool: Numeric, N: Size, O: ComparisonOpFamily>(
-    input: &LinearView<Vector<T, N>>,
+    input: LinearView<'_, Vector<T, N>>,
     scalar: InputScalar,
-    output: &mut LinearView<Vector<Bool, N>, ReadWrite>,
+    mut output: LinearViewMut<'_, Vector<Bool, N>>,
     #[define(T, Bool)] _dtypes: [StorageType; 2],
 ) {
     if !output.is_in_bounds(ABSOLUTE_POS) {
         terminate!();
     }
 
-    output[ABSOLUTE_POS] = Vector::cast_from(O::Operation::<T, N>::execute(
-        input[ABSOLUTE_POS],
-        Vector::new(scalar.get::<T>()),
-    ));
+    output.write(
+        ABSOLUTE_POS,
+        Vector::cast_from(O::Operation::<T, N>::execute(
+            input.read(ABSOLUTE_POS),
+            Vector::new(scalar.get::<T>()),
+        )),
+    );
 }
 
 #[cube(launch_unchecked, address_type = "dynamic")]
 pub(crate) fn kernel_cmp<T: Numeric, Bool: Numeric, N: Size, O: ComparisonOpFamily>(
-    lhs: &LinearView<Vector<T, N>>,
-    rhs: &LinearView<Vector<T, N>>,
-    out: &mut LinearView<Vector<Bool, N>, ReadWrite>,
+    lhs: LinearView<'_, Vector<T, N>>,
+    rhs: LinearView<'_, Vector<T, N>>,
+    mut out: LinearViewMut<'_, Vector<Bool, N>>,
     #[define(T, Bool)] _dtype: [StorageType; 2],
 ) {
     if !out.is_in_bounds(ABSOLUTE_POS) {
         terminate!();
     }
 
-    out[ABSOLUTE_POS] = Vector::cast_from(O::Operation::<T, N>::execute(
-        lhs[ABSOLUTE_POS],
-        rhs[ABSOLUTE_POS],
-    ));
+    out.write(
+        ABSOLUTE_POS,
+        Vector::cast_from(O::Operation::<T, N>::execute(
+            lhs.read(ABSOLUTE_POS),
+            rhs.read(ABSOLUTE_POS),
+        )),
+    );
 }
 
 pub(crate) fn launch_cmp<R: CubeRuntime, O: ComparisonOpFamily>(
@@ -131,7 +142,10 @@ pub(crate) fn launch_cmp<R: CubeRuntime, O: ComparisonOpFamily>(
     let cube_dim = CubeDim::new(&lhs.client, working_units);
     let cube_count = calculate_cube_count_elemwise(&lhs.client, working_units, cube_dim);
 
-    let dtypes = [lhs.dtype.into(), dtype_bool.into()];
+    let dtypes = [
+        dtype_to_storage_type(lhs.dtype),
+        dtype_to_storage_type(dtype_bool),
+    ];
     let same_tensor_type = dtypes[0] == dtypes[1];
     if same_tensor_type && lhs.can_mut_broadcast(&rhs) {
         unsafe {
@@ -216,7 +230,10 @@ pub(crate) fn launch_scalar_cmp<R: CubeRuntime, O: ComparisonOpFamily>(
     let cube_dim = CubeDim::new(&tensor.client, working_units);
     let cube_count = calculate_cube_count_elemwise(&tensor.client, working_units, cube_dim);
 
-    let dtypes = [tensor.dtype.into(), dtype_bool.into()];
+    let dtypes = [
+        dtype_to_storage_type(tensor.dtype),
+        dtype_to_storage_type(dtype_bool),
+    ];
     let same_tensor_type = dtypes[0] == dtypes[1];
 
     if same_tensor_type && tensor.can_mut() && tensor.is_nonoverlapping() {
@@ -385,15 +402,18 @@ impl<F: Float, N: Size> PredicateOp<F, N> for IsInfOp {
 
 #[cube(launch_unchecked, address_type = "dynamic")]
 pub(crate) fn kernel_predicate<F: Float, Bool: Numeric, N: Size, O: PredicateOpFamily>(
-    input: &LinearView<Vector<F, N>>,
-    output: &mut LinearView<Vector<Bool, N>, ReadWrite>,
+    input: LinearView<'_, Vector<F, N>>,
+    mut output: LinearViewMut<'_, Vector<Bool, N>>,
     #[define(F, Bool)] _dtypes: [StorageType; 2],
 ) {
     if !output.is_in_bounds(ABSOLUTE_POS) {
         terminate!();
     }
 
-    output[ABSOLUTE_POS] = Vector::cast_from(O::Operation::<F, N>::execute(input[ABSOLUTE_POS]));
+    output.write(
+        ABSOLUTE_POS,
+        Vector::cast_from(O::Operation::<F, N>::execute(input.read(ABSOLUTE_POS))),
+    );
 }
 
 pub(crate) fn launch_predicate<R: CubeRuntime, O: PredicateOpFamily>(
@@ -405,7 +425,10 @@ pub(crate) fn launch_predicate<R: CubeRuntime, O: PredicateOpFamily>(
     let client = tensor.client.clone();
     let num_elems = tensor.meta.num_elements();
 
-    let dtypes = [tensor.dtype.into(), dtype_bool.into()];
+    let dtypes = [
+        dtype_to_storage_type(tensor.dtype),
+        dtype_to_storage_type(dtype_bool),
+    ];
     let working_units = num_elems / vector_size as usize;
     let cube_dim = CubeDim::new(&tensor.client, working_units);
     let cube_count = calculate_cube_count_elemwise(&tensor.client, working_units, cube_dim);

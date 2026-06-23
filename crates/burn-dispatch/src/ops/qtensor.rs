@@ -1,11 +1,11 @@
 use burn_backend::{
-    ExecutionError, FloatDType, QTensorPrimitive, Shape, Slice, TensorData, TensorPrimitive,
+    DeviceOps, ExecutionError, FloatDType, Shape, Slice, TensorData, TensorMetadata,
+    TensorPrimitive,
     ops::QTensorOps,
     quantization::{QuantPropagation, QuantScheme, QuantizationParametersPrimitive},
     tensor::{FloatTensor, IntTensor, QuantizedTensor},
 };
 
-use crate::backends::*;
 use crate::{Dispatch, DispatchDevice};
 
 impl QTensorOps<Self> for Dispatch {
@@ -29,10 +29,6 @@ impl QTensorOps<Self> for Dispatch {
 
     fn dequantize(tensor: QuantizedTensor<Self>, dtype: FloatDType) -> FloatTensor<Self> {
         unary_op!(tensor, quantized, |tensor| B::dequantize(tensor, dtype) => Float)
-    }
-
-    fn q_device(tensor: &QuantizedTensor<Self>) -> DispatchDevice {
-        tensor.device()
     }
 
     fn q_to_device(
@@ -101,7 +97,8 @@ impl QTensorOps<Self> for Dispatch {
         // TODO: this would be much cleaner if we consolidated tensor primitive types
         match (lhs, rhs) {
             (TensorPrimitive::QFloat(lhs), TensorPrimitive::QFloat(rhs)) => {
-                if matches!(lhs.propagation(), QuantPropagation::Propagate) {
+                let propagation = lhs.device().defaults().quantization.propagation;
+                if matches!(propagation, QuantPropagation::Propagate) {
                     let out = binary_op!(
                         (lhs, quantized),
                         (rhs, quantized),
@@ -136,7 +133,8 @@ impl QTensorOps<Self> for Dispatch {
                 }
             }
             (TensorPrimitive::Float(lhs), TensorPrimitive::QFloat(rhs)) => {
-                if matches!(rhs.propagation(), QuantPropagation::Propagate) {
+                let propagation = rhs.device().defaults().quantization.propagation;
+                if matches!(propagation, QuantPropagation::Propagate) {
                     let out = binary_op!(
                         (lhs, float),
                         (rhs, quantized),
@@ -171,7 +169,8 @@ impl QTensorOps<Self> for Dispatch {
                 }
             }
             (TensorPrimitive::QFloat(lhs), TensorPrimitive::Float(rhs)) => {
-                if matches!(lhs.propagation(), QuantPropagation::Propagate) {
+                let propagation = lhs.device().defaults().quantization.propagation;
+                if matches!(propagation, QuantPropagation::Propagate) {
                     let out = binary_op!(
                         (lhs, quantized),
                         (rhs, float),

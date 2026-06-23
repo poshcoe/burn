@@ -1,7 +1,8 @@
+#![allow(clippy::identity_op)]
+
 use super::*;
 use burn_tensor::TensorData;
 use burn_tensor::Tolerance;
-use burn_tensor::backend::Backend;
 
 #[test]
 fn test_should_mean() {
@@ -225,7 +226,7 @@ fn test_sum_and_squeeze_dims() {
 #[test]
 fn test_sum_dim_1_reshape_maybe_fused() {
     let tensor = TestTensorInt::arange(0..9, &Default::default()).float();
-    TestBackend::sync(&tensor.device()).unwrap();
+    tensor.device().sync().unwrap();
 
     let output = tensor.reshape([3, 3]) + 2;
     let output = output.sum_dim(1);
@@ -242,7 +243,7 @@ fn test_sum_dim_1_swap_dims_maybe_fused() {
     // by `test_sum_transposed`.
     let tensor = TestTensorInt::arange(0..9, &Default::default()).float();
     let tensor = tensor.reshape([3, 3]);
-    TestBackend::sync(&tensor.device()).unwrap();
+    tensor.device().sync().unwrap();
 
     let output = tensor.swap_dims(0, 1) + 2;
     let output = output.sum_dim(1);
@@ -254,7 +255,7 @@ fn test_sum_dim_1_swap_dims_maybe_fused() {
 #[test]
 fn test_sum_dim_2_reshape_maybe_fused_broadcast() {
     let tensor = TestTensorInt::arange(0..9, &Default::default()).float();
-    TestBackend::sync(&tensor.device()).unwrap();
+    tensor.device().sync().unwrap();
 
     let output = tensor.reshape([1, 3, 3]) + 2;
     let output = output.sum_dim(2);
@@ -269,10 +270,10 @@ fn test_sum_dim_2_maybe_fused_on_write() {
     let tensor_2 = TestTensorInt::arange(10..12, &Default::default()).float();
     let tensor_1 = tensor_1.reshape([1, 2, 4]);
     let tensor_2 = tensor_2.reshape([1, 2, 1]);
-    TestBackend::sync(&tensor_1.device()).unwrap();
+    tensor_1.device().sync().unwrap();
 
     let output = (tensor_1 + tensor_2.clone()).sum_dim(2) + tensor_2;
-    TestBackend::sync(&output.device()).unwrap();
+    output.device().sync().unwrap();
     let expected = TensorData::from([[[56.0], [77.0]]]);
 
     output.into_data().assert_eq(&expected, false);
@@ -288,7 +289,7 @@ fn test_sum_dim_3_maybe_fused_on_read_not_contiguous() {
 
     let tensor_2 = tensor_2.reshape([1, 4, 2]);
     let tensor_2 = tensor_2.swap_dims(1, 2);
-    TestBackend::sync(&tensor_1.device()).unwrap();
+    tensor_1.device().sync().unwrap();
 
     let output = (tensor_1 + tensor_2).sum_dim(2);
     let expected = TensorData::from([[[88.0], [96.0]]]);
@@ -308,7 +309,7 @@ fn test_sum_dim_4_maybe_fused_on_read_not_contiguous_mixed() {
 
     let tensor_2 = tensor_2.reshape([1, 4, 2]);
     let tensor_2 = tensor_2.swap_dims(1, 2);
-    TestBackend::sync(&tensor_1.device()).unwrap();
+    tensor_1.device().sync().unwrap();
 
     let output = (tensor_3 + tensor_1 + tensor_2).sum_dim(2);
     let expected = TensorData::from([[[222.0], [246.0]]]);
@@ -328,7 +329,7 @@ fn test_sum_dim_5_maybe_fused_on_read_not_contiguous_mixed() {
 
     let tensor_2 = tensor_2.reshape([1, 4, 2]);
     let tensor_2 = tensor_2.swap_dims(1, 2);
-    TestBackend::sync(&tensor_1.device()).unwrap();
+    tensor_1.device().sync().unwrap();
 
     let output = (tensor_3 + tensor_1 + tensor_2).sum_dim(1);
     let expected = TensorData::from([[[102.0, 112.0, 122.0, 132.0]]]);
@@ -347,12 +348,12 @@ fn test_sum_dim_6_maybe_fused_on_read_not_contiguous_broadcasted() {
 
     let tensor_2 = tensor_2.reshape([1, 2, 2, 2]);
 
-    TestBackend::sync(&tensor_1.device()).unwrap();
+    tensor_1.device().sync().unwrap();
     let sum = tensor_2.clone().sum_dim(0);
     let sum = sum.sum_dim(1);
     let sum = sum.sum_dim(2);
 
-    TestBackend::sync(&tensor_1.device()).unwrap();
+    tensor_1.device().sync().unwrap();
 
     let _tmp = sum.clone() + 2;
     let output = (tensor_1 + tensor_2 + sum).sum_dim(1);
@@ -372,7 +373,7 @@ fn test_sum_dim_7_maybe_fused_on_read_reshaped() {
 
     let tensor_1 = tensor_1.reshape([4, 4]);
 
-    TestBackend::sync(&tensor_1.device()).unwrap();
+    tensor_1.device().sync().unwrap();
 
     let reshaped = tensor_1.reshape([1, 4, 4]);
     let tmp = reshaped + 5.0;
@@ -380,6 +381,30 @@ fn test_sum_dim_7_maybe_fused_on_read_reshaped() {
     let expected = TensorData::from([[[26.0], [42.0], [58.0], [74.0]]]);
 
     output.into_data().assert_eq(&expected, false);
+}
+
+#[test]
+fn test_reduce_dim_non_contiguous_input() {
+    let t = TestTensor::<2>::from([
+        [1.0, 2.0, 3.0, 4.0],
+        [5.0, 6.0, 7.0, 8.0],
+        [9.0, 10.0, 11.0, 12.0],
+    ]);
+    let t_transposed = t.swap_dims(0, 1) /*+ 0.*/;
+
+    let dim = 1;
+    let max = t_transposed.clone().max_dim(dim);
+    let shifted = t_transposed.sub(max);
+    let exp = shifted.exp();
+    let sum = exp.clone().sum_dim(dim);
+    let output = exp.div(sum);
+
+    let row = [3.2932044e-4, 1.7980287e-2, 0.98169035];
+    let expected = TensorData::from([row, row, row, row]);
+    output.into_data().assert_approx_eq::<FloatElem>(
+        &expected,
+        Tolerance::default().set_half_precision_absolute(2e-3),
+    );
 }
 
 #[test]

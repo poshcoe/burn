@@ -1,10 +1,9 @@
-use crate::{Backend, get_device_settings};
-use burn_std::quantization::{QuantAcc, QuantPropagation, QuantScheme};
-use burn_std::{DType, Shape};
+use crate::{Backend, BackendTypes, DeviceOps, get_device_settings};
+use burn_std::{DType, QuantScheme, Shape};
 
 #[derive(Debug, Clone)]
 /// A primitive tensor representation.
-pub enum TensorPrimitive<B: Backend> {
+pub enum TensorPrimitive<B: BackendTypes> {
     /// Float tensor primitive.
     Float(B::FloatTensorPrimitive),
     /// Quantized float tensor primitive.
@@ -16,7 +15,7 @@ impl<B: Backend> TensorPrimitive<B> {
     pub fn tensor(self) -> B::FloatTensorPrimitive {
         match self {
             Self::QFloat(tensor) => {
-                let dtype = get_device_settings::<B>(&B::q_device(&tensor)).float_dtype;
+                let dtype = get_device_settings::<B>(&tensor.device()).float_dtype;
                 B::dequantize(tensor, dtype)
             }
             Self::Float(tensor) => tensor,
@@ -32,7 +31,9 @@ impl<B: Backend> TensorPrimitive<B> {
     }
 }
 
-impl<B: Backend> TensorMetadata for TensorPrimitive<B> {
+impl<B: BackendTypes> TensorMetadata for TensorPrimitive<B> {
+    type Device = B::Device;
+
     fn dtype(&self) -> DType {
         match self {
             TensorPrimitive::Float(tensor) => tensor.dtype(),
@@ -53,36 +54,38 @@ impl<B: Backend> TensorMetadata for TensorPrimitive<B> {
             TensorPrimitive::QFloat(tensor) => tensor.rank(),
         }
     }
+    fn device(&self) -> Self::Device {
+        match self {
+            TensorPrimitive::Float(tensor) => tensor.device(),
+            TensorPrimitive::QFloat(tensor) => tensor.device(),
+        }
+    }
 }
 
 /// Tensor metadata trait for tensor primitive.
 pub trait TensorMetadata: Clone + Send + Sync + core::fmt::Debug {
-    /// The dtype of the tensor.
+    /// The device type associated with the tensor.
+    type Device: DeviceOps;
+    /// Get the dtype of the tensor.
     fn dtype(&self) -> DType;
-    /// The shape of the tensor.
+    /// Get the shape of the tensor.
     fn shape(&self) -> Shape;
 
-    /// The number of dimensions of the tensor.
+    /// Get the number of dimensions of the tensor.
     fn rank(&self) -> usize {
         self.shape().num_dims()
     }
-}
+    /// Get the device associated with the tensor.
+    fn device(&self) -> Self::Device;
 
-/// Quantized tensor primitive.
-pub trait QTensorPrimitive {
-    /// Returns the quantization settings for the given tensor.
-    fn scheme(&self) -> &QuantScheme;
-    /// The precision used for the accumulation in various kernels.
-    fn acc_precision(&self) -> QuantAcc {
-        QuantAcc::F32
-    }
-    /// How quantization is propagated during computation.
-    fn propagation(&self) -> QuantPropagation {
-        QuantPropagation::Inhibit
-    }
-
-    /// Returns the default tensor quantization scheme.
-    fn default_scheme() -> QuantScheme {
-        QuantScheme::default()
+    /// Get the [quantization scheme](QuantScheme) for a quantized float tensor.
+    ///
+    /// # Panics
+    /// Panics if the tensor is not quantized.
+    fn scheme(&self) -> QuantScheme {
+        match self.dtype() {
+            DType::QFloat(scheme) => scheme,
+            other => panic!("Quantization scheme is not valid for dtype {other:?}"),
+        }
     }
 }

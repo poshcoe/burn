@@ -4,7 +4,7 @@ use crate::{
     stream::{Context, OrderedExecution},
 };
 use burn_backend::{
-    Backend, DType, DeviceOps, ExecutionError,
+    Backend, BackendTypes, DType, DeviceOps, ExecutionError,
     tensor::{BoolTensor, Device, FloatTensor, IntTensor, QuantizedTensor},
 };
 use burn_ir::{BackendIr, OperationIr, TensorHandle};
@@ -22,23 +22,16 @@ pub struct Fusion<B: FusionBackend> {
     _backend: PhantomData<B>,
 }
 
-impl<B: FusionBackend> Backend for Fusion<B> {
+impl<B: FusionBackend> BackendTypes for Fusion<B> {
     type Device = B::Device;
 
     type FloatTensorPrimitive = FusionTensor<B::FusionRuntime>;
-
-    type FloatElem = B::FloatElem;
-
     type IntTensorPrimitive = FusionTensor<B::FusionRuntime>;
-
-    type IntElem = B::IntElem;
-
     type BoolTensorPrimitive = FusionTensor<B::FusionRuntime>;
-
-    type BoolElem = B::BoolElem;
-
     type QuantizedTensorPrimitive = FusionTensor<B::FusionRuntime>;
+}
 
+impl<B: FusionBackend> Backend for Fusion<B> {
     fn name(device: &Self::Device) -> String {
         format!("fusion<{}>", B::name(device))
     }
@@ -92,6 +85,12 @@ impl<B: FusionBackend> Backend for Fusion<B> {
 
     fn device_count(type_id: u16) -> usize {
         B::device_count(type_id)
+    }
+
+    fn flush(device: &Self::Device) {
+        let client = GlobalFusionClient::<B::FusionRuntime>::load(device);
+        let device = device.clone();
+        client.sync(move || B::flush(&device))
     }
 }
 
@@ -154,6 +153,8 @@ pub trait NumOperations: core::fmt::Debug {
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
+    /// The name of the optimization.
+    fn name(&self) -> &'static str;
 }
 
 /// The optimization created from a [fuser](OperationFuser).
@@ -187,10 +188,31 @@ pub trait FusionRuntime: Send + Sync + Sized + core::fmt::Debug + 'static {
 
     /// The list of fusers that will be used to optimize the computational graph.
     fn fusers(device: Self::FusionDevice) -> Vec<Box<dyn OperationFuser<Self::Optimization>>>;
+
+    /// Create a cross-stream alias of `handle` to register under a fresh tensor id.
+    ///
+    /// Called by [`MultiStream::tag_shared_view`](crate::stream::MultiStream::tag_shared_view) when
+    /// a tensor is shared from one stream to another. The new handle must be an *independent*
+    /// container entry over the *same* backing buffer, so that consuming one alias (a `ReadWrite`
+    /// last-use that frees its handle) never frees the buffer out from under the other stream.
+    ///
+    /// The default just clones the handle, which is exactly right for local backends whose handle
+    /// is an `Arc`-style refcount over a device buffer — the clone is a new map entry sharing the
+    /// allocation. Backends whose handle is a *remote* resource (the router/remote backend, where
+    /// the handle is a thin id pointing at a server-side tensor) must override this: a bare clone
+    /// keeps the same server id, so all aliases collapse to one server handle and the first consume
+    /// frees it for everyone. Such backends allocate a fresh server id aliasing the same buffer.
+    fn alias_handle(handle: &Self::FusionHandle) -> Self::FusionHandle {
+        handle.clone()
+    }
 }
 
 /// Trait that allows an existing [backend](Backend) to specify graph optimizations using
 /// [operation fuser](crate::OperationFuser).
+///
+/// Collective operations on the remote/router interpreter path are driven through the
+/// [`DistributedOps`](burn_backend::distributed::DistributedOps) supertrait of [`Backend`], which
+/// every fusion backend satisfies unconditionally.
 pub trait FusionBackend:
     BackendIr<Handle = FusionHandle<Self::FusionRuntime>, Device = FusionDevice<Self::FusionRuntime>>
 {

@@ -6,13 +6,30 @@ macro_rules! backend_list {
             $($extra)*;
             [Cpu, feature = "cpu"],
             [Cuda, feature = "cuda"],
-            [Metal, wgpu_metal],
+            [Metal, feature = "metal"],
             [Rocm, feature = "rocm"],
-            [Vulkan, wgpu_vulkan],
-            [Wgpu, wgpu_webgpu],
-            [Flex, feature = "flex"],
+            [Vulkan, feature = "vulkan"],
+            [Wgpu, feature = "wgpu"],
+            [WebGpu, feature = "webgpu"],
+            [Flex, any(feature = "flex", default_backend)],
             [NdArray, feature = "ndarray"],
-            [LibTorch, feature = "tch"]
+            [LibTorch, feature = "tch"],
+            [Remote, feature = "remote"]
+        }
+    };
+}
+
+/// Supplies a list of all supported distributed backends and their corresponding feature flags
+/// to a callback macro. This centralizes the backend registry.
+macro_rules! distributed_backend_list {
+    ($callback:ident, $($extra:tt)*) => {
+        $callback! {
+            $($extra)*;
+            // The cubecl CudaServer implements the distributed communication directly; the remote
+            // backend forwards the collective operations to its server (which runs a real
+            // distributed backend).
+            [Cuda, feature = "cuda"],
+            [Remote, feature = "remote"]
         }
     };
 }
@@ -22,36 +39,41 @@ macro_rules! backend_matrix {
     ($callback:ident, $($extra:tt)*) => {
         $callback! {
             $($extra)*;
-            [Cpu, feature = "cpu"] => [[Cuda, feature = "cuda"], [Metal, wgpu_metal], [Rocm, feature = "rocm"], [Vulkan, wgpu_vulkan], [Wgpu, wgpu_webgpu], [Flex, feature = "flex"], [NdArray, feature = "ndarray"], [LibTorch, feature = "tch"]];
-            [Cuda, feature = "cuda"] => [[Cpu, feature = "cpu"], [Metal, wgpu_metal], [Rocm, feature = "rocm"], [Vulkan, wgpu_vulkan], [Wgpu, wgpu_webgpu], [Flex, feature = "flex"], [NdArray, feature = "ndarray"], [LibTorch, feature = "tch"]];
-            [Metal, wgpu_metal] => [[Cpu, feature = "cpu"], [Cuda, feature = "cuda"], [Rocm, feature = "rocm"], [Flex, feature = "flex"], [NdArray, feature = "ndarray"], [LibTorch, feature = "tch"]];
-            [Rocm, feature = "rocm"] => [[Cpu, feature = "cpu"], [Cuda, feature = "cuda"], [Metal, wgpu_metal], [Vulkan, wgpu_vulkan], [Wgpu, wgpu_webgpu], [Flex, feature = "flex"], [NdArray, feature = "ndarray"], [LibTorch, feature = "tch"]];
-            [Vulkan, wgpu_vulkan] => [[Cpu, feature = "cpu"], [Cuda, feature = "cuda"], [Rocm, feature = "rocm"], [Flex, feature = "flex"], [NdArray, feature = "ndarray"], [LibTorch, feature = "tch"]];
-            [Wgpu, wgpu_webgpu] => [[Cpu, feature = "cpu"], [Cuda, feature = "cuda"], [Rocm, feature = "rocm"], [Flex, feature = "flex"], [NdArray, feature = "ndarray"], [LibTorch, feature = "tch"]];
-            [Flex, feature = "flex"] => [[Cpu, feature = "cpu"], [Cuda, feature = "cuda"], [Metal, wgpu_metal], [Rocm, feature = "rocm"], [Vulkan, wgpu_vulkan], [Wgpu, wgpu_webgpu], [NdArray, feature = "ndarray"], [LibTorch, feature = "tch"]];
-            [NdArray, feature = "ndarray"] => [[Cpu, feature = "cpu"], [Cuda, feature = "cuda"], [Metal, wgpu_metal], [Rocm, feature = "rocm"], [Vulkan, wgpu_vulkan], [Wgpu, wgpu_webgpu], [Flex, feature = "flex"], [LibTorch, feature = "tch"]];
-            [LibTorch, feature = "tch"] => [[Cpu, feature = "cpu"], [Cuda, feature = "cuda"], [Metal, wgpu_metal], [Rocm, feature = "rocm"], [Vulkan, wgpu_vulkan], [Wgpu, wgpu_webgpu], [Flex, feature = "flex"], [NdArray, feature = "ndarray"]]
+            [Cpu, feature = "cpu"] => [[Cuda, feature = "cuda"], [Metal, feature = "metal"], [Rocm, feature = "rocm"], [Vulkan, feature = "vulkan"], [Wgpu, feature = "wgpu"], [WebGpu, feature = "webgpu"], [Flex, any(feature = "flex", default_backend)], [NdArray, feature = "ndarray"], [LibTorch, feature = "tch"], [Remote, feature = "remote"]];
+            [Cuda, feature = "cuda"] => [[Cpu, feature = "cpu"], [Metal, feature = "metal"], [Rocm, feature = "rocm"], [Vulkan, feature = "vulkan"], [Wgpu, feature = "wgpu"], [WebGpu, feature = "webgpu"], [Flex, any(feature = "flex", default_backend)], [NdArray, feature = "ndarray"], [LibTorch, feature = "tch"], [Remote, feature = "remote"]];
+            [Metal, feature = "metal"] => [[Cpu, feature = "cpu"], [Cuda, feature = "cuda"], [Rocm, feature = "rocm"], [Vulkan, feature = "vulkan"], [Wgpu, feature = "wgpu"], [WebGpu, feature = "webgpu"], [Flex, any(feature = "flex", default_backend)], [NdArray, feature = "ndarray"], [LibTorch, feature = "tch"], [Remote, feature = "remote"]];
+            [Rocm, feature = "rocm"] => [[Cpu, feature = "cpu"], [Cuda, feature = "cuda"], [Metal, feature = "metal"], [Vulkan, feature = "vulkan"], [Wgpu, feature = "wgpu"], [WebGpu, feature = "webgpu"], [Flex, any(feature = "flex", default_backend)], [NdArray, feature = "ndarray"], [LibTorch, feature = "tch"], [Remote, feature = "remote"]];
+            [Vulkan, feature = "vulkan"] => [[Cpu, feature = "cpu"], [Cuda, feature = "cuda"], [Metal, feature = "metal"], [Rocm, feature = "rocm"], [Wgpu, feature = "wgpu"], [WebGpu, feature = "webgpu"], [Flex, any(feature = "flex", default_backend)], [NdArray, feature = "ndarray"], [LibTorch, feature = "tch"], [Remote, feature = "remote"]];
+            [Wgpu, feature = "wgpu"] => [[Cpu, feature = "cpu"], [Cuda, feature = "cuda"], [Metal, feature = "metal"], [Rocm, feature = "rocm"], [Vulkan, feature = "vulkan"], [WebGpu, feature = "webgpu"], [Flex, any(feature = "flex", default_backend)], [NdArray, feature = "ndarray"], [LibTorch, feature = "tch"], [Remote, feature = "remote"]];
+            [WebGpu, feature = "webgpu"] => [[Cpu, feature = "cpu"], [Cuda, feature = "cuda"], [Metal, feature = "metal"], [Rocm, feature = "rocm"], [Vulkan, feature = "vulkan"], [Wgpu, feature = "wgpu"], [Flex, any(feature = "flex", default_backend)], [NdArray, feature = "ndarray"], [LibTorch, feature = "tch"], [Remote, feature = "remote"]];
+            [Flex, any(feature = "flex", default_backend)] => [[Cpu, feature = "cpu"], [Cuda, feature = "cuda"], [Metal, feature = "metal"], [Rocm, feature = "rocm"], [Vulkan, feature = "vulkan"], [Wgpu, feature = "wgpu"], [WebGpu, feature = "webgpu"], [NdArray, feature = "ndarray"], [LibTorch, feature = "tch"], [Remote, feature = "remote"]];
+            [NdArray, feature = "ndarray"] => [[Cpu, feature = "cpu"], [Cuda, feature = "cuda"], [Metal, feature = "metal"], [Rocm, feature = "rocm"], [Vulkan, feature = "vulkan"], [Wgpu, feature = "wgpu"], [WebGpu, feature = "webgpu"], [Flex, any(feature = "flex", default_backend)], [LibTorch, feature = "tch"], [Remote, feature = "remote"]];
+            [LibTorch, feature = "tch"] => [[Cpu, feature = "cpu"], [Cuda, feature = "cuda"], [Metal, feature = "metal"], [Rocm, feature = "rocm"], [Vulkan, feature = "vulkan"], [Wgpu, feature = "wgpu"], [WebGpu, feature = "webgpu"], [Flex, any(feature = "flex", default_backend)], [NdArray, feature = "ndarray"], [Remote, feature = "remote"]];
+            [Remote, feature = "remote"] => [[Cpu, feature = "cpu"], [Cuda, feature = "cuda"], [Metal, feature = "metal"], [Rocm, feature = "rocm"], [Vulkan, feature = "vulkan"], [Wgpu, feature = "wgpu"], [WebGpu, feature = "webgpu"], [Flex, any(feature = "flex", default_backend)], [NdArray, feature = "ndarray"], [LibTorch, feature = "tch"]]
         }
     };
 }
 
-/// Helper to map the runtime strategy to the compile-time Autodiff generic.
 #[cfg(feature = "autodiff")]
+/// Helper to map the runtime strategy to the compile-time Autodiff generic.
 macro_rules! with_autodiff_backend {
     ($Backend:ident, $checkpointing:expr, |$B:ident| $body:expr) => {
         match $checkpointing {
-            $crate::CheckpointingStrategy::Balanced => {
-                type $B = Autodiff<
-                    $Backend<f32>,
+            Some($crate::CheckpointingStrategy::Balanced) => {
+                type $B = $crate::backends::Autodiff<
+                    $crate::backends::$Backend,
                     burn_autodiff::checkpoint::strategy::BalancedCheckpointing,
                 >;
                 $body
             }
-            $crate::CheckpointingStrategy::None => {
-                type $B =
-                    Autodiff<$Backend<f32>, burn_autodiff::checkpoint::strategy::NoCheckpointing>;
+            Some($crate::CheckpointingStrategy::None) => {
+                type $B = $crate::backends::Autodiff<
+                    $crate::backends::$Backend,
+                    burn_autodiff::checkpoint::strategy::NoCheckpointing,
+                >;
                 $body
             }
+            None => unreachable!("Should only be called with autodiff."),
         }
     };
 }
@@ -79,10 +101,12 @@ macro_rules! dispatch_device_arms {
             $(
                 #[cfg($cfg)]
                 $crate::DispatchDevice::$Backend($inner) => {
-                    type B = $Backend<f32>;
+                    type B = $crate::backends::$Backend;
                     $body
                 }
             )*
+            #[allow(unreachable_patterns)]
+            other => panic!("Distributed operations are not supported for device {other:?}"),
         }
     };
     (
@@ -95,11 +119,13 @@ macro_rules! dispatch_device_arms {
             $(
                 #[cfg($cfg)]
                 $crate::DispatchDevice::$Backend($inner) => {
-                    type B = Autodiff<$Backend<f32>>;
+                    type B = $crate::backends::Autodiff<$crate::backends::$Backend>;
                     $body
                 }
             )*
-            $crate::DispatchDevice::Autodiff(_) => panic!("Autodiff should not wrap an autodiff device.")
+            $crate::DispatchDevice::Autodiff(_) => unreachable!("Autodiff should not wrap an autodiff device."),
+            #[allow(unreachable_patterns)]
+            other => panic!("Distributed operations are not supported for device {other:?}"),
         }
     };
 }
@@ -107,7 +133,13 @@ macro_rules! dispatch_device_arms {
 /// Dispatches an operation body based on the provided device.
 macro_rules! dispatch_device {
     ($device:expr, |$inner:ident| $body:expr) => {
-        backend_list!(dispatch_device_arms, $device, |$inner| $body)
+        dispatch_device!(@internal backend_list, $device, |$inner| $body)
+    };
+    (@distributed $device:expr, |$inner:ident| $body:expr) => {
+        dispatch_device!(@internal distributed_backend_list, $device, |$inner| $body)
+    };
+    (@internal $list_macro:ident, $device:expr, |$inner:ident| $body:expr) => {
+        $list_macro!(dispatch_device_arms, $device, |$inner| $body)
     };
 }
 
@@ -123,12 +155,11 @@ macro_rules! to_device_arms {
             // --- Same backend to_device ---
             $(
                 #[cfg($src_cfg)]
-                ($crate::DispatchTensorKind::$B1(tensor), $crate::DispatchDevice::$B1(d)) => {
+                ($crate::DispatchTensorKind::$B1(t), $crate::DispatchDevice::$B1(d)) => {
                     $crate::DispatchTensor {
                         kind: $crate::DispatchTensorKind::$B1($crate::BackendTensor::$kind(
-                            $B1::<f32>::$to_device(tensor.$inner_fn(), d)
+                            $crate::backends::$B1::$to_device(t.$inner_fn(), d)
                         )),
-                        #[cfg(feature = "autodiff")]
                         checkpointing: $tensor.checkpointing,
                     }
                 }
@@ -139,23 +170,65 @@ macro_rules! to_device_arms {
             $(
                 $(
                     #[cfg(all($src_cfg, $dst_cfg))]
-                    ($crate::DispatchTensorKind::$B1(tensor), $crate::DispatchDevice::$B2($device_ident)) => {
-                        type B1 = $B1<f32>;
-                        type B2 = $B2<f32>;
+                    ($crate::DispatchTensorKind::$B1(t), $crate::DispatchDevice::$B2($device_ident)) => {
+                        type B1 = $crate::backends::$B1;
+                        type B2 = $crate::backends::$B2;
+                        let $inner = t.$inner_fn();
+
+                        $crate::DispatchTensor {
+                            kind: $crate::DispatchTensorKind::$B2(
+                                $crate::BackendTensor::$kind($body)
+                            ),
+                            checkpointing: $tensor.checkpointing,
+                        }
+                    }
+                )+
+            )*
+            // --- To autodiff ---
+            // This can happen when moving a bool or int tensor to the device of a float autodiff tensor.
+            // We move it to the inner device and preserve the checkpointing strategy.
+
+            // --- Same backend to_device ---
+            $(
+                #[cfg(all($src_cfg, feature = "autodiff"))]
+                ($crate::DispatchTensorKind::$B1(t), $crate::DispatchDevice::Autodiff(device_ad))
+                if matches!(&*device_ad.inner, $crate::DispatchDevice::$B1(_)) => {
+                    let $crate::DispatchDevice::$B1(d) = &*device_ad.inner else { unreachable!() };
+
+                    $crate::DispatchTensor {
+                        kind: $crate::DispatchTensorKind::$B1($crate::BackendTensor::$kind(
+                            <$crate::backends::$B1>::$to_device(t.$inner_fn(), d)
+                        )),
+                        checkpointing: Some(device_ad.checkpointing),
+                    }
+                }
+            )*
+
+            // --- Same backend to_device ---
+            $(
+                $(
+                    #[cfg(all($src_cfg, $dst_cfg, feature = "autodiff"))]
+                    ($crate::DispatchTensorKind::$B1(tensor), $crate::DispatchDevice::Autodiff(device_ad))
+                    if matches!(&*device_ad.inner, $crate::DispatchDevice::$B2(_)) => {
+                        let $crate::DispatchDevice::$B2($device_ident) = &*device_ad.inner else { unreachable!() };
+                        type B1 = $crate::backends::$B1;
+                        type B2 = $crate::backends::$B2;
                         let $inner = tensor.$inner_fn();
 
                         $crate::DispatchTensor {
                             kind: $crate::DispatchTensorKind::$B2(
                                 $crate::BackendTensor::$kind($body)
                             ),
-                            #[cfg(feature = "autodiff")]
-                            checkpointing: $tensor.checkpointing,
+                            checkpointing: Some(device_ad.checkpointing),
                         }
-                    }
+
+                    },
                 )+
             )*
             #[cfg(feature = "autodiff")]
-            (_, $crate::DispatchDevice::Autodiff(_)) | ($crate::DispatchTensorKind::Autodiff(..), _) => panic!("Operation not marked for autodiff.")
+            (_, $crate::DispatchDevice::Autodiff(_)) => unreachable!("Autodiff should not wrap an autodiff device."),
+            #[cfg(feature = "autodiff")]
+            ($crate::DispatchTensorKind::Autodiff(..), _) => panic!("Operation not marked for autodiff.")
         }
     };
 }
@@ -201,9 +274,8 @@ macro_rules! float_to_device_arms {
                 ($crate::DispatchTensorKind::$B1(kind), $crate::DispatchDevice::$B1(d)) => {
                     $crate::DispatchTensor {
                         kind: $crate::DispatchTensorKind::$B1($crate::BackendTensor::Float(
-                            $B1::<f32>::$to_device(kind.float(), d)
+                            $crate::backends::$B1::$to_device(kind.float(), d)
                         )),
-                        #[cfg(feature = "autodiff")]
                         checkpointing: $tensor.checkpointing,
                     }
                 }
@@ -215,13 +287,12 @@ macro_rules! float_to_device_arms {
                 $(
                     #[cfg(all($src_cfg, $dst_cfg))]
                     ($crate::DispatchTensorKind::$B1(kind), $crate::DispatchDevice::$B2($device_ident)) => {
-                        type B1 = $B1<f32>;
-                        type B2 = $B2<f32>;
+                        type B1 = $crate::backends::$B1;
+                        type B2 = $crate::backends::$B2;
                         let $inner = kind.float();
 
                         $crate::DispatchTensor {
                             kind: $crate::DispatchTensorKind::$B2($crate::BackendTensor::Float($body)),
-                            #[cfg(feature = "autodiff")]
                             checkpointing: $tensor.checkpointing,
                         }
                     }
@@ -251,6 +322,7 @@ macro_rules! float_to_device_arms {
                     $crate::DispatchTensor {kind, checkpointing: $ckp}
                 }
             )*
+            // TODO: should be possible
             (_, _) => unimplemented!("Autodiff tensor cannot be moved between backends.")
         }
     }};
@@ -296,7 +368,7 @@ macro_rules! creation_op_arms {
                     @autodiff
                     $kind,
                     &**inner,
-                    inner.checkpointing,
+                    Some(inner.checkpointing),
                     |$inner| $body;
                     $([$Backend, $cfg]),*
                 )
@@ -304,14 +376,12 @@ macro_rules! creation_op_arms {
             $(
                 #[cfg($cfg)]
                 $crate::DispatchDevice::$Backend($inner) => {
-                    type B = $Backend<f32>;
+                    type B = $crate::backends::$Backend;
                     $crate::DispatchTensor {
                         kind: $crate::DispatchTensorKind::$Backend(
                             $crate::BackendTensor::$kind($body)
                         ),
-                        // TODO: hmmm should devices also carry the checkpointing all the time?
-                        #[cfg(feature = "autodiff")]
-                        checkpointing: $crate::CheckpointingStrategy::None,
+                        checkpointing: None,
                     }
                 }
             )*
@@ -335,7 +405,7 @@ macro_rules! creation_op_arms {
                     })
                 }
             )*
-            $crate::DispatchDevice::Autodiff(_) => panic!("Autodiff should not wrap an autodiff device.")
+            $crate::DispatchDevice::Autodiff(_) => unreachable!("Autodiff should not wrap an autodiff device.")
         }
     }};
 }
@@ -377,24 +447,62 @@ macro_rules! wrap_float {
 /// When the return kind is provided, the result is wrapped in the corresponding `DispatchTensor` variant.
 macro_rules! unary_op_arms {
     (
-        $kind:ident,
+        Float, // handle autodiff wrapped tensors for float return kind (e.g. int_into_float)
         $inner_kind:ident,
         $tensor:expr,
         |$inner:ident| $body:expr;
         $([$Backend:ident, $cfg:meta]),*
     ) => {{
-        #[cfg(feature = "autodiff")]
         let checkpointing = $tensor.checkpointing;
 
         match $tensor.kind {
             $(
                 #[cfg($cfg)]
                 $crate::DispatchTensorKind::$Backend($inner) => {
-                    type B = $Backend<f32>;
+                    type B = $crate::backends::$Backend;
+                    let $inner = $inner.$inner_kind();
+
+                    #[cfg(feature = "autodiff")]
+                    if checkpointing.is_some() {
+                        with_autodiff_backend!($Backend, checkpointing, |B| {
+                            wrap_float!(@wrap_autodiff Float, $Backend, checkpointing, { $body })
+                        })
+                    } else {
+                        $crate::DispatchTensor {
+                            kind: $crate::DispatchTensorKind::$Backend($crate::BackendTensor::Float($body)),
+                            checkpointing,
+                        }
+                    }
+
+                    #[cfg(not(feature = "autodiff"))]
+                    $crate::DispatchTensor {
+                        kind: $crate::DispatchTensorKind::$Backend($crate::BackendTensor::Float($body)),
+                        checkpointing,
+                    }
+                }
+            )*
+            #[cfg(feature = "autodiff")]
+            $crate::DispatchTensorKind::Autodiff(..) => panic!("Operation not marked for autodiff.")
+        }
+    }};
+
+    (
+        $kind:ident,
+        $inner_kind:ident,
+        $tensor:expr,
+        |$inner:ident| $body:expr;
+        $([$Backend:ident, $cfg:meta]),*
+    ) => {{
+        let checkpointing = $tensor.checkpointing;
+
+        match $tensor.kind {
+            $(
+                #[cfg($cfg)]
+                $crate::DispatchTensorKind::$Backend($inner) => {
+                    type B = $crate::backends::$Backend;
                     let $inner = $inner.$inner_kind();
                     $crate::DispatchTensor {
                         kind: $crate::DispatchTensorKind::$Backend($crate::BackendTensor::$kind($body)),
-                        #[cfg(feature = "autodiff")]
                         checkpointing,
                     }
                 }
@@ -415,7 +523,7 @@ macro_rules! unary_op_arms {
             $(
                 #[cfg($cfg)]
                 $crate::DispatchTensorKind::$Backend($inner) => {
-                    type B = $Backend<f32>;
+                    type B = $crate::backends::$Backend;
                     let $inner = $inner.$inner_kind();
                     $body
                 }
@@ -452,7 +560,6 @@ macro_rules! unary_float_arms {
         |$inner:ident| $body:expr;
         $([$Backend:ident, $cfg:meta]),*
     ) => {{
-        #[cfg(feature = "autodiff")]
         let checkpointing = $tensor.checkpointing;
 
         match $tensor.kind {
@@ -470,17 +577,18 @@ macro_rules! unary_float_arms {
             $(
                 #[cfg($cfg)]
                 $crate::DispatchTensorKind::$Backend($inner) => {
-                    type B = $Backend<f32>;
+                    type B = $crate::backends::$Backend;
                     let $inner = unary_float_arms!(@unwrap $mode, $inner, $inner_kind);
                     $crate::DispatchTensor {
                         kind: $crate::DispatchTensorKind::$Backend(
                             $crate::BackendTensor::$kind($body)
                         ),
-                        #[cfg(feature = "autodiff")]
                         checkpointing,
                     }
                 }
             )*
+            #[allow(unreachable_patterns)]
+            other => panic!("Distributed operations are not supported for tensor kind {other:?}"),
         }
     }};
 
@@ -503,7 +611,9 @@ macro_rules! unary_float_arms {
                     })
                 }
             )*
-            $crate::DispatchTensorKind::Autodiff(..) => panic!("Autodiff should not wrap an autodiff tensor.")
+            $crate::DispatchTensorKind::Autodiff(..) => unreachable!("Autodiff should not wrap an autodiff tensor."),
+            #[allow(unreachable_patterns)]
+            other => panic!("Distributed operations are not supported for tensor kind {other:?}"),
         }
     }};
 
@@ -532,11 +642,13 @@ macro_rules! unary_float_arms {
             $(
                 #[cfg($cfg)]
                 $crate::DispatchTensorKind::$Backend($inner) => {
-                    type B = $Backend<f32>;
+                    type B = $crate::backends::$Backend;
                     let $inner = unary_float_arms!(@unwrap $mode, $inner, $inner_kind);
                     $body
                 }
             )*
+            #[allow(unreachable_patterns)]
+            other => panic!("Distributed operations are not supported for tensor kind {other:?}"),
         }
     }};
     (
@@ -556,7 +668,9 @@ macro_rules! unary_float_arms {
                     })
                 }
             )*
-            $crate::DispatchTensorKind::Autodiff(..) => panic!("Autodiff should not wrap an autodiff tensor.")
+            $crate::DispatchTensorKind::Autodiff(..) => unreachable!("Autodiff should not wrap an autodiff tensor."),
+            #[allow(unreachable_patterns)]
+            other => panic!("Distributed operations are not supported for tensor kind {other:?}"),
         }
     }};
 
@@ -585,9 +699,25 @@ macro_rules! if_mode {
 ///
 /// When the return `=> Kind` is not provided, the operation output is not wrapped in a dispatch tensor (e.g., `into_data(..)`)
 macro_rules! unary_float {
-    // Owned with return kind
+    // --- Entrypoints that default to standard backend_list ---
     ($tensor:expr, $inner_kind:ident, |$inner:ident| $body:expr => $kind:ident) => {
-        backend_list!(
+        unary_float!(@internal backend_list, $tensor, $inner_kind, |$inner| $body => $kind)
+    };
+    ($tensor:expr, $inner_kind:ident, |$inner:ident| $body:expr) => {
+        unary_float!(@internal backend_list, $tensor, $inner_kind, |$inner| $body)
+    };
+    (ref $tensor:expr, $inner_kind:ident, |$inner:ident| $body:expr) => {
+        unary_float!(@internal backend_list, ref $tensor, $inner_kind, |$inner| $body)
+    };
+
+    // --- Distributed entrypoint ---
+    (@distributed $tensor:expr, $inner_kind:ident, |$inner:ident| $body:expr => $kind:ident) => {
+        unary_float!(@internal distributed_backend_list, $tensor, $inner_kind, |$inner| $body => $kind)
+    };
+
+    // --- Internal implementation workers that accept the list macro dynamically ---
+    (@internal $list_macro:ident, $tensor:expr, $inner_kind:ident, |$inner:ident| $body:expr => $kind:ident) => {
+        $list_macro!(
             unary_float_arms,
             owned,
             $kind,
@@ -596,15 +726,13 @@ macro_rules! unary_float {
             |$inner| { $body }
         )
     };
-    // Owned without return kind
-    ($tensor:expr, $inner_kind:ident, |$inner:ident| $body:expr) => {
-        backend_list!(unary_float_arms, owned, $inner_kind, $tensor, |$inner| {
+    (@internal $list_macro:ident, $tensor:expr, $inner_kind:ident, |$inner:ident| $body:expr) => {
+        $list_macro!(unary_float_arms, owned, $inner_kind, $tensor, |$inner| {
             $body
         })
     };
-    // Reference without return kind
-    (ref $tensor:expr, $inner_kind:ident, |$inner:ident| $body:expr) => {
-        backend_list!(unary_float_arms, ref, $inner_kind, $tensor, |$inner| {
+    (@internal $list_macro:ident, ref $tensor:expr, $inner_kind:ident, |$inner:ident| $body:expr) => {
+        $list_macro!(unary_float_arms, ref, $inner_kind, $tensor, |$inner| {
             $body
         })
     };
@@ -622,17 +750,19 @@ macro_rules! binary_op_arms {
     ) => {{
         #[cfg(feature = "autodiff")]
         let checkpointing = $crate::validate_checkpointing($lhs.checkpointing, $rhs.checkpointing);
+        #[cfg(not(feature = "autodiff"))]
+        let checkpointing = $lhs.checkpointing;
 
         match ($lhs.kind, $rhs.kind) {
             $(
                 #[cfg($cfg)]
                 ($crate::DispatchTensorKind::$Backend($lhs_inner), $crate::DispatchTensorKind::$Backend($rhs_inner)) => {
-                    type B = $Backend<f32>;
+                    type B = $crate::backends::$Backend;
                     let $lhs_inner = $lhs_inner.$lhs_kind();
                     let $rhs_inner = $rhs_inner.$rhs_kind();
                     $crate::DispatchTensor {
                         kind: $crate::DispatchTensorKind::$Backend($crate::BackendTensor::$kind($body)),
-                        #[cfg(feature = "autodiff")]
+
                         checkpointing,
                     }
                 }
@@ -674,6 +804,8 @@ macro_rules! binary_float_arms {
     ) => {{
         #[cfg(feature = "autodiff")]
         let checkpointing = $crate::validate_checkpointing($lhs.checkpointing, $rhs.checkpointing);
+        #[cfg(not(feature = "autodiff"))]
+        let checkpointing = $lhs.checkpointing;
 
         match ($lhs.kind, $rhs.kind) {
             // Autodiff arms first
@@ -692,12 +824,11 @@ macro_rules! binary_float_arms {
             $(
                 #[cfg($cfg)]
                 ($crate::DispatchTensorKind::$Backend($lhs_inner), $crate::DispatchTensorKind::$Backend($rhs_inner)) => {
-                    type B = $Backend<f32>;
+                    type B = $crate::backends::$Backend;
                     let $lhs_inner = $lhs_inner.float();
                     let $rhs_inner = $rhs_inner.float();
                     $crate::DispatchTensor {
                         kind: $crate::DispatchTensorKind::$Backend($crate::BackendTensor::$kind($body)),
-                        #[cfg(feature = "autodiff")]
                         checkpointing,
                     }
                 }
@@ -720,6 +851,8 @@ macro_rules! binary_float_arms {
     ) => {{
         #[cfg(feature = "autodiff")]
         let checkpointing = $crate::validate_checkpointing($lhs.checkpointing, $rhs.checkpointing);
+        #[cfg(not(feature = "autodiff"))]
+        let checkpointing = $lhs.checkpointing;
 
         match ($lhs.kind, $rhs.kind) {
             $(
@@ -741,7 +874,7 @@ macro_rules! binary_float_arms {
                                 )
                             })
                         }
-                        $crate::DispatchTensorKind::Autodiff(..) => panic!("Autodiff should not wrap an autodiff tensor."),
+                        $crate::DispatchTensorKind::Autodiff(..) => unreachable!("Autodiff should not wrap an autodiff tensor."),
                         #[allow(unreachable_patterns)]
                         _ => panic!("The provided tensors are not on the same backend.")
                     }
@@ -749,12 +882,11 @@ macro_rules! binary_float_arms {
 
                 #[cfg($cfg)]
                 ($crate::DispatchTensorKind::$Backend($lhs_inner), $crate::DispatchTensorKind::$Backend($rhs_inner)) => {
-                    type B = $Backend<f32>;
+                    type B = $crate::backends::$Backend;
                     let $lhs_inner = $lhs_inner.float();
                     let $rhs_inner = $rhs_inner.$rhs_kind();
                     $crate::DispatchTensor {
                         kind: $crate::DispatchTensorKind::$Backend($crate::BackendTensor::$kind($body)),
-                        #[cfg(feature = "autodiff")]
                         checkpointing,
                     }
                 }
@@ -778,7 +910,7 @@ macro_rules! binary_float_arms {
             $(
                 #[cfg($cfg)]
                 ($crate::DispatchTensorKind::$Backend($lhs_inner), $crate::DispatchTensorKind::$Backend($rhs_inner)) => {
-                    type B = $Backend<f32>;
+                    type B = $crate::backends::$Backend;
                     let $lhs_inner = $lhs_inner.$lhs_kind();
                     let $rhs_inner = $rhs_inner.$rhs_kind();
                     $crate::DispatchTensorKind::$Backend($crate::BackendTensor::$kind($body))
@@ -818,7 +950,7 @@ macro_rules! binary_float_arms {
                 }
             )*
             #[cfg(feature = "autodiff")]
-            ($crate::DispatchTensorKind::Autodiff(..), _) | (_, $crate::DispatchTensorKind::Autodiff(..))  => panic!("Autodiff should not wrap an autodiff tensor."),
+            ($crate::DispatchTensorKind::Autodiff(..), _) | (_, $crate::DispatchTensorKind::Autodiff(..))  => unreachable!("Autodiff should not wrap an autodiff tensor."),
             #[allow(unreachable_patterns)]
             (lhs, rhs) => {
                 panic!(
@@ -857,7 +989,7 @@ macro_rules! multi_op_arm {
         [ $( $opt_out:ident ),* ],
         $body:expr
     ) => {{
-        type B = $Backend<f32>;
+        type B = $crate::backends::$Backend;
 
         // Required inputs
         $(
@@ -884,7 +1016,6 @@ macro_rules! multi_op_arm {
             $(
                 $crate::DispatchTensor {
                     kind: $crate::DispatchTensorKind::$Backend($crate::BackendTensor::$out_kind($out)),
-                    #[cfg(feature = "autodiff")]
                     checkpointing: $ckp,
                 }
             ),+,
@@ -892,7 +1023,6 @@ macro_rules! multi_op_arm {
                 $opt_out.map(|t|
                     $crate::DispatchTensor {
                         kind: $crate::DispatchTensorKind::$Backend($crate::BackendTensor::Float(t)),
-                        #[cfg(feature = "autodiff")]
                         checkpointing: $ckp,
                     }
                 )
@@ -927,7 +1057,7 @@ macro_rules! multi_op_arm_autodiff {
         [ $( $opt_out:ident ),* ],
         $body:expr
     ) => {{
-        // type B = Autodiff<$Backend<f32>>;
+        // type B = Autodiff<$Backend>;
         with_autodiff_backend!($Backend, $ckp, |B| {
             // Required inputs
             $(
@@ -990,7 +1120,6 @@ macro_rules! multi_op_arms_autodiff {
         $( [$Backend:ident, $cfg:meta] ),*
     ) => {{
         let first_input = &first_input!($inputs);
-        #[cfg(feature = "autodiff")]
         let checkpointing = first_input.checkpointing;
         match &first_input.kind {
             // Autodiff first
@@ -1011,7 +1140,7 @@ macro_rules! multi_op_arms_autodiff {
                             )
                         }
                     )*
-                    $crate::DispatchTensorKind::Autodiff(..) => panic!("Autodiff should not wrap an autodiff tensor.")
+                    $crate::DispatchTensorKind::Autodiff(..) => unreachable!("Autodiff should not wrap an autodiff tensor.")
                 }
             },
             $(
@@ -1045,11 +1174,7 @@ macro_rules! multi_op_arms {
         $( [$Backend:ident, $cfg:meta] ),*
     ) => {{
         let first_input = &first_input!($inputs);
-        #[cfg(feature = "autodiff")]
         let checkpointing = first_input.checkpointing;
-        #[cfg(not(feature = "autodiff"))]
-        #[allow(unused_variables)]
-        let checkpointing = false;
 
         match first_input.kind {
             $(
@@ -1219,7 +1344,6 @@ macro_rules! unwrap_vec {
 macro_rules! vec_op_arms {
     (Float, $inner_kind:ident, $tensors:expr, |$inner:ident| $body:expr; $([$Backend:ident, $cfg:meta]),*) => {{
         let first = &$tensors[0];
-        #[cfg(feature = "autodiff")]
         let checkpointing = first.checkpointing;
 
         match &first.kind {
@@ -1237,19 +1361,18 @@ macro_rules! vec_op_arms {
                         })
                     }
                 )*
-                    $crate::DispatchTensorKind::Autodiff(..) => panic!("Autodiff should not wrap an autodiff tensor.")
+                    $crate::DispatchTensorKind::Autodiff(..) => unreachable!("Autodiff should not wrap an autodiff tensor.")
                 }
             },
 
             $(
                 #[cfg($cfg)]
                 $crate::DispatchTensorKind::$Backend(_) => {
-                    type B = $Backend<f32>;
+                    type B = $crate::backends::$Backend;
 
                     let $inner = unwrap_vec!($Backend, $tensors, $inner_kind);
                     $crate::DispatchTensor {
                         kind: $crate::DispatchTensorKind::$Backend($crate::BackendTensor::Float($body)),
-                        #[cfg(feature = "autodiff")]
                         checkpointing,
                     }
                 }
@@ -1258,18 +1381,16 @@ macro_rules! vec_op_arms {
     }};
     ($kind:ident, $inner_kind:ident, $tensors:expr, |$inner:ident| $body:expr; $([$Backend:ident, $cfg:meta]),*) => {{
         let first = &$tensors[0];
-        #[cfg(feature = "autodiff")]
         let checkpointing = first.checkpointing;
         match first.kind {
             $(
                 #[cfg($cfg)]
                 $crate::DispatchTensorKind::$Backend(_) => {
-                    type B = $Backend<f32>;
+                    type B = $crate::backends::$Backend;
 
                     let $inner = unwrap_vec!($Backend, $tensors, $inner_kind);
                     $crate::DispatchTensor {
                         kind: $crate::DispatchTensorKind::$Backend($crate::BackendTensor::$kind($body)),
-                        #[cfg(feature = "autodiff")]
                         checkpointing,
                     }
                 }
@@ -1302,7 +1423,7 @@ macro_rules! transaction_op_arms {
                     $(
                     #[cfg($cfg)]
                     $crate::DispatchTensorKind::$Backend(_) => {
-                        type B = $Backend<f32>;
+                        type B = $crate::backends::$Backend;
 
                         // Unwrap vec
                         let floats = unwrap_vec!(@autodiff $Backend, $tx.read_floats, autodiff_inner);
@@ -1314,14 +1435,14 @@ macro_rules! transaction_op_arms {
                         B::tr_execute(TransactionPrimitive::new(floats, qfloats, ints, bools)).await
                     }
                 )*
-                    $crate::DispatchTensorKind::Autodiff(..) => panic!("Autodiff should not wrap an autodiff tensor.")
+                    $crate::DispatchTensorKind::Autodiff(..) => unreachable!("Autodiff should not wrap an autodiff tensor.")
                 }
             },
 
             $(
                 #[cfg($cfg)]
                 $crate::DispatchTensorKind::$Backend(_) => {
-                    type B = $Backend<f32>;
+                    type B = $crate::backends::$Backend;
 
                     // Unwrap vec
                     let floats = unwrap_vec!($Backend, $tx.read_floats, float);

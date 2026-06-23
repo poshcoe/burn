@@ -1,11 +1,11 @@
 use burn_core as burn;
 
+use crate::RecordState;
 use burn::config::Config;
-use burn::tensor::{Tensor, backend::AutodiffBackend};
-use burn::tensor::{backend::Backend, ops::Device};
-use burn::{module::AutodiffModule, record::Record};
+use burn::tensor::Device;
+use burn::tensor::Tensor;
 
-use super::{AdaptiveMomentumState, SimpleOptimizer, adaptor::OptimizerAdaptor};
+use super::{AdaptiveMomentumState, Optimizer, module_optimizer::ModuleOptimizer};
 use crate::{LearningRate, grad_clipping::GradientClippingConfig};
 
 #[cfg(not(feature = "std"))]
@@ -57,14 +57,14 @@ pub struct AdamW {
 }
 
 /// AdamW state.
-#[derive(Record, Clone, new)]
-pub struct AdamWState<B: Backend, const D: usize> {
+#[derive(RecordState, Clone, new)]
+pub struct AdamWState<const D: usize> {
     /// Th current adaptive momentum state.
-    pub momentum: AdaptiveMomentumState<B, D>,
+    pub momentum: AdaptiveMomentumState<D>,
 }
 
-impl<B: Backend> SimpleOptimizer<B> for AdamW {
-    type State<const D: usize> = AdamWState<B, D>;
+impl Optimizer for AdamW {
+    type State<const D: usize> = AdamWState<D>;
 
     /// A single optimization step for any tensor that represents the parameters of a model.
     fn step<const D: usize>(
@@ -72,12 +72,12 @@ impl<B: Backend> SimpleOptimizer<B> for AdamW {
         // Learning rate.
         lr: LearningRate,
         // Any tensor that represents the parameters of a model.
-        tensor: Tensor<B, D>,
+        tensor: Tensor<D>,
         // Gradient of the loss w.r.t. the parameters.
-        grad: Tensor<B, D>,
+        grad: Tensor<D>,
         // State of the optimizer.
         state: Option<Self::State<D>>,
-    ) -> (Tensor<B, D>, Option<Self::State<D>>) {
+    ) -> (Tensor<D>, Option<Self::State<D>>) {
         let (raw_delta, momentum_state) = self.momentum.transform(grad, state.map(|s| s.momentum));
 
         let decay_rate = lr * (self.weight_decay as f64);
@@ -106,7 +106,7 @@ impl<B: Backend> SimpleOptimizer<B> for AdamW {
         (tensor_updated, Some(state))
     }
 
-    fn to_device<const D: usize>(mut state: Self::State<D>, device: &Device<B>) -> Self::State<D> {
+    fn to_device<const D: usize>(mut state: Self::State<D>, device: &Device) -> Self::State<D> {
         state.momentum = state.momentum.to_device(device);
         state
     }
@@ -132,8 +132,8 @@ impl AdamWConfig {
     /// # Returns
     ///
     /// Returns an optimizer that can be used to optimize a module.
-    pub fn init<B: AutodiffBackend, M: AutodiffModule<B>>(&self) -> OptimizerAdaptor<AdamW, M, B> {
-        let mut optim = OptimizerAdaptor::from(self.build());
+    pub fn init(&self) -> ModuleOptimizer {
+        let mut optim = ModuleOptimizer::from(self.build());
         if let Some(config) = &self.grad_clipping {
             optim = optim.with_grad_clipping(config.init());
         }
@@ -150,11 +150,11 @@ struct AdaptiveMomentumW {
 }
 
 impl AdaptiveMomentumW {
-    pub fn transform<B: Backend, const D: usize>(
+    pub fn transform<const D: usize>(
         &self,
-        grad: Tensor<B, D>,
-        state: Option<AdaptiveMomentumState<B, D>>,
-    ) -> (Tensor<B, D>, AdaptiveMomentumState<B, D>) {
+        grad: Tensor<D>,
+        state: Option<AdaptiveMomentumState<D>>,
+    ) -> (Tensor<D>, AdaptiveMomentumState<D>) {
         let factor_1 = 1.0 - self.beta_1;
         let factor_2 = 1.0 - self.beta_2;
 
@@ -224,59 +224,43 @@ impl AdaptiveMomentumW {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::TestAutodiffBackend;
-    use crate::{GradientsParams, Optimizer};
-    use burn::module::{Module, Param};
+    use crate::GradientsParams;
+    use burn::module::Param;
+    use burn::tensor::Tolerance;
     use burn::tensor::{Distribution, Tensor, TensorData};
-    use burn::tensor::{Tolerance, ops::FloatElem};
-    use burn_nn::{Linear, LinearConfig, LinearRecord};
+    use burn_nn::{Linear, LinearConfig};
 
-    type FT = FloatElem<TestAutodiffBackend>;
+    type FT = f32;
 
     const LEARNING_RATE: LearningRate = 0.01;
 
     #[test]
     fn test_adamw_optimizer_save_load_state() {
-        let device = Default::default();
+        let device = Device::default().autodiff();
         let linear = LinearConfig::new(6, 6).init(&device);
-        let x = Tensor::<TestAutodiffBackend, 2>::random([2, 6], Distribution::Default, &device);
+        let x = Tensor::<2>::random([2, 6], Distribution::Default, &device);
         let mut optimizer = create_adamw();
         let grads = linear.forward(x).backward();
         let grads = GradientsParams::from_grads(grads, &linear);
         let _linear = optimizer.step(LEARNING_RATE, linear, grads);
 
+        let bytes = optimizer.into_bytes().unwrap();
+        assert!(!bytes.is_empty());
+
         #[cfg(feature = "std")]
-        {
-            use burn::record::{BinFileRecorder, FullPrecisionSettings, Recorder};
-
-            BinFileRecorder::<FullPrecisionSettings>::default()
-                .record(
-                    optimizer.to_record(),
-                    std::env::temp_dir().as_path().join("test_optim_adamw"),
-                )
-                .unwrap();
-        }
-        #[cfg(not(feature = "std"))]
-        {
-            use burn::record::{BinBytesRecorder, FullPrecisionSettings, Recorder};
-
-            let result = BinBytesRecorder::<FullPrecisionSettings>::default()
-                .record(optimizer.to_record(), ())
-                .unwrap();
-            assert!(!result.is_empty());
-        }
+        optimizer
+            .save(std::env::temp_dir().as_path().join("test_optim_adamw"))
+            .unwrap();
 
         let state_optim_before = optimizer.to_record();
-        let state_optim_before_copy = optimizer.to_record();
-        let optimizer = create_adamw();
-        let optimizer = optimizer.load_record(state_optim_before_copy);
+        let optimizer = create_adamw().from_bytes(bytes).unwrap();
         let state_optim_after = optimizer.to_record();
 
         assert_eq!(state_optim_before.len(), state_optim_after.len());
     }
     #[test]
     fn test_adamw_optimizer_with_amsgrad_50_steps() {
-        let device = Default::default();
+        let device = Device::default().autodiff();
         let mut linear = given_linear_layer(
             TensorData::from([
                 [-0.3206, 0.1374, 0.4043, 0.3200, 0.0859, 0.0671],
@@ -287,6 +271,7 @@ mod tests {
                 [-0.0159, -0.0120, 0.1258, 0.1921, 0.0293, 0.3833],
             ]),
             TensorData::from([-0.3905, 0.0884, -0.0970, 0.1176, 0.1366, 0.0130]),
+            &device,
         );
 
         let mut optimizer = AdamWConfig::new()
@@ -298,7 +283,7 @@ mod tests {
             .init();
 
         for i in 1..=50 {
-            let x = Tensor::<TestAutodiffBackend, 2>::ones([2, 6], &device)
+            let x = Tensor::<2>::ones([2, 6], &device)
                 .mul_scalar(i as f32 * 0.1)
                 .require_grad();
 
@@ -307,7 +292,7 @@ mod tests {
             linear = optimizer.step(LEARNING_RATE, linear, grads);
         }
 
-        let state_updated = linear.into_record();
+        let state_updated = linear;
         let weight_updated = state_updated.weight.to_data();
         let bias_updated = state_updated.bias.unwrap().to_data();
 
@@ -370,13 +355,13 @@ mod tests {
             -0.4332566559314728,
         ]);
 
-        type FT = FloatElem<TestAutodiffBackend>;
         let tolerance = Tolerance::absolute(1e-5);
         weight_updated.assert_approx_eq::<FT>(&weights_expected, tolerance);
         bias_updated.assert_approx_eq::<FT>(&bias_expected, tolerance);
     }
     #[test]
     fn test_adamw_optimizer_with_numbers() {
+        let device = Device::default().autodiff();
         let linear = given_linear_layer(
             TensorData::from([
                 [-0.3206, 0.1374, 0.4043, 0.3200, 0.0859, 0.0671],
@@ -387,9 +372,9 @@ mod tests {
                 [-0.0159, -0.0120, 0.1258, 0.1921, 0.0293, 0.3833],
             ]),
             TensorData::from([-0.3905, 0.0884, -0.0970, 0.1176, 0.1366, 0.0130]),
+            &device,
         );
-        let device = Default::default();
-        let x_1 = Tensor::<TestAutodiffBackend, 2>::from_floats(
+        let x_1 = Tensor::<2>::from_floats(
             [
                 [0.6294, 0.0940, 0.8176, 0.8824, 0.5228, 0.4310],
                 [0.7152, 0.9559, 0.7893, 0.5684, 0.5939, 0.8883],
@@ -397,7 +382,7 @@ mod tests {
             &device,
         )
         .require_grad();
-        let x_2 = Tensor::<TestAutodiffBackend, 2>::from_floats(
+        let x_2 = Tensor::<2>::from_floats(
             [
                 [0.8491, 0.2108, 0.8939, 0.4433, 0.5527, 0.2528],
                 [0.3270, 0.0412, 0.5538, 0.9605, 0.3195, 0.9085],
@@ -421,7 +406,7 @@ mod tests {
         let grads = GradientsParams::from_grads(grads, &linear);
         let linear = optimizer.step(LEARNING_RATE, linear, grads);
 
-        let state_updated = linear.into_record();
+        let state_updated = linear;
         let weights_expected = TensorData::from([
             [-0.337295, 0.117827, 0.380358, 0.296868, 0.065232, 0.046534],
             [
@@ -454,6 +439,7 @@ mod tests {
 
     #[test]
     fn test_adamw_optimizer_with_numbers_cautious() {
+        let device = Device::default().autodiff();
         let linear = given_linear_layer(
             TensorData::from([
                 [-0.3206, 0.1374, 0.4043, 0.3200, 0.0859, 0.0671],
@@ -464,9 +450,9 @@ mod tests {
                 [-0.0159, -0.0120, 0.1258, 0.1921, 0.0293, 0.3833],
             ]),
             TensorData::from([-0.3905, 0.0884, -0.0970, 0.1176, 0.1366, 0.0130]),
+            &device,
         );
-        let device = Default::default();
-        let x_1 = Tensor::<TestAutodiffBackend, 2>::from_floats(
+        let x_1 = Tensor::<2>::from_floats(
             [
                 [0.6294, 0.0940, 0.8176, 0.8824, 0.5228, 0.4310],
                 [0.7152, 0.9559, 0.7893, 0.5684, 0.5939, 0.8883],
@@ -474,7 +460,7 @@ mod tests {
             &device,
         )
         .require_grad();
-        let x_2 = Tensor::<TestAutodiffBackend, 2>::from_floats(
+        let x_2 = Tensor::<2>::from_floats(
             [
                 [0.8491, 0.2108, 0.8939, 0.4433, 0.5527, 0.2528],
                 [0.3270, 0.0412, 0.5538, 0.9605, 0.3195, -0.9085],
@@ -499,7 +485,7 @@ mod tests {
         let grads = GradientsParams::from_grads(grads, &linear);
         let linear = optimizer.step(LEARNING_RATE, linear, grads);
 
-        let state_updated = linear.into_record();
+        let state_updated = linear;
         let weights_expected = TensorData::from([
             [-0.337295, 0.117827, 0.380358, 0.296868, 0.065232, 0.046534],
             [
@@ -534,6 +520,7 @@ mod tests {
 
     #[test]
     fn test_adam_optimizer_no_nan() {
+        let device = Device::default().autodiff();
         let linear = given_linear_layer(
             TensorData::from([
                 [-0.3206, 0.1374, 0.4043, 0.3200, 0.0859, 0.0671],
@@ -544,14 +531,15 @@ mod tests {
                 [-0.0159, -0.0120, 0.1258, 0.1921, 0.0293, 0.3833],
             ]),
             TensorData::from([-0.3905, 0.0884, -0.0970, 0.1176, 0.1366, 0.0130]),
+            &device,
         );
 
-        let x = Tensor::<TestAutodiffBackend, 2>::from_floats(
+        let x = Tensor::<2>::from_floats(
             [
                 [0.8491, 0.2108, 0.8939, 0.4433, 0.5527, 0.2528],
                 [0.3270, 0.0412, 0.5538, 0.9605, 0.3195, 0.9085],
             ],
-            &Default::default(),
+            &device,
         )
         .require_grad();
 
@@ -570,21 +558,18 @@ mod tests {
         let grads = GradientsParams::from_grads(grads, &linear);
         let linear = optimizer.step(LEARNING_RATE, linear, grads);
 
-        let state_updated = linear.into_record();
+        let state_updated = linear;
         assert!(!state_updated.weight.to_data().as_slice::<f32>().unwrap()[0].is_nan());
     }
 
-    fn given_linear_layer(weight: TensorData, bias: TensorData) -> Linear<TestAutodiffBackend> {
-        let device = Default::default();
-        let record = LinearRecord {
-            weight: Param::from_data(weight, &device),
-            bias: Some(Param::from_data(bias, &device)),
-        };
-
-        LinearConfig::new(6, 6).init(&device).load_record(record)
+    fn given_linear_layer(weight: TensorData, bias: TensorData, device: &Device) -> Linear {
+        Linear {
+            weight: Param::from_data(weight, device),
+            bias: Some(Param::from_data(bias, device)),
+        }
     }
 
-    fn create_adamw() -> OptimizerAdaptor<AdamW, Linear<TestAutodiffBackend>, TestAutodiffBackend> {
+    fn create_adamw() -> ModuleOptimizer {
         let config = AdamWConfig::new();
         AdamW {
             momentum: AdaptiveMomentumW {

@@ -1,13 +1,14 @@
 use std::collections::HashMap;
 
+use crate::{Backend, TensorMetadata};
 use crate::{DeviceId, DeviceOps, tensor::Device};
 
 use crate::distributed::{
-    DistributedBackend, DistributedConfig, DistributedParamId, DistributedParams, TensorRef,
+    DistributedConfig, DistributedParamId, DistributedParams, TensorRef,
     client::DistributedSyncMessage,
 };
 
-pub(crate) struct DistributedSyncServer<B: DistributedBackend> {
+pub(crate) struct DistributedSyncServer<B: Backend> {
     config: DistributedConfig,
     all_reduce_ops_queue: HashMap<DistributedParamId, Vec<TensorRef<B>>>,
     param_required_map: HashMap<DistributedParamId, usize>,
@@ -18,7 +19,7 @@ pub(crate) struct DistributedSyncServer<B: DistributedBackend> {
     callbacks: HashMap<DeviceId, oneshot::Sender<Box<dyn FnOnce() + Send>>>,
 }
 
-impl<B: DistributedBackend> DistributedSyncServer<B> {
+impl<B: Backend> DistributedSyncServer<B> {
     /// Create a new gradient sync server instance.
     pub(crate) fn new(num_devices: usize, config: DistributedConfig) -> Self {
         Self {
@@ -104,7 +105,7 @@ impl<B: DistributedBackend> DistributedSyncServer<B> {
                     // Safety: Tensors sent to the `DistributedSyncServer` should not be accessed or modified until the end of the backward pass.
                     let device_ids = queued_tensors
                         .iter()
-                        .map(|t| B::float_device(unsafe { &*t.0 }).id())
+                        .map(|t| unsafe { &*t.0 }.device().id())
                         .collect::<Vec<_>>();
                     let reduced_tensors: Vec<B::FloatTensorPrimitive> = queued_tensors
                         .iter()

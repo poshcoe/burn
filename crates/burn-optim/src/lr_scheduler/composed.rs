@@ -4,12 +4,10 @@ use super::cosine::{CosineAnnealingLrScheduler, CosineAnnealingLrSchedulerConfig
 use super::exponential::{ExponentialLrScheduler, ExponentialLrSchedulerConfig};
 use super::linear::{LinearLrScheduler, LinearLrSchedulerConfig};
 use super::noam::{NoamLrScheduler, NoamLrSchedulerConfig};
-use super::{LrScheduler, String};
+use super::{LrScheduler, LrSchedulerRecord, String};
 use crate::LearningRate;
 
 use burn::config::Config;
-use burn::record::Record;
-use burn::tensor::backend::Backend;
 
 /// Compose multiple [learning rate schedulers](LrScheduler) together.
 #[derive(Config, Debug)]
@@ -101,28 +99,7 @@ enum LrSchedulerItem {
     Noam(NoamLrScheduler),
 }
 
-#[derive(Record)]
-/// Record item for the [composed learning rate scheduler](ComposedLrScheduler).
-pub enum LrSchedulerRecord<B: Backend> {
-    /// The linear variant.
-    Linear(<LinearLrScheduler as LrScheduler>::Record<B>),
-    /// The cosine variant.
-    Cosine(<CosineAnnealingLrScheduler as LrScheduler>::Record<B>),
-    /// The exponential variant.
-    Exponential(<ExponentialLrScheduler as LrScheduler>::Record<B>),
-    /// The noam variant.
-    Noam(<NoamLrScheduler as LrScheduler>::Record<B>),
-}
-
-#[derive(Record)]
-/// Records for the [composed learning rate scheduler](ComposedLrScheduler).
-pub struct ComposedLrSchedulerRecord<B: Backend> {
-    schedulers: Vec<LrSchedulerRecord<B>>,
-}
-
 impl LrScheduler for ComposedLrScheduler {
-    type Record<B: Backend> = ComposedLrSchedulerRecord<B>;
-
     fn step(&mut self) -> LearningRate {
         let mut step = match self.reduction {
             SchedulerReduction::Avg => 0.0,
@@ -147,46 +124,35 @@ impl LrScheduler for ComposedLrScheduler {
         step
     }
 
-    fn to_record<B: Backend>(&self) -> Self::Record<B> {
-        ComposedLrSchedulerRecord::<B> {
-            schedulers: self
-                .schedulers
-                .iter()
-                .map(|s| match s {
-                    LrSchedulerItem::Linear(item) => {
-                        LrSchedulerRecord::Linear(item.to_record::<B>())
-                    }
-                    LrSchedulerItem::Cosine(item) => {
-                        LrSchedulerRecord::Cosine(item.to_record::<B>())
-                    }
-                    LrSchedulerItem::Exponential(item) => {
-                        LrSchedulerRecord::Exponential(item.to_record::<B>())
-                    }
-                    LrSchedulerItem::Noam(item) => LrSchedulerRecord::Noam(item.to_record::<B>()),
-                })
-                .collect(),
+    fn to_record(&self) -> LrSchedulerRecord {
+        let mut record = LrSchedulerRecord::new();
+        for (index, item) in self.schedulers.iter().enumerate() {
+            let sub = match item {
+                LrSchedulerItem::Linear(item) => item.to_record(),
+                LrSchedulerItem::Cosine(item) => item.to_record(),
+                LrSchedulerItem::Exponential(item) => item.to_record(),
+                LrSchedulerItem::Noam(item) => item.to_record(),
+            };
+            record = record.with_record(&index.to_string(), sub);
         }
+        record
     }
 
-    fn load_record<B: Backend>(mut self, record: Self::Record<B>) -> Self {
+    fn load_record(mut self, record: LrSchedulerRecord) -> Self {
         self.schedulers = self
             .schedulers
             .into_iter()
-            .zip(record.schedulers)
-            .map(|scheduler| match scheduler {
-                (LrSchedulerItem::Linear(item), LrSchedulerRecord::Linear(record)) => {
-                    LrSchedulerItem::Linear(item.load_record::<B>(record))
+            .enumerate()
+            .map(|(index, item)| {
+                let sub = record.record(&index.to_string());
+                match item {
+                    LrSchedulerItem::Linear(item) => LrSchedulerItem::Linear(item.load_record(sub)),
+                    LrSchedulerItem::Cosine(item) => LrSchedulerItem::Cosine(item.load_record(sub)),
+                    LrSchedulerItem::Exponential(item) => {
+                        LrSchedulerItem::Exponential(item.load_record(sub))
+                    }
+                    LrSchedulerItem::Noam(item) => LrSchedulerItem::Noam(item.load_record(sub)),
                 }
-                (LrSchedulerItem::Cosine(item), LrSchedulerRecord::Cosine(record)) => {
-                    LrSchedulerItem::Cosine(item.load_record::<B>(record))
-                }
-                (LrSchedulerItem::Exponential(item), LrSchedulerRecord::Exponential(record)) => {
-                    LrSchedulerItem::Exponential(item.load_record::<B>(record))
-                }
-                (LrSchedulerItem::Noam(item), LrSchedulerRecord::Noam(record)) => {
-                    LrSchedulerItem::Noam(item.load_record::<B>(record))
-                }
-                _ => panic!("Invalid state"),
             })
             .collect();
 

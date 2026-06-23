@@ -3,7 +3,7 @@ use crate::{
     Fusion, FusionBackend, binary_float_cmp_ops, binary_float_ops,
     client::GlobalFusionClient,
     get_client, reduce_float_ops, reduce_float2int_ops, scalar_float_cmp_ops, scalar_float_ops,
-    stream::{OperationStreams, execution::Operation},
+    stream::{StreamId, execution::Operation},
     unary_float_ops,
 };
 use burn_backend::{
@@ -32,7 +32,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
 
         client
             .register(
-                OperationStreams::default(),
+                StreamId::current(),
                 OperationIr::Init(desc),
                 NoOp::<B>::new(),
             )
@@ -69,7 +69,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
 
         client
             .register(
-                OperationStreams::default(),
+                StreamId::current(),
                 OperationIr::Float(dtype, FloatOperationIr::Random(desc.clone())),
                 RandomOps::<B>::new(desc, device.clone()),
             )
@@ -96,7 +96,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
 
         client
             .register(
-                OperationStreams::default(),
+                StreamId::current(),
                 OperationIr::BaseFloat(BaseOperationIr::Zeros(desc.clone())),
                 ZerosOps::<B>::new(desc.out, device.clone()),
             )
@@ -123,7 +123,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
 
         client
             .register(
-                OperationStreams::default(),
+                StreamId::current(),
                 OperationIr::BaseFloat(BaseOperationIr::Ones(desc.clone())),
                 OnesOps::<B>::new(desc.out, device.clone()),
             )
@@ -160,7 +160,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
 
         client
             .register(
-                OperationStreams::default(),
+                StreamId::current(),
                 OperationIr::NumericFloat(dtype, NumericOperationIr::Full(desc.clone())),
                 FullOps::<B>::new(desc.out, desc.value, device.clone()),
             )
@@ -178,10 +178,6 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     ))]
     async fn float_into_data(tensor: FloatTensor<Self>) -> Result<TensorData, ExecutionError> {
         tensor.into_data::<B>().await
-    }
-
-    fn float_device(tensor: &FloatTensor<Self>) -> Device<Self> {
-        tensor.client.device().clone()
     }
 
     #[cfg_attr(feature = "tracing", tracing::instrument(
@@ -223,7 +219,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
             }
         }
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc = CastOpIr::create(tensor.into_ir(), dtype.into(), || {
@@ -262,7 +258,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
 
         client
             .register(
-                OperationStreams::default(),
+                StreamId::current(),
                 OperationIr::BaseFloat(BaseOperationIr::Empty(desc.clone())),
                 EmptyOps::<B>::new(desc.out, device.clone()),
             )
@@ -272,7 +268,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     fn float_add(lhs: FloatTensor<Self>, rhs: FloatTensor<Self>) -> FloatTensor<Self> {
         binary_float_ops!(AddOps, B::float_add);
 
-        let streams = OperationStreams::with_inputs([&lhs, &rhs]);
+        let streams = StreamId::current();
 
         let client = lhs.client.clone();
         let desc = BinaryOpIr::create(lhs.into_ir(), rhs.into_ir(), || {
@@ -291,7 +287,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     fn float_add_scalar(lhs: FloatTensor<Self>, rhs: Scalar) -> FloatTensor<Self> {
         scalar_float_ops!(AddOps, B::float_add_scalar);
 
-        let streams = OperationStreams::with_inputs([&lhs]);
+        let streams = StreamId::current();
 
         let client = lhs.client.clone();
         let rhs = rhs.into();
@@ -325,7 +321,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
             }
         }
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let min = min.into();
@@ -347,7 +343,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     fn float_sub(lhs: FloatTensor<Self>, rhs: FloatTensor<Self>) -> FloatTensor<Self> {
         binary_float_ops!(SubOps, B::float_sub);
 
-        let streams = OperationStreams::with_inputs([&lhs, &rhs]);
+        let streams = StreamId::current();
 
         let client = lhs.client.clone();
         let desc = BinaryOpIr::create(lhs.into_ir(), rhs.into_ir(), || {
@@ -366,7 +362,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     fn float_sub_scalar(lhs: FloatTensor<Self>, rhs: Scalar) -> FloatTensor<Self> {
         scalar_float_ops!(SubOps, B::float_sub_scalar);
 
-        let streams = OperationStreams::with_inputs([&lhs]);
+        let streams = StreamId::current();
 
         let client = lhs.client.clone();
         let rhs = rhs.into();
@@ -387,7 +383,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     fn float_mul(lhs: FloatTensor<Self>, rhs: FloatTensor<Self>) -> FloatTensor<Self> {
         binary_float_ops!(MulOps, B::float_mul);
 
-        let streams = OperationStreams::with_inputs([&lhs, &rhs]);
+        let streams = StreamId::current();
 
         let client = lhs.client.clone();
         let desc = BinaryOpIr::create(lhs.into_ir(), rhs.into_ir(), || {
@@ -406,7 +402,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     fn float_mul_scalar(lhs: FloatTensor<Self>, rhs: Scalar) -> FloatTensor<Self> {
         scalar_float_ops!(MulOps, B::float_mul_scalar);
 
-        let streams = OperationStreams::with_inputs([&lhs]);
+        let streams = StreamId::current();
 
         let client = lhs.client.clone();
         let rhs = rhs.into();
@@ -427,7 +423,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     fn float_div(lhs: FloatTensor<Self>, rhs: FloatTensor<Self>) -> FloatTensor<Self> {
         binary_float_ops!(DivOps, B::float_div);
 
-        let streams = OperationStreams::with_inputs([&lhs, &rhs]);
+        let streams = StreamId::current();
 
         let client = lhs.client.clone();
         let desc = BinaryOpIr::create(lhs.into_ir(), rhs.into_ir(), || {
@@ -446,7 +442,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     fn float_div_scalar(lhs: FloatTensor<Self>, rhs: Scalar) -> FloatTensor<Self> {
         scalar_float_ops!(DivOps, B::float_div_scalar);
 
-        let streams = OperationStreams::with_inputs([&lhs]);
+        let streams = StreamId::current();
 
         let client = lhs.client.clone();
         let rhs = rhs.into();
@@ -467,7 +463,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     fn float_remainder(lhs: FloatTensor<Self>, rhs: FloatTensor<Self>) -> FloatTensor<Self> {
         binary_float_ops!(ModOps, B::float_remainder);
 
-        let streams = OperationStreams::with_inputs([&lhs, &rhs]);
+        let streams = StreamId::current();
 
         let client = lhs.client.clone();
         let desc = BinaryOpIr::create(lhs.into_ir(), rhs.into_ir(), || {
@@ -486,7 +482,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     fn float_remainder_scalar(lhs: FloatTensor<Self>, rhs: Scalar) -> FloatTensor<Self> {
         scalar_float_ops!(ModOps, B::float_remainder_scalar);
 
-        let streams = OperationStreams::with_inputs([&lhs]);
+        let streams = StreamId::current();
 
         let client = lhs.client.clone();
         let rhs = rhs.into();
@@ -507,7 +503,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     fn float_matmul(lhs: FloatTensor<Self>, rhs: FloatTensor<Self>) -> FloatTensor<Self> {
         binary_float_ops!(MatmulOps, B::float_matmul);
 
-        let streams = OperationStreams::with_inputs([&lhs, &rhs]);
+        let streams = StreamId::current();
 
         let client = lhs.client.clone();
         let desc = MatmulOpIr::create(lhs.into_ir(), rhs.into_ir(), || {
@@ -543,7 +539,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
             }
         }
 
-        let streams = OperationStreams::with_inputs([&lhs, &rhs]);
+        let streams = StreamId::current();
 
         let client = lhs.client.clone();
         let desc = CrossOpIr::create(lhs.into_ir(), rhs.into_ir(), dim, || {
@@ -574,7 +570,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
             }
         }
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc = SwapDimsOpIr::create(tensor.into_ir(), dim1, dim2, || {
@@ -609,7 +605,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
             }
         }
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc = ShapeOpIr::reshape(tensor.into_ir(), shape, || client.create_empty_handle());
@@ -644,7 +640,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
             }
         }
 
-        let streams = OperationStreams::with_inputs([&tensor, &indices]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc = GatherOpIr::create(tensor.into_ir(), dim, indices.into_ir(), || {
@@ -684,7 +680,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
             }
         }
 
-        let streams = OperationStreams::with_inputs([&tensor, &indices, &value]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc = ScatterOpIr::create(
@@ -701,6 +697,83 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
                 streams,
                 OperationIr::BaseFloat(BaseOperationIr::Scatter(desc.clone())),
                 ScatterOps::<B>::new(desc),
+            )
+            .output()
+    }
+
+    fn float_scatter_nd(
+        data: FloatTensor<Self>,
+        indices: IntTensor<Self>,
+        values: FloatTensor<Self>,
+        reduction: IndexingUpdateOp,
+    ) -> FloatTensor<Self> {
+        #[derive(new, Debug)]
+        struct ScatterNdOps<B: FusionBackend> {
+            desc: ScatterNdOpIr,
+            _b: PhantomData<B>,
+        }
+
+        impl<B: FusionBackend> Operation<B::FusionRuntime> for ScatterNdOps<B> {
+            fn execute(&self, handles: &mut HandleContainer<B::Handle>) {
+                let data = handles.get_float_tensor::<B>(&self.desc.data);
+                let indices = handles.get_int_tensor::<B>(&self.desc.indices);
+                let values = handles.get_float_tensor::<B>(&self.desc.values);
+
+                let output = B::float_scatter_nd(data, indices, values, self.desc.reduction);
+
+                handles.register_float_tensor::<B>(&self.desc.out.id, output);
+            }
+        }
+
+        let streams = StreamId::current();
+
+        let client = data.client.clone();
+        let desc = ScatterNdOpIr::create(
+            data.into_ir(),
+            indices.into_ir(),
+            values.into_ir(),
+            reduction,
+            || client.create_empty_handle(),
+        );
+
+        client
+            .register(
+                streams,
+                OperationIr::BaseFloat(BaseOperationIr::ScatterNd(desc.clone())),
+                ScatterNdOps::<B>::new(desc),
+            )
+            .output()
+    }
+
+    fn float_gather_nd(data: FloatTensor<Self>, indices: IntTensor<Self>) -> FloatTensor<Self> {
+        #[derive(new, Debug)]
+        struct GatherNdOps<B: FusionBackend> {
+            desc: GatherNdOpIr,
+            _b: PhantomData<B>,
+        }
+
+        impl<B: FusionBackend> Operation<B::FusionRuntime> for GatherNdOps<B> {
+            fn execute(&self, handles: &mut HandleContainer<B::Handle>) {
+                let data = handles.get_float_tensor::<B>(&self.desc.data);
+                let indices = handles.get_int_tensor::<B>(&self.desc.indices);
+
+                let output = B::float_gather_nd(data, indices);
+                handles.register_float_tensor::<B>(&self.desc.out.id, output);
+            }
+        }
+
+        let streams = StreamId::current();
+
+        let client = data.client.clone();
+        let desc = GatherNdOpIr::create(data.into_ir(), indices.into_ir(), || {
+            client.create_empty_handle()
+        });
+
+        client
+            .register(
+                streams,
+                OperationIr::BaseFloat(BaseOperationIr::GatherNd(desc.clone())),
+                GatherNdOps::<B>::new(desc),
             )
             .output()
     }
@@ -727,7 +800,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
             }
         }
 
-        let streams = OperationStreams::with_inputs([&tensor, &indices]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc = SelectOpIr::create(tensor.into_ir(), dim, indices.into_ir(), || {
@@ -767,7 +840,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
             }
         }
 
-        let streams = OperationStreams::with_inputs([&tensor, &indices, &value]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc = SelectAssignOpIr::create(
@@ -805,7 +878,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
             }
         }
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc = SliceOpIr::create(tensor.into_ir(), slices.into(), || {
@@ -843,7 +916,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
             }
         }
 
-        let streams = OperationStreams::with_inputs([&tensor, &value]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc =
@@ -883,7 +956,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
             }
         }
 
-        let streams = OperationStreams::with_inputs([&tensor, &mask, &value]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc = MaskWhereOpIr::create(tensor.into_ir(), mask.into_ir(), value.into_ir(), || {
@@ -921,7 +994,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
             }
         }
 
-        let streams = OperationStreams::with_inputs([&tensor, &mask]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let value = value.into();
@@ -945,7 +1018,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     ) -> BoolTensor<Self> {
         binary_float_cmp_ops!(EqualOps, B::float_equal);
 
-        let streams = OperationStreams::with_inputs([&lhs, &rhs]);
+        let streams = StreamId::current();
 
         let client = lhs.client.clone();
         let desc =
@@ -969,7 +1042,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     ) -> BoolTensor<Self> {
         scalar_float_cmp_ops!(EqualElemOps, B::float_equal_elem);
 
-        let streams = OperationStreams::with_inputs([&lhs]);
+        let streams = StreamId::current();
 
         let client = lhs.client.clone();
         let rhs = rhs.into();
@@ -993,7 +1066,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     ) -> BoolTensor<Self> {
         binary_float_cmp_ops!(GreaterOps, B::float_greater);
 
-        let streams = OperationStreams::with_inputs([&lhs, &rhs]);
+        let streams = StreamId::current();
 
         let client = lhs.client.clone();
         let desc =
@@ -1020,7 +1093,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     ) -> BoolTensor<Self> {
         scalar_float_cmp_ops!(GreaterElemOps, B::float_greater_elem);
 
-        let streams = OperationStreams::with_inputs([&lhs]);
+        let streams = StreamId::current();
 
         let client = lhs.client.clone();
         let rhs = rhs.into();
@@ -1047,7 +1120,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     ) -> BoolTensor<Self> {
         binary_float_cmp_ops!(GreaterEqualOps, B::float_greater_equal);
 
-        let streams = OperationStreams::with_inputs([&lhs, &rhs]);
+        let streams = StreamId::current();
 
         let client = lhs.client.clone();
         let desc =
@@ -1074,7 +1147,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     ) -> BoolTensor<Self> {
         scalar_float_cmp_ops!(GreaterEqualElemOps, B::float_greater_equal_elem);
 
-        let streams = OperationStreams::with_inputs([&lhs]);
+        let streams = StreamId::current();
 
         let client = lhs.client.clone();
         let rhs = rhs.into();
@@ -1101,7 +1174,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     ) -> BoolTensor<Self> {
         binary_float_cmp_ops!(LowerOps, B::float_lower);
 
-        let streams = OperationStreams::with_inputs([&lhs, &rhs]);
+        let streams = StreamId::current();
 
         let client = lhs.client.clone();
         let desc =
@@ -1125,7 +1198,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     ) -> BoolTensor<Self> {
         scalar_float_cmp_ops!(LowerElemOps, B::float_lower_elem);
 
-        let streams = OperationStreams::with_inputs([&lhs]);
+        let streams = StreamId::current();
 
         let client = lhs.client.clone();
         let rhs = rhs.into();
@@ -1152,7 +1225,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     ) -> BoolTensor<Self> {
         binary_float_cmp_ops!(LowerEqualOps, B::float_lower_equal);
 
-        let streams = OperationStreams::with_inputs([&lhs, &rhs]);
+        let streams = StreamId::current();
 
         let client = lhs.client.clone();
         let desc =
@@ -1179,7 +1252,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     ) -> BoolTensor<Self> {
         scalar_float_cmp_ops!(LowerEqualElemOps, B::float_lower_equal_elem);
 
-        let streams = OperationStreams::with_inputs([&lhs]);
+        let streams = StreamId::current();
 
         let client = lhs.client.clone();
         let rhs = rhs.into();
@@ -1202,7 +1275,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     fn float_sum(tensor: FloatTensor<Self>) -> FloatTensor<Self> {
         unary_float_ops!(SumOps, B::float_sum, reduce);
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc = ReduceOpIr::create(tensor.into_ir(), || client.create_empty_handle());
@@ -1217,12 +1290,13 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     }
 
     fn float_sum_dim(tensor: FloatTensor<Self>, axis: usize) -> FloatTensor<Self> {
-        reduce_float_ops!(SumDimOps, B::float_sum_dim);
+        reduce_float_ops!(SumDimOps, |tensor, axis, _| B::float_sum_dim(tensor, axis));
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
-        let desc = ReduceDimOpIr::create(tensor.into_ir(), axis, || client.create_empty_handle());
+        let desc =
+            ReduceDimOpIr::create(tensor.into_ir(), axis, 1, || client.create_empty_handle());
 
         client
             .register(
@@ -1236,7 +1310,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     fn float_prod(tensor: FloatTensor<Self>) -> FloatTensor<Self> {
         unary_float_ops!(ProdOps, B::float_prod, reduce);
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc = ReduceOpIr::create(tensor.into_ir(), || client.create_empty_handle());
@@ -1251,12 +1325,14 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     }
 
     fn float_prod_dim(tensor: FloatTensor<Self>, dim: usize) -> FloatTensor<Self> {
-        reduce_float_ops!(ProdDimOps, B::float_prod_dim);
+        reduce_float_ops!(ProdDimOps, |tensor, axis, _| B::float_prod_dim(
+            tensor, axis
+        ));
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
-        let desc = ReduceDimOpIr::create(tensor.into_ir(), dim, || client.create_empty_handle());
+        let desc = ReduceDimOpIr::create(tensor.into_ir(), dim, 1, || client.create_empty_handle());
 
         client
             .register(
@@ -1273,7 +1349,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     fn float_mean(tensor: FloatTensor<Self>) -> FloatTensor<Self> {
         unary_float_ops!(MeanOps, B::float_mean, reduce);
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc = ReduceOpIr::create(tensor.into_ir(), || client.create_empty_handle());
@@ -1288,12 +1364,14 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     }
 
     fn float_mean_dim(tensor: FloatTensor<Self>, dim: usize) -> FloatTensor<Self> {
-        reduce_float_ops!(MeanDimOps, B::float_mean_dim);
+        reduce_float_ops!(MeanDimOps, |tensor, axis, _| B::float_mean_dim(
+            tensor, axis
+        ));
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
-        let desc = ReduceDimOpIr::create(tensor.into_ir(), dim, || client.create_empty_handle());
+        let desc = ReduceDimOpIr::create(tensor.into_ir(), dim, 1, || client.create_empty_handle());
 
         client
             .register(
@@ -1322,7 +1400,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
             }
         }
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc = DimOpIr::create(tensor.into_ir(), dim, || client.create_empty_handle());
@@ -1351,7 +1429,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
             }
         }
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc = DimOpIr::create(tensor.into_ir(), dim, || client.create_empty_handle());
@@ -1383,7 +1461,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
             }
         }
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc = DimOpIr::create(tensor.into_ir(), dim, || client.create_empty_handle());
@@ -1412,7 +1490,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
             }
         }
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc = DimOpIr::create(tensor.into_ir(), dim, || client.create_empty_handle());
@@ -1429,7 +1507,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     fn float_exp(lhs: FloatTensor<Self>) -> FloatTensor<Self> {
         unary_float_ops!(ExpOps, B::float_exp);
 
-        let streams = OperationStreams::with_inputs([&lhs]);
+        let streams = StreamId::current();
 
         let client = lhs.client.clone();
         let desc = UnaryOpIr::create(lhs.into_ir(), || client.create_empty_handle());
@@ -1446,7 +1524,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     fn float_log(tensor: FloatTensor<Self>) -> FloatTensor<Self> {
         unary_float_ops!(LogOps, B::float_log);
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc = UnaryOpIr::create(tensor.into_ir(), || client.create_empty_handle());
@@ -1463,7 +1541,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     fn float_log1p(tensor: FloatTensor<Self>) -> FloatTensor<Self> {
         unary_float_ops!(Log1pOps, B::float_log1p);
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc = UnaryOpIr::create(tensor.into_ir(), || client.create_empty_handle());
@@ -1480,7 +1558,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     fn float_powf_scalar_impl(lhs: FloatTensor<Self>, rhs: Scalar) -> FloatTensor<Self> {
         scalar_float_ops!(PowfOps, B::float_powf_scalar_impl);
 
-        let streams = OperationStreams::with_inputs([&lhs]);
+        let streams = StreamId::current();
 
         let client = lhs.client.clone();
         let rhs = rhs.into();
@@ -1498,7 +1576,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     fn float_sqrt(tensor: FloatTensor<Self>) -> FloatTensor<Self> {
         unary_float_ops!(SqrtOps, B::float_sqrt);
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc = UnaryOpIr::create(tensor.into_ir(), || client.create_empty_handle());
@@ -1515,7 +1593,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     fn float_abs(tensor: FloatTensor<Self>) -> FloatTensor<Self> {
         unary_float_ops!(AbsOps, B::float_abs);
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc = UnaryOpIr::create(tensor.into_ir(), || client.create_empty_handle());
@@ -1532,7 +1610,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     fn float_cos(tensor: FloatTensor<Self>) -> FloatTensor<Self> {
         unary_float_ops!(CosOps, B::float_cos);
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc = UnaryOpIr::create(tensor.into_ir(), || client.create_empty_handle());
@@ -1549,7 +1627,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     fn float_sin(tensor: FloatTensor<Self>) -> FloatTensor<Self> {
         unary_float_ops!(SinOps, B::float_sin);
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc = UnaryOpIr::create(tensor.into_ir(), || client.create_empty_handle());
@@ -1566,7 +1644,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     fn float_tan(tensor: FloatTensor<Self>) -> FloatTensor<Self> {
         unary_float_ops!(TanOps, B::float_tan);
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc = UnaryOpIr::create(tensor.into_ir(), || client.create_empty_handle());
@@ -1583,7 +1661,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     fn float_cosh(tensor: FloatTensor<Self>) -> FloatTensor<Self> {
         unary_float_ops!(CoshOps, B::float_cosh);
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc = UnaryOpIr::create(tensor.into_ir(), || client.create_empty_handle());
@@ -1600,7 +1678,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     fn float_sinh(tensor: FloatTensor<Self>) -> FloatTensor<Self> {
         unary_float_ops!(SinhOps, B::float_sinh);
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc = UnaryOpIr::create(tensor.into_ir(), || client.create_empty_handle());
@@ -1617,7 +1695,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     fn float_tanh(tensor: FloatTensor<Self>) -> FloatTensor<Self> {
         unary_float_ops!(TanhOps, B::float_tanh);
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc = UnaryOpIr::create(tensor.into_ir(), || client.create_empty_handle());
@@ -1634,7 +1712,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     fn float_acos(tensor: FloatTensor<Self>) -> FloatTensor<Self> {
         unary_float_ops!(ArcCosOps, B::float_acos);
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc = UnaryOpIr::create(tensor.into_ir(), || client.create_empty_handle());
@@ -1651,7 +1729,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     fn float_acosh(tensor: FloatTensor<Self>) -> FloatTensor<Self> {
         unary_float_ops!(ArcCoshOps, B::float_acosh);
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc = UnaryOpIr::create(tensor.into_ir(), || client.create_empty_handle());
@@ -1668,7 +1746,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     fn float_asin(tensor: FloatTensor<Self>) -> FloatTensor<Self> {
         unary_float_ops!(ArcSinOps, B::float_asin);
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc = UnaryOpIr::create(tensor.into_ir(), || client.create_empty_handle());
@@ -1685,7 +1763,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     fn float_asinh(tensor: FloatTensor<Self>) -> FloatTensor<Self> {
         unary_float_ops!(ArcSinhOps, B::float_asinh);
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc = UnaryOpIr::create(tensor.into_ir(), || client.create_empty_handle());
@@ -1702,7 +1780,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     fn float_atan(tensor: FloatTensor<Self>) -> FloatTensor<Self> {
         unary_float_ops!(ArcTanOps, B::float_atan);
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc = UnaryOpIr::create(tensor.into_ir(), || client.create_empty_handle());
@@ -1719,7 +1797,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     fn float_atanh(tensor: FloatTensor<Self>) -> FloatTensor<Self> {
         unary_float_ops!(ArcTanhOps, B::float_atanh);
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc = UnaryOpIr::create(tensor.into_ir(), || client.create_empty_handle());
@@ -1736,7 +1814,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     fn float_atan2(lhs: FloatTensor<Self>, rhs: FloatTensor<Self>) -> FloatTensor<Self> {
         binary_float_ops!(ArcTan2Ops, B::float_atan2);
 
-        let streams = OperationStreams::with_inputs([&lhs, &rhs]);
+        let streams = StreamId::current();
 
         let client = lhs.client.clone();
         let desc = BinaryOpIr::create(lhs.into_ir(), rhs.into_ir(), || {
@@ -1755,7 +1833,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     fn float_recip(tensor: FloatTensor<Self>) -> FloatTensor<Self> {
         unary_float_ops!(Recip, B::float_recip);
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc = UnaryOpIr::create(tensor.into_ir(), || client.create_empty_handle());
@@ -1772,7 +1850,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     fn float_erf(tensor: FloatTensor<Self>) -> FloatTensor<Self> {
         unary_float_ops!(TanhOps, B::float_erf);
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc = UnaryOpIr::create(tensor.into_ir(), || client.create_empty_handle());
@@ -1808,7 +1886,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
             }
         }
 
-        let streams = OperationStreams::with_inputs(&tensors);
+        let streams = StreamId::current();
 
         let client = tensors.first().unwrap().client.clone();
         let tensors = tensors.into_iter().map(|t| t.into_ir()).collect();
@@ -1824,14 +1902,14 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     }
 
     fn float_argmax(tensor: FloatTensor<Self>, dim: usize, out_dtype: IntDType) -> IntTensor<Self> {
-        reduce_float2int_ops!(ArgMaxOps, B::float_argmax);
+        reduce_float2int_ops!(ArgMaxOps, |input, axis, _, dtype| B::float_argmax(
+            input, axis, dtype
+        ));
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
-        // TODO: output dtype should be defined by the device policy
         let client = tensor.client.clone();
-        // TODO: rename `create_with_dtype` specifically for ARG / indices
-        let desc = ReduceDimOpIr::create_arg(tensor.into_ir(), dim, out_dtype.into(), || {
+        let desc = ReduceDimOpIr::create_arg(tensor.into_ir(), dim, 1, out_dtype.into(), || {
             client.create_empty_handle()
         });
 
@@ -1843,6 +1921,50 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
                     NumericOperationIr::ArgMax(desc.clone()),
                 ),
                 ArgMaxOps::<B>::new(desc),
+            )
+            .output()
+    }
+
+    fn float_argtopk(
+        tensor: FloatTensor<Self>,
+        dim: usize,
+        k: usize,
+        out_dtype: IntDType,
+    ) -> IntTensor<Self> {
+        reduce_float2int_ops!(ArgTopKOps, B::float_argtopk);
+
+        let streams = StreamId::current();
+
+        let client = tensor.client.clone();
+        let desc = ReduceDimOpIr::create_arg(tensor.into_ir(), dim, k, out_dtype.into(), || {
+            client.create_empty_handle()
+        });
+
+        client
+            .register(
+                streams,
+                OperationIr::NumericFloat(
+                    desc.input.dtype,
+                    NumericOperationIr::ArgTopK(desc.clone()),
+                ),
+                ArgTopKOps::<B>::new(desc),
+            )
+            .output()
+    }
+
+    fn float_topk(tensor: FloatTensor<Self>, dim: usize, k: usize) -> FloatTensor<Self> {
+        reduce_float_ops!(TopKOps, B::float_topk);
+
+        let streams = StreamId::current();
+
+        let client = tensor.client.clone();
+        let desc = ReduceDimOpIr::create(tensor.into_ir(), dim, k, || client.create_empty_handle());
+
+        client
+            .register(
+                streams,
+                OperationIr::NumericFloat(desc.out.dtype, NumericOperationIr::TopK(desc.clone())),
+                TopKOps::<B>::new(desc),
             )
             .output()
     }
@@ -1864,7 +1986,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
             }
         }
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc = RepeatDimOpIr::create(tensor.into_ir(), dim, times, || {
@@ -1881,12 +2003,14 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     }
 
     fn float_argmin(tensor: FloatTensor<Self>, dim: usize, out_dtype: IntDType) -> IntTensor<Self> {
-        reduce_float2int_ops!(ArgMinOps, B::float_argmin);
+        reduce_float2int_ops!(ArgMinOps, |input, axis, _, dtype| B::float_argmin(
+            input, axis, dtype
+        ));
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
-        let desc = ReduceDimOpIr::create_arg(tensor.into_ir(), dim, out_dtype.into(), || {
+        let desc = ReduceDimOpIr::create_arg(tensor.into_ir(), dim, 1, out_dtype.into(), || {
             client.create_empty_handle()
         });
 
@@ -1905,7 +2029,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     fn float_max(tensor: FloatTensor<Self>) -> FloatTensor<Self> {
         unary_float_ops!(MaxOps, B::float_max, reduce);
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc = ReduceOpIr::create(tensor.into_ir(), || client.create_empty_handle());
@@ -1920,12 +2044,12 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     }
 
     fn float_max_dim(tensor: FloatTensor<Self>, dim: usize) -> FloatTensor<Self> {
-        reduce_float_ops!(MaxDimOps, B::float_max_dim);
+        reduce_float_ops!(MaxDimOps, |tensor, axis, _| B::float_max_dim(tensor, axis));
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
-        let desc = ReduceDimOpIr::create(tensor.into_ir(), dim, || client.create_empty_handle());
+        let desc = ReduceDimOpIr::create(tensor.into_ir(), dim, 1, || client.create_empty_handle());
 
         client
             .register(
@@ -1961,7 +2085,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
             }
         }
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc =
@@ -1985,7 +2109,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     fn float_min(tensor: FloatTensor<Self>) -> FloatTensor<Self> {
         unary_float_ops!(MinOps, B::float_min, reduce);
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc = ReduceOpIr::create(tensor.into_ir(), || client.create_empty_handle());
@@ -2000,12 +2124,12 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     }
 
     fn float_min_dim(tensor: FloatTensor<Self>, dim: usize) -> FloatTensor<Self> {
-        reduce_float_ops!(MinDimOps, B::float_min_dim);
+        reduce_float_ops!(MinDimOps, |tensor, axis, _| B::float_min_dim(tensor, axis));
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
-        let desc = ReduceDimOpIr::create(tensor.into_ir(), dim, || client.create_empty_handle());
+        let desc = ReduceDimOpIr::create(tensor.into_ir(), dim, 1, || client.create_empty_handle());
 
         client
             .register(
@@ -2040,7 +2164,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
                 handles.register_int_tensor::<B>(&self.desc.out_indices.id, indices);
             }
         }
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc =
@@ -2064,7 +2188,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     fn float_max_abs(tensor: FloatTensor<Self>) -> FloatTensor<Self> {
         unary_float_ops!(MaxAbsOps, B::float_max_abs, reduce);
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc = ReduceOpIr::create(tensor.into_ir(), || client.create_empty_handle());
@@ -2079,12 +2203,14 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     }
 
     fn float_max_abs_dim(tensor: FloatTensor<Self>, dim: usize) -> FloatTensor<Self> {
-        reduce_float_ops!(MaxAbsDimOps, B::float_max_abs_dim);
+        reduce_float_ops!(MaxAbsDimOps, |tensor, axis, _| B::float_max_abs_dim(
+            tensor, axis
+        ));
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
-        let desc = ReduceDimOpIr::create(tensor.into_ir(), dim, || client.create_empty_handle());
+        let desc = ReduceDimOpIr::create(tensor.into_ir(), dim, 1, || client.create_empty_handle());
 
         client
             .register(
@@ -2102,7 +2228,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     fn float_powf(lhs: FloatTensor<Self>, rhs: FloatTensor<Self>) -> FloatTensor<Self> {
         binary_float_ops!(PowOps, B::float_powf);
 
-        let streams = OperationStreams::with_inputs([&lhs, &rhs]);
+        let streams = StreamId::current();
 
         let client = lhs.client.clone();
         let desc = BinaryOpIr::create(lhs.into_ir(), rhs.into_ir(), || {
@@ -2133,7 +2259,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
             }
         }
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc = PermuteOpIr::create(tensor.into_ir(), axes.into(), || {
@@ -2165,7 +2291,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
             }
         }
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc = ShapeOpIr::expand(tensor.into_ir(), shape, || client.create_empty_handle());
@@ -2194,7 +2320,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
             }
         }
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc = FlipOpIr::create(tensor.into_ir(), axes.into(), || {
@@ -2213,7 +2339,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     fn float_round(tensor: FloatTensor<Self>) -> FloatTensor<Self> {
         unary_float_ops!(RoundOps, B::float_round);
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc = UnaryOpIr::create(tensor.into_ir(), || client.create_empty_handle());
@@ -2230,7 +2356,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     fn float_floor(tensor: FloatTensor<Self>) -> FloatTensor<Self> {
         unary_float_ops!(FloorOps, B::float_floor);
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc = UnaryOpIr::create(tensor.into_ir(), || client.create_empty_handle());
@@ -2247,7 +2373,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     fn float_ceil(tensor: FloatTensor<Self>) -> FloatTensor<Self> {
         unary_float_ops!(CeilOps, B::float_ceil);
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc = UnaryOpIr::create(tensor.into_ir(), || client.create_empty_handle());
@@ -2264,7 +2390,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
     fn float_trunc(tensor: FloatTensor<Self>) -> FloatTensor<Self> {
         unary_float_ops!(TruncOps, B::float_trunc);
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc = UnaryOpIr::create(tensor.into_ir(), || client.create_empty_handle());
@@ -2294,7 +2420,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
             }
         }
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc = CastOpIr::create(tensor.into_ir(), dtype.into(), || {
@@ -2331,7 +2457,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
             }
         }
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc = UnfoldOpIr::create(tensor.into_ir(), dim, size, step, || {
@@ -2361,7 +2487,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
             }
         }
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc = UnaryOpIr::create_comparison(tensor.into_ir(), out_dtype.into(), || {
@@ -2391,7 +2517,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
             }
         }
 
-        let streams = OperationStreams::with_inputs([&tensor]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc = UnaryOpIr::create_comparison(tensor.into_ir(), out_dtype.into(), || {
@@ -2428,7 +2554,7 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
             }
         }
 
-        let streams = OperationStreams::with_inputs([&tensor, &grid]);
+        let streams = StreamId::current();
 
         let client = tensor.client.clone();
         let desc =
@@ -2441,6 +2567,25 @@ impl<B: FusionBackend> FloatTensorOps<Self> for Fusion<B> {
                 streams,
                 OperationIr::Float(desc.out.dtype, FloatOperationIr::GridSample2d(desc.clone())),
                 GridSample2dOps::<B>::new(desc),
+            )
+            .output()
+    }
+
+    fn float_hypot(lhs: FloatTensor<Self>, rhs: FloatTensor<Self>) -> FloatTensor<Self> {
+        binary_float_ops!(HypotOps, B::float_hypot);
+
+        let streams = StreamId::current();
+
+        let client = lhs.client.clone();
+        let desc = BinaryOpIr::create(lhs.into_ir(), rhs.into_ir(), || {
+            client.create_empty_handle()
+        });
+
+        client
+            .register(
+                streams,
+                OperationIr::Float(desc.out.dtype, FloatOperationIr::Hypot(desc.clone())),
+                HypotOps::<B>::new(desc),
             )
             .output()
     }

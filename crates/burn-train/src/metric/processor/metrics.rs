@@ -7,20 +7,19 @@ use crate::{
         Adaptor, Metric, MetricDefinition, MetricEntry, MetricId, MetricMetadata, Numeric,
         store::{MetricsUpdate, NumericMetricUpdate},
     },
-    renderer::{EvaluationProgress, TrainingProgress},
 };
 
 pub(crate) struct MetricsTraining<T: ItemLazy, V: ItemLazy> {
-    train: Vec<Box<dyn MetricUpdater<T::ItemSync>>>,
-    valid: Vec<Box<dyn MetricUpdater<V::ItemSync>>>,
-    train_numeric: Vec<Box<dyn NumericMetricUpdater<T::ItemSync>>>,
-    valid_numeric: Vec<Box<dyn NumericMetricUpdater<V::ItemSync>>>,
+    train: Vec<Box<dyn MetricUpdater<T>>>,
+    valid: Vec<Box<dyn MetricUpdater<V>>>,
+    train_numeric: Vec<Box<dyn NumericMetricUpdater<T>>>,
+    valid_numeric: Vec<Box<dyn NumericMetricUpdater<V>>>,
     metric_definitions: HashMap<MetricId, MetricDefinition>,
 }
 
 pub(crate) struct MetricsEvaluation<T: ItemLazy> {
-    test: Vec<Box<dyn MetricUpdater<T::ItemSync>>>,
-    test_numeric: Vec<Box<dyn NumericMetricUpdater<T::ItemSync>>>,
+    test: Vec<Box<dyn MetricUpdater<T>>>,
+    test_numeric: Vec<Box<dyn NumericMetricUpdater<T>>>,
     metric_definitions: HashMap<MetricId, MetricDefinition>,
 }
 
@@ -50,7 +49,7 @@ impl<T: ItemLazy> MetricsEvaluation<T> {
     /// Register a testing metric.
     pub(crate) fn register_test_metric<Me: Metric + 'static>(&mut self, metric: Me)
     where
-        T::ItemSync: Adaptor<Me::Input> + 'static,
+        T: Adaptor<Me::Input> + 'static,
     {
         let metric = MetricWrapper::new(metric);
         self.register_definition(&metric);
@@ -62,7 +61,7 @@ impl<T: ItemLazy> MetricsEvaluation<T> {
         &mut self,
         metric: Me,
     ) where
-        T::ItemSync: Adaptor<Me::Input> + 'static,
+        T: Adaptor<Me::Input> + 'static,
     {
         let metric = MetricWrapper::new(metric);
         self.register_definition(&metric);
@@ -84,7 +83,7 @@ impl<T: ItemLazy> MetricsEvaluation<T> {
     /// Update the testing information from the testing item.
     pub(crate) fn update_test(
         &mut self,
-        item: &EvaluationItem<T::ItemSync>,
+        item: &EvaluationItem<T>,
         metadata: &MetricMetadata,
     ) -> MetricsUpdate {
         let mut entries = Vec::with_capacity(self.test.len());
@@ -108,7 +107,7 @@ impl<T: ItemLazy, V: ItemLazy> MetricsTraining<T, V> {
     /// Register a training metric.
     pub(crate) fn register_train_metric<Me: Metric + 'static>(&mut self, metric: Me)
     where
-        T::ItemSync: Adaptor<Me::Input> + 'static,
+        T: Adaptor<Me::Input> + 'static,
     {
         let metric = MetricWrapper::new(metric);
         self.register_definition(&metric);
@@ -118,7 +117,7 @@ impl<T: ItemLazy, V: ItemLazy> MetricsTraining<T, V> {
     /// Register a validation metric.
     pub(crate) fn register_valid_metric<Me: Metric + 'static>(&mut self, metric: Me)
     where
-        V::ItemSync: Adaptor<Me::Input> + 'static,
+        V: Adaptor<Me::Input> + 'static,
     {
         let metric = MetricWrapper::new(metric);
         self.register_definition(&metric);
@@ -130,7 +129,7 @@ impl<T: ItemLazy, V: ItemLazy> MetricsTraining<T, V> {
         &mut self,
         metric: Me,
     ) where
-        T::ItemSync: Adaptor<Me::Input> + 'static,
+        T: Adaptor<Me::Input> + 'static,
     {
         let metric = MetricWrapper::new(metric);
         self.register_definition(&metric);
@@ -140,7 +139,7 @@ impl<T: ItemLazy, V: ItemLazy> MetricsTraining<T, V> {
     /// Register a numeric validation metric.
     pub(crate) fn register_valid_metric_numeric<Me>(&mut self, metric: Me)
     where
-        V::ItemSync: Adaptor<Me::Input> + 'static,
+        V: Adaptor<Me::Input> + 'static,
         Me: Metric + Numeric + 'static,
     {
         let metric = MetricWrapper::new(metric);
@@ -163,7 +162,7 @@ impl<T: ItemLazy, V: ItemLazy> MetricsTraining<T, V> {
     /// Update the training information from the training item.
     pub(crate) fn update_train(
         &mut self,
-        item: &TrainingItem<T::ItemSync>,
+        item: &TrainingItem<T>,
         metadata: &MetricMetadata,
     ) -> MetricsUpdate {
         let mut entries = Vec::with_capacity(self.train.len());
@@ -185,7 +184,7 @@ impl<T: ItemLazy, V: ItemLazy> MetricsTraining<T, V> {
     /// Update the training information from the validation item.
     pub(crate) fn update_valid(
         &mut self,
-        item: &TrainingItem<V::ItemSync>,
+        item: &TrainingItem<V>,
         metadata: &MetricMetadata,
     ) -> MetricsUpdate {
         let mut entries = Vec::with_capacity(self.valid.len());
@@ -225,40 +224,10 @@ impl<T: ItemLazy, V: ItemLazy> MetricsTraining<T, V> {
     }
 }
 
-impl<T> From<&TrainingItem<T>> for TrainingProgress {
-    fn from(item: &TrainingItem<T>) -> Self {
-        Self {
-            progress: Some(item.progress.clone()),
-            global_progress: item.global_progress.clone(),
-            iteration: item.iteration,
-        }
-    }
-}
-
-impl<T> From<&EvaluationItem<T>> for TrainingProgress {
-    fn from(item: &EvaluationItem<T>) -> Self {
-        Self {
-            progress: None,
-            global_progress: item.progress.clone(),
-            iteration: item.iteration,
-        }
-    }
-}
-
-impl<T> From<&EvaluationItem<T>> for EvaluationProgress {
-    fn from(item: &EvaluationItem<T>) -> Self {
-        Self {
-            progress: item.progress.clone(),
-            iteration: item.iteration,
-        }
-    }
-}
-
 impl<T> From<&TrainingItem<T>> for MetricMetadata {
     fn from(item: &TrainingItem<T>) -> Self {
         Self {
             progress: item.progress.clone(),
-            global_progress: item.global_progress.clone(),
             iteration: item.iteration,
             lr: item.lr,
         }
@@ -269,7 +238,6 @@ impl<T> From<&EvaluationItem<T>> for MetricMetadata {
     fn from(item: &EvaluationItem<T>) -> Self {
         Self {
             progress: item.progress.clone(),
-            global_progress: item.progress.clone(),
             iteration: item.iteration,
             lr: None,
         }

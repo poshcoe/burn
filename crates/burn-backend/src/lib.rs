@@ -9,26 +9,17 @@ extern crate derive_new;
 
 extern crate alloc;
 
-mod data;
-pub use data::*;
-
-pub mod distribution;
-pub use distribution::*;
-pub mod element;
-pub use element::*;
-
 /// [`Backend`] trait and required types.
 pub mod backend;
 pub use backend::*;
 
-/// Backend tensor primitives and operations.
-pub mod tensor;
-
 // Re-exported types
 pub use burn_std::reader::*; // Useful so that backends don't have to add `burn_std` as a dependency.
 pub use burn_std::{
-    AllocationProperty, BoolDType, BoolStore, Bytes, DType, DeviceHandle, FloatDType, IntDType,
-    bf16, f16, stream_id::StreamId,
+    AllocationProperty, BoolDType, BoolStore, Bytes, DType, DataError, DeviceHandle, Distribution,
+    DistributionSampler, DistributionSamplerKind, Element, ElementConversion, ElementEq,
+    ElementOrdered, ElementRandom, FloatDType, IntDType, Scalar, SplitPolicy, TensorData,
+    Tolerance, bf16, distribution, element, f16, stream_id::StreamId,
 };
 
 /// Shape definition.
@@ -49,45 +40,107 @@ pub mod indexing {
 }
 pub use indexing::*;
 
-/// Quantization data representation.
-pub mod quantization {
-    pub use crate::tensor::quantization::*;
-    pub use burn_std::quantization::{
-        BlockSize, QuantLevel, QuantMode, QuantParam, QuantPropagation, QuantScheme, QuantStore,
-        QuantValue, QuantizedBytes,
-    };
-}
+mod alias;
+pub use alias::*;
 
-#[cfg(feature = "cubecl-wgpu")]
+/// Quantization data representation.
+pub mod quantization;
+
+/// CubeCL inter-operation helpers (gated by the `cubecl` feature).
+///
+/// Provides plain conversion functions between burn's [`DType`] and cubecl's
+/// `ElemType` / `StorageType`. They are intentionally exposed as named
+/// functions rather than `From`/`Into` impls so the cubecl type tree does not
+/// leak into `burn-std`'s public surface.
+#[cfg(feature = "cubecl")]
+pub mod cubecl;
+
+#[cfg(any(
+    feature = "cubecl-wgpu",
+    feature = "cubecl-metal",
+    feature = "cubecl-vulkan",
+    feature = "cubecl-webgpu"
+))]
 mod cube_wgpu {
     use crate::backend::DeviceOps;
+    use burn_std::{BoolStore, DType, DeviceSettings};
     use cubecl::wgpu::WgpuDevice;
 
-    impl DeviceOps for WgpuDevice {}
+    impl DeviceOps for WgpuDevice {
+        #[cfg(not(any(feature = "cubecl-metal", feature = "cubecl-vulkan")))]
+        fn defaults(&self) -> DeviceSettings {
+            DeviceSettings::new(
+                DType::F32,
+                DType::I32,
+                DType::Bool(BoolStore::U32),
+                Default::default(),
+            )
+        }
+
+        #[cfg(any(feature = "cubecl-metal", feature = "cubecl-vulkan"))]
+        fn defaults(&self) -> DeviceSettings {
+            DeviceSettings::new(
+                DType::F32,
+                DType::I32,
+                DType::Bool(BoolStore::U8),
+                Default::default(),
+            )
+        }
+    }
 }
 
 #[cfg(feature = "cubecl-cuda")]
 mod cube_cuda {
     use crate::backend::DeviceOps;
+    use burn_std::{BoolStore, DType, DeviceSettings};
     use cubecl::cuda::CudaDevice;
 
-    impl DeviceOps for CudaDevice {}
+    impl DeviceOps for CudaDevice {
+        fn defaults(&self) -> DeviceSettings {
+            DeviceSettings::new(
+                DType::F32,
+                DType::I32,
+                DType::Bool(BoolStore::U8),
+                Default::default(),
+            )
+        }
+    }
 }
 
 #[cfg(feature = "cubecl-cpu")]
 mod cube_cpu {
     use crate::backend::DeviceOps;
+    use burn_std::{BoolStore, DType, DeviceSettings};
     use cubecl::cpu::CpuDevice;
 
-    impl DeviceOps for CpuDevice {}
+    impl DeviceOps for CpuDevice {
+        fn defaults(&self) -> DeviceSettings {
+            DeviceSettings::new(
+                DType::F32,
+                DType::I32,
+                DType::Bool(BoolStore::U8),
+                Default::default(),
+            )
+        }
+    }
 }
 
 #[cfg(feature = "cubecl-hip")]
 mod cube_hip {
     use crate::backend::DeviceOps;
+    use burn_std::{BoolStore, DType, DeviceSettings};
     use cubecl::hip::AmdDevice;
 
-    impl DeviceOps for AmdDevice {}
+    impl DeviceOps for AmdDevice {
+        fn defaults(&self) -> DeviceSettings {
+            DeviceSettings::new(
+                DType::F32,
+                DType::I32,
+                DType::Bool(BoolStore::U8),
+                Default::default(),
+            )
+        }
+    }
 }
 
 /// Convenience macro to link to the `burn-tensor` docs for this crate version.

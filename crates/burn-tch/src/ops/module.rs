@@ -1,15 +1,15 @@
-use crate::{LibTorch, TchTensor, element::TchElement};
+use crate::{IntoKind, LibTorch, TchTensor};
 use burn_backend::{
-    TensorMetadata,
+    IntDType, TensorMetadata,
     ops::{
         AttentionModuleOptions, ConvOptions, ConvTransposeOptions, DeformConv2dBackward,
         DeformConvOptions, InterpolateMode, InterpolateOptions, MaxPool1dWithIndices,
         MaxPool2dBackward, MaxPool2dWithIndices, ModuleOps, attention::attention_fallback,
     },
-    tensor::FloatTensor,
+    tensor::{FloatTensor, IntTensor},
 };
 
-impl<E: TchElement> ModuleOps<Self> for LibTorch<E> {
+impl ModuleOps<Self> for LibTorch {
     fn embedding(weights: TchTensor, indices: TchTensor) -> TchTensor {
         // Workaround for MPS "Placeholder storage has not been allocated" error.
         // See: https://github.com/pytorch/pytorch/issues/123995
@@ -290,6 +290,7 @@ impl<E: TchElement> ModuleOps<Self> for LibTorch<E> {
         padding: usize,
         dilation: usize,
         ceil_mode: bool,
+        indices_dtype: IntDType,
     ) -> MaxPool1dWithIndices<Self> {
         let (tensor, indices) = tch::Tensor::max_pool1d_with_indices(
             &x.tensor,
@@ -300,7 +301,10 @@ impl<E: TchElement> ModuleOps<Self> for LibTorch<E> {
             ceil_mode,
         );
 
-        MaxPool1dWithIndices::new(TchTensor::new(tensor), TchTensor::new(indices))
+        MaxPool1dWithIndices::new(
+            TchTensor::new(tensor),
+            TchTensor::new(indices.to_kind(indices_dtype.into_kind())),
+        )
     }
 
     fn max_pool2d(
@@ -330,6 +334,7 @@ impl<E: TchElement> ModuleOps<Self> for LibTorch<E> {
         padding: [usize; 2],
         dilation: [usize; 2],
         ceil_mode: bool,
+        indices_dtype: IntDType,
     ) -> MaxPool2dWithIndices<Self> {
         let (tensor, indices) = tch::Tensor::max_pool2d_with_indices(
             &x.tensor,
@@ -340,7 +345,10 @@ impl<E: TchElement> ModuleOps<Self> for LibTorch<E> {
             ceil_mode,
         );
 
-        MaxPool2dWithIndices::new(TchTensor::new(tensor), TchTensor::new(indices))
+        MaxPool2dWithIndices::new(
+            TchTensor::new(tensor),
+            TchTensor::new(indices.to_kind(indices_dtype.into_kind())),
+        )
     }
 
     fn max_pool2d_with_indices_backward(
@@ -397,6 +405,9 @@ impl<E: TchElement> ModuleOps<Self> for LibTorch<E> {
             InterpolateMode::Nearest => {
                 tch::Tensor::upsample_nearest2d(&x.tensor, output_size, None, None)
             }
+            InterpolateMode::NearestExact => {
+                panic!("nearest exact interpolation is not supported by PyTorch/tch backend")
+            }
             InterpolateMode::Bilinear => {
                 tch::Tensor::upsample_bilinear2d(&x.tensor, output_size, align_corners, None, None)
             }
@@ -430,6 +441,11 @@ impl<E: TchElement> ModuleOps<Self> for LibTorch<E> {
                 None,
                 None,
             ),
+            InterpolateMode::NearestExact => {
+                panic!(
+                    "nearest exact interpolation backward is not supported by PyTorch/tch backend"
+                )
+            }
             InterpolateMode::Bilinear => tch::Tensor::upsample_bilinear2d_backward(
                 &grad.tensor,
                 output_size,
@@ -498,6 +514,77 @@ impl<E: TchElement> ModuleOps<Self> for LibTorch<E> {
         TchTensor::new(tensor)
     }
 
+    fn has_ctc_loss_backward() -> bool {
+        true
+    }
+
+    fn ctc_loss(
+        log_probs: FloatTensor<Self>,
+        targets: IntTensor<Self>,
+        input_lengths: IntTensor<Self>,
+        target_lengths: IntTensor<Self>,
+        blank: usize,
+    ) -> FloatTensor<Self> {
+        // PyTorch's CTC requires int64 for targets and length tensors.
+        let targets_i64 = targets.tensor.to_kind(tch::Kind::Int64);
+        let input_lengths_i64 = input_lengths.tensor.to_kind(tch::Kind::Int64);
+        let target_lengths_i64 = target_lengths.tensor.to_kind(tch::Kind::Int64);
+
+        // Reduction::None returns per-sample losses [N], matching the trait contract.
+        let tensor = tch::Tensor::ctc_loss_tensor(
+            &log_probs.tensor,
+            &targets_i64,
+            &input_lengths_i64,
+            &target_lengths_i64,
+            blank as i64,
+            tch::Reduction::None,
+            false,
+        );
+
+        TchTensor::new(tensor)
+    }
+
+    fn ctc_loss_backward(
+        log_probs: FloatTensor<Self>,
+        targets: IntTensor<Self>,
+        input_lengths: IntTensor<Self>,
+        target_lengths: IntTensor<Self>,
+        grad_loss: FloatTensor<Self>,
+        blank: usize,
+    ) -> FloatTensor<Self> {
+        let targets_i64 = targets.tensor.to_kind(tch::Kind::Int64);
+        let input_lengths_i64 = input_lengths.tensor.to_kind(tch::Kind::Int64);
+        let target_lengths_i64 = target_lengths.tensor.to_kind(tch::Kind::Int64);
+
+        // Recompute forward to get neg_log_likelihood and log_alpha (LibTorch's
+        // backward needs both). PyTorch caches log_alpha during the autograd
+        // forward; our trait has no caching slot for it, so we redo the alpha
+        // recursion here. This is still a single-call into LibTorch's fused
+        // kernel and avoids the ~40T host-side dispatches.
+        let (neg_log_likelihood, log_alpha) = tch::Tensor::internal_ctc_loss_tensor(
+            &log_probs.tensor,
+            &targets_i64,
+            &input_lengths_i64,
+            &target_lengths_i64,
+            blank as i64,
+            false,
+        );
+
+        let grad = tch::Tensor::internal_ctc_loss_backward_tensor(
+            &grad_loss.tensor,
+            &log_probs.tensor,
+            &targets_i64,
+            &input_lengths_i64,
+            &target_lengths_i64,
+            &neg_log_likelihood,
+            &log_alpha,
+            blank as i64,
+            false,
+        );
+
+        TchTensor::new(grad)
+    }
+
     fn rfft(
         signal: FloatTensor<Self>,
         dim: usize,
@@ -524,3 +611,35 @@ impl<E: TchElement> ModuleOps<Self> for LibTorch<E> {
 
 impl<E: TchElement> burn_backend::ops::rnn::lstm::LstmOps<Self> for LibTorch<E> {}
 impl<E: TchElement> burn_backend::ops::rnn::RnnOps<Self> for LibTorch<E> {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use burn_backend::{
+        TensorData, Tolerance,
+        ops::{FloatTensorOps, IntTensorOps},
+        read_sync,
+    };
+
+    type B = crate::LibTorch;
+
+    #[test]
+    fn ctc_loss_uniform() {
+        // T=3, N=1, C=2, blank=0, target=[1, 1].
+        // Only valid alignment is (1, 0, 1) with prob (1/2)^3.
+        // Loss = -ln(1/8) = 3 * ln(2)
+        let device = Default::default();
+        let log_probs_data = vec![(0.5f32).ln(); 3 * 2];
+        let log_probs = B::float_from_data(TensorData::new(log_probs_data, [3, 1, 2]), &device);
+        let targets = B::int_from_data(TensorData::from([[1i64, 1]]), &device);
+        let input_lengths = B::int_from_data(TensorData::from([3i64]), &device);
+        let target_lengths = B::int_from_data(TensorData::from([2i64]), &device);
+
+        let loss =
+            <B as ModuleOps<B>>::ctc_loss(log_probs, targets, input_lengths, target_lengths, 0);
+
+        let out = read_sync(B::float_into_data(loss)).unwrap();
+        let expected = TensorData::from([3.0f32 * 2.0f32.ln()]);
+        out.assert_approx_eq::<f32>(&expected, Tolerance::rel_abs(1e-3, 1e-3));
+    }
+}

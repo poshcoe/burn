@@ -30,7 +30,7 @@ impl<LC: LearningComponentsTypes> DdpValidEpoch<LC> {
     /// * `processor` - The event processor to use.
     pub fn run(
         &self,
-        model: &<LC as LearningComponentsTypes>::TrainingModel,
+        model: &<LC as LearningComponentsTypes>::Model,
         global_progress: &Progress,
         processor: &mut SupervisedTrainingEventProcessor<LC>,
         interrupter: &Interrupter,
@@ -47,13 +47,7 @@ impl<LC: LearningComponentsTypes> DdpValidEpoch<LC> {
             iteration += 1;
 
             let item = model.step(item);
-            let item = TrainingItem::new(
-                item,
-                progress,
-                global_progress.clone(),
-                Some(iteration),
-                None,
-            );
+            let item = TrainingItem::new(item, progress, Some(iteration), None);
 
             processor.process_valid(LearnerEvent::ProcessedItem(item));
 
@@ -62,7 +56,6 @@ impl<LC: LearningComponentsTypes> DdpValidEpoch<LC> {
                 break;
             }
         }
-        processor.process_valid(LearnerEvent::EndEpoch(epoch));
     }
 }
 
@@ -79,7 +72,6 @@ impl<LC: LearningComponentsTypes> DdpTrainEpoch<LC> {
     /// # Returns
     ///
     /// The trained model and the optimizer.
-    #[allow(clippy::too_many_arguments)]
     pub fn run(
         &self,
         learner: &mut Learner<LC>,
@@ -87,7 +79,6 @@ impl<LC: LearningComponentsTypes> DdpTrainEpoch<LC> {
         processor: Arc<Mutex<SupervisedTrainingEventProcessor<LC>>>,
         interrupter: &Interrupter,
         peer_count: usize,
-        is_main: bool,
     ) {
         let epoch = global_progress.items_processed;
         log::info!("Executing training step for epoch {}", epoch,);
@@ -130,7 +121,6 @@ impl<LC: LearningComponentsTypes> DdpTrainEpoch<LC> {
             let item = TrainingItem::new(
                 item.item,
                 progress,
-                global_progress.clone(),
                 Some(iteration),
                 Some(learner.lr_current()),
             );
@@ -144,11 +134,6 @@ impl<LC: LearningComponentsTypes> DdpTrainEpoch<LC> {
                 log::info!("Training interrupted.");
                 break;
             }
-        }
-
-        if is_main {
-            let mut processor = processor.lock().unwrap();
-            processor.process_train(LearnerEvent::EndEpoch(epoch));
         }
     }
 }

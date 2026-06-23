@@ -8,11 +8,10 @@ use crate::{
 use burn_core::{data::dataloader::DataLoader, module::Module};
 use std::sync::Arc;
 
-pub(crate) type TestBackend<EC> = <EC as EvaluatorComponentTypes>::Backend;
 pub(crate) type TestInput<EC> = <<EC as EvaluatorComponentTypes>::Model as InferenceStep>::Input;
 pub(crate) type TestOutput<EC> = <<EC as EvaluatorComponentTypes>::Model as InferenceStep>::Output;
 
-pub(crate) type TestLoader<EC> = Arc<dyn DataLoader<TestBackend<EC>, TestInput<EC>>>;
+pub(crate) type TestLoader<EC> = Arc<dyn DataLoader<TestInput<EC>>>;
 
 /// Evaluates a model on a specific dataset.
 pub struct Evaluator<EC: EvaluatorComponentTypes> {
@@ -29,32 +28,54 @@ impl<EC: EvaluatorComponentTypes> Evaluator<EC> {
     ///
     /// The data will be stored and displayed under the provided name.
     pub fn eval<S: core::fmt::Display>(
-        mut self,
+        self,
         name: S,
         dataloader: TestLoader<EC>,
     ) -> Box<dyn MetricsRenderer> {
-        // Move dataloader to the model device
-        let dataloader = dataloader.to_device(self.model.devices().first().unwrap());
+        self.eval_all([(name, dataloader)])
+    }
 
-        let name = EvaluationName::new(name);
-        let mut iterator = dataloader.iter();
-        let mut iteration = 0;
+    /// Run the evaluation on multiple named datasets sequentially.
+    ///
+    /// Prefer this over calling [`eval`](Self::eval) in a loop — the progress logger
+    /// receives the correct `total_tests` count and `end_test` is called between splits.
+    pub fn eval_all<S: core::fmt::Display>(
+        mut self,
+        splits: impl IntoIterator<Item = (S, TestLoader<EC>)>,
+    ) -> Box<dyn MetricsRenderer> {
+        let splits: Vec<_> = splits.into_iter().collect();
+        let total_tests = splits.len();
 
-        self.event_processor.process_test(EvaluatorEvent::Start);
-        while let Some(item) = iterator.next() {
-            let progress = iterator.progress();
-            iteration += 1;
+        self.event_processor
+            .process_test(EvaluatorEvent::Start { total_tests });
 
-            let item = self.model.step(item);
-            let item = EvaluationItem::new(item, progress, Some(iteration));
+        for (name, dataloader) in splits {
+            let dataloader = dataloader.to_device(self.model.devices().first().unwrap());
+            let name = EvaluationName::new(name);
+            let total_items = dataloader.num_items();
+            let mut iterator = dataloader.iter();
+            let mut iteration = 0;
 
             self.event_processor
-                .process_test(EvaluatorEvent::ProcessedItem(name.clone(), item));
+                .process_test(EvaluatorEvent::StartTest(name.clone(), total_items));
 
-            if self.interrupter.should_stop() {
-                log::info!("Testing interrupted.");
-                break;
+            while let Some(item) = iterator.next() {
+                let progress = iterator.progress();
+                iteration += 1;
+
+                let item = self.model.step(item);
+                let item = EvaluationItem::new(item, progress, Some(iteration));
+
+                self.event_processor
+                    .process_test(EvaluatorEvent::ProcessedItem(name.clone(), item));
+
+                if self.interrupter.should_stop() {
+                    log::info!("Testing interrupted.");
+                    break;
+                }
             }
+
+            self.event_processor.process_test(EvaluatorEvent::EndTest);
         }
 
         let summary = self.summary.and_then(|summary| {

@@ -4,12 +4,13 @@ use std::sync::{Arc, Mutex};
 use crate::ddp::worker::DdpWorker;
 use crate::metric::store::EventStoreClient;
 use crate::{
-    DistributedRuntime, EarlyStoppingStrategyRef, Interrupter, Learner, LearningComponentsTypes,
-    SupervisedLearningStrategy, SupervisedTrainingEventProcessor, TrainLoader, TrainingBackend,
-    TrainingComponents, TrainingModel, ValidLoader,
+    EarlyStoppingStrategyRef, Interrupter, Learner, LearningComponentsTypes,
+    SupervisedLearningStrategy, SupervisedTrainingEventProcessor, TrainLoader, TrainingComponents,
+    TrainingModel, ValidLoader,
 };
 use burn_core::data::dataloader::split::split_dataloader;
-use burn_core::tensor::{Device, backend::DeviceOps};
+use burn_core::tensor::Device;
+use burn_core::tensor::distributed::DistributedContext;
 
 #[derive(Clone)]
 pub(crate) struct WorkerComponents {
@@ -23,26 +24,33 @@ pub(crate) struct WorkerComponents {
     pub early_stopping: Option<EarlyStoppingStrategyRef>,
     /// A reference to an [EventStoreClient](EventStoreClient).
     pub event_store: Arc<EventStoreClient>,
+    /// The total number of items in the training dataset.
+    pub train_total_items: usize,
+    /// The total number of items in the validation dataset.
+    pub valid_total_items: usize,
 }
 
 /// A training strategy for Distributed Data Parallel (DDP) training.
 ///
 /// This strategy manages multiple workers and coordinates cross-device
-/// gradient synchronization using the provided [`DistributedRuntime`].
-pub struct DdpTrainingStrategy<LC: LearningComponentsTypes> {
-    devices: Vec<Device<TrainingBackend<LC>>>,
-    runtime: Box<dyn DistributedRuntime>,
+/// gradient synchronization using the provided [`DistributedContext`].
+pub struct DdpTrainingStrategy {
+    devices: Vec<Device>,
+    /// Kept alive to anchor the lifetime of the underlying distributed server.
+    /// Spawns communication servers on creation, automatically tears them down on drop.
+    _context: DistributedContext,
 }
-impl<LC: LearningComponentsTypes> DdpTrainingStrategy<LC> {
-    pub fn new(
-        devices: Vec<Device<TrainingBackend<LC>>>,
-        runtime: Box<dyn DistributedRuntime>,
-    ) -> Self {
-        Self { devices, runtime }
+
+impl DdpTrainingStrategy {
+    pub fn new(devices: Vec<Device>, context: DistributedContext) -> Self {
+        Self {
+            devices,
+            _context: context,
+        }
     }
 }
 
-impl<LC> SupervisedLearningStrategy<LC> for DdpTrainingStrategy<LC>
+impl<LC> SupervisedLearningStrategy<LC> for DdpTrainingStrategy
 where
     LC: LearningComponentsTypes + Send + 'static,
 {
@@ -56,11 +64,13 @@ where
     ) -> (TrainingModel<LC>, SupervisedTrainingEventProcessor<LC>) {
         // The reference model is always on the first device provided.
         let main_device = self.devices.first().unwrap();
+        let train_total_items = dataloader_train.num_items();
+        let valid_total_items = dataloader_valid.num_items();
         // One worker per device, so we use a fixed device strategy
         // for each (worker) data loader. This matches the expected device on the worker, so we
         // don't have to move the data between devices.
         let mut dataloaders_train = split_dataloader(dataloader_train, &self.devices);
-        let dataloader_valid = dataloader_valid.to_device(main_device.inner());
+        let dataloader_valid = dataloader_valid.to_device(&main_device.clone().inner());
 
         let main_device = self.devices[0].clone();
         let peer_count = self.devices.len();
@@ -73,9 +83,9 @@ where
             interrupter: interrupter.clone(),
             early_stopping: training_components.early_stopping,
             event_store: training_components.event_store,
+            train_total_items,
+            valid_total_items,
         };
-
-        self.runtime.start();
 
         // Start worker for main device
         // First training dataloader corresponds to main device
@@ -117,8 +127,6 @@ where
                 .join()
                 .expect("Distributed data parallel worker failed");
         }
-
-        self.runtime.close();
 
         // Main worker had the event processor
         let model = main_handle

@@ -1,19 +1,53 @@
 use crate::{
     CubeRuntime,
-    kernel::into_contiguous,
+    kernel::{interpolate::interpolate_autotune, into_contiguous},
     ops::{numeric::empty_device_dtype, permute_nchw_to_nhwc, permute_nhwc_to_nchw},
     tensor::CubeTensor,
 };
-use burn_backend::{
-    Shape, TensorMetadata,
-    ops::{InterpolateMode, InterpolateOptions},
+use burn_backend::cubecl::dtype_to_storage_type;
+use burn_backend::{Shape, TensorMetadata, ops::InterpolateMode, ops::InterpolateOptions};
+#[cfg(not(feature = "autotune"))]
+use cubek::interpolate::definition::TileSize;
+use cubek::interpolate::{
+    definition::{
+        InterpolateError, InterpolateMode as CubekInterpolateMode,
+        InterpolateOptions as CubekInterpolateOptions, NearestMode as CubekNearestMode,
+    },
+    interpolate as cubek_interpolate, interpolate_backward as cubek_interpolate_backward,
+    launch::InterpolateStrategy as CubekInterpolateStrategy,
+    routines::{
+        BlueprintStrategy, GlobalMemoryRoutine, GlobalMemoryStrategy, SharedMemoryRoutine,
+        SharedMemoryStrategy,
+    },
 };
 
-use super::{
-    bicubic::interpolate_bicubic_launch, bilinear::interpolate_bilinear_launch,
-    lanczos3::interpolate_lanczos3_launch, nearest::interpolate_nearest_launch,
-    nearest_backward::interpolate_nearest_backward_launch,
-};
+#[derive(Debug)]
+/// Strategy used to select which interpolate implementation to run.
+pub enum InterpolateStrategy {
+    /// Default interpolate strategy.
+    GlobalMemory(GlobalMemoryStrategy),
+
+    /// Use shared memory for caching tiles of the input and output.
+    SharedMemory(SharedMemoryStrategy),
+
+    /// Automatically benchmark and select the best strategy at runtime.
+    #[cfg(feature = "autotune")]
+    Autotune,
+}
+
+impl Default for InterpolateStrategy {
+    fn default() -> Self {
+        // if autotune is enabled, default to autotune
+        #[cfg(feature = "autotune")]
+        return InterpolateStrategy::Autotune;
+
+        // if autotune is disabled, default to global memory with a 16x16 tile size
+        #[cfg(not(feature = "autotune"))]
+        InterpolateStrategy::GlobalMemory(GlobalMemoryStrategy {
+            tile_size: TileSize::new(16, 16),
+        })
+    }
+}
 
 /// Interpolate operation
 ///
@@ -22,7 +56,37 @@ pub fn interpolate<R: CubeRuntime>(
     input: CubeTensor<R>,
     output_size: [usize; 2],
     options: InterpolateOptions,
-) -> CubeTensor<R> {
+    strategy: InterpolateStrategy,
+) -> Result<CubeTensor<R>, InterpolateError> {
+    match strategy {
+        InterpolateStrategy::GlobalMemory(strategy) => execute_interpolate(
+            input,
+            output_size,
+            options,
+            CubekInterpolateStrategy::GlobalMemoryStrategy(
+                BlueprintStrategy::<GlobalMemoryRoutine>::Inferred(strategy),
+            ),
+        ),
+        InterpolateStrategy::SharedMemory(strategy) => execute_interpolate(
+            input,
+            output_size,
+            options,
+            CubekInterpolateStrategy::SharedMemoryStrategy(
+                BlueprintStrategy::<SharedMemoryRoutine>::Inferred(strategy),
+            ),
+        ),
+        #[cfg(feature = "autotune")]
+        InterpolateStrategy::Autotune => Ok(interpolate_autotune(input, output_size, options)),
+    }
+}
+
+/// Execute the given interpolate strategy without autotuning. This is used by the autotune implementation to run each candidate strategy.
+pub fn execute_interpolate<R: CubeRuntime>(
+    input: CubeTensor<R>,
+    output_size: [usize; 2],
+    options: InterpolateOptions,
+    strategy: CubekInterpolateStrategy,
+) -> Result<CubeTensor<R>, InterpolateError> {
     let [batch_size, channels, _, _] = input.meta.shape().dims();
     let [out_height, out_width] = output_size;
 
@@ -36,15 +100,16 @@ pub fn interpolate<R: CubeRuntime>(
         input.dtype,
     );
 
-    let align_corners = options.align_corners;
-    let output = match options.mode {
-        InterpolateMode::Nearest => interpolate_nearest_launch(input, output),
-        InterpolateMode::Bilinear => interpolate_bilinear_launch(input, output, align_corners),
-        InterpolateMode::Bicubic => interpolate_bicubic_launch(input, output, align_corners),
-        InterpolateMode::Lanczos3 => interpolate_lanczos3_launch(input, output, align_corners),
-    };
+    cubek_interpolate(
+        &input.client.clone(),
+        input.clone().binding(),
+        output.clone().binding(),
+        map_options(options.clone()),
+        strategy,
+        dtype_to_storage_type(input.dtype),
+    )?;
 
-    permute_nhwc_to_nchw(output)
+    Ok(permute_nhwc_to_nchw(output))
 }
 
 /// Backward interpolate operation
@@ -67,18 +132,37 @@ pub fn interpolate_backward<R: CubeRuntime>(
         input.dtype,
     );
 
-    let output = match options.mode {
-        InterpolateMode::Nearest => interpolate_nearest_backward_launch(out_grad, output),
-        InterpolateMode::Bilinear => {
-            panic!("bilinear interpolation backward is not supported by JIT backend")
-        }
-        InterpolateMode::Bicubic => {
-            panic!("bicubic interpolation backward is not supported by JIT backend")
-        }
-        InterpolateMode::Lanczos3 => {
-            panic!("lanczos3 interpolation backward is not supported by JIT backend")
-        }
-    };
+    cubek_interpolate_backward(
+        &input.client.clone(),
+        input.clone().binding(),
+        out_grad.binding(),
+        output.clone().binding(),
+        map_options(options.clone()),
+        dtype_to_storage_type(input.dtype),
+    )
+    .unwrap_or_else(|e| {
+        panic!(
+            "interpolate_backward kernel failed (device={0:?}, dtype={1:?}, options={2:?}): {3}",
+            input.device, input.dtype, options, e
+        )
+    });
 
     permute_nhwc_to_nchw(output)
+}
+
+fn map_options(options: InterpolateOptions) -> CubekInterpolateOptions {
+    CubekInterpolateOptions {
+        mode: {
+            match options.mode {
+                InterpolateMode::Nearest => CubekInterpolateMode::Nearest(CubekNearestMode::Floor),
+                InterpolateMode::NearestExact => {
+                    CubekInterpolateMode::Nearest(CubekNearestMode::Exact)
+                }
+                InterpolateMode::Bilinear => CubekInterpolateMode::Bilinear,
+                InterpolateMode::Bicubic => CubekInterpolateMode::Bicubic,
+                InterpolateMode::Lanczos3 => CubekInterpolateMode::Lanczos3,
+            }
+        },
+        align_corners: options.align_corners,
+    }
 }

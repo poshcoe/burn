@@ -10,6 +10,7 @@ use crate::{
     ops::{numeric::empty_device_dtype, reshape, swap_dims},
     tensor::CubeTensor,
 };
+use burn_backend::cubecl::dtype_to_storage_type;
 use burn_backend::{
     Shape,
     ops::{ConvTransposeOptions, conv::calculate_conv_transpose_output_size},
@@ -17,7 +18,7 @@ use burn_backend::{
 use cubecl::{
     calculate_cube_count_elemwise,
     prelude::*,
-    std::{FastDivmod, tensor::layout::linear::LinearView},
+    std::{FastDivmod, tensor::layout::linear::LinearViewMut},
 };
 use cubek::convolution::components::ConvSetupError;
 
@@ -202,7 +203,7 @@ fn col2im<R: CubeRuntime>(
             cube_dim,
             address_type!(columns, bias, out),
             columns.into_tensor_arg(),
-            bias.map(|bias| bias.into_tensor_arg()).into(),
+            bias.map(|bias| bias.into_buffer_arg()).into(),
             out.into_linear_view(),
             shape,
             Col2ImArgsLaunch::new(
@@ -217,7 +218,7 @@ fn col2im<R: CubeRuntime>(
                 options.stride[0],
                 options.stride[1],
             ),
-            dtype.into(),
+            dtype_to_storage_type(dtype),
         )
     };
 
@@ -243,8 +244,8 @@ struct Col2ImArgs {
 #[cube(launch_unchecked, address_type = "dynamic")]
 fn col2im_kernel<E: Numeric>(
     columns: &Tensor<E>,
-    bias: &ComptimeOption<Tensor<E>>,
-    image: &mut LinearView<E, ReadWrite>,
+    bias: ComptimeOption<&[E]>,
+    mut image: LinearViewMut<'_, E>,
     image_shape: Sequence<FastDivmod<usize>>,
     args: &Col2ImArgs,
     #[define(E)] _dtype: StorageType,
@@ -300,7 +301,7 @@ fn col2im_kernel<E: Numeric>(
 
     #[comptime]
     match bias {
-        ComptimeOption::Some(bias) => image[ABSOLUTE_POS] = val + bias[ch_im],
-        ComptimeOption::None => image[ABSOLUTE_POS] = val,
+        ComptimeOption::Some(bias) => image.write(ABSOLUTE_POS, val + bias[ch_im]),
+        ComptimeOption::None => image.write(ABSOLUTE_POS, val),
     }
 }

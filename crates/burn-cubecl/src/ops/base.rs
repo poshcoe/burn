@@ -1,6 +1,7 @@
 use crate::{CubeRuntime, kernel, ops::numeric::empty_device_dtype, tensor::CubeTensor};
+use burn_backend::cubecl::dtype_to_storage_type;
 use burn_backend::{
-    DType, ExecutionError, QTensorPrimitive, Shape, TensorData,
+    DType, ExecutionError, Shape, TensorData,
     quantization::{QuantLevel, QuantStore, params_shape},
 };
 use burn_backend::{TensorMetadata, ops::unfold::calculate_unfold_shape};
@@ -12,6 +13,13 @@ use cubecl::{ir::VectorSize, server::CopyDescriptor};
 use cubecl::{quant::scheme::BlockSize, tensor_vector_size_parallel};
 
 pub(crate) fn from_data<R: CubeRuntime>(data: TensorData, device: &R::Device) -> CubeTensor<R> {
+    // `TensorData` may contain lazily materialized device-backed bytes produced
+    // by `into_data()`. These unnecessary round-trips should be avoided, but
+    // materializing before re-uploading avoids recursive runtime submission.
+    if data.bytes.property() == burn_std::AllocationProperty::Device {
+        let _ = data.bytes.read(burn_std::Reader::new());
+    }
+
     let client = R::client(device);
     let alloc = client.create_tensor(data.bytes, data.shape.clone(), data.dtype.size());
     let shape: Shape = (&data.shape).into();
@@ -35,7 +43,7 @@ pub(crate) async fn into_data<R: CubeRuntime>(
     let binding = CopyDescriptor::new(tensor.handle.binding(), shape, strides, elem_size);
     let bytes = tensor
         .client
-        .read_one_tensor_async(binding)
+        .read_lazy_async(binding)
         .await
         .map_err(|err| ExecutionError::WithContext {
             reason: format!("{err}"),
@@ -66,7 +74,7 @@ pub(crate) fn to_device<R: CubeRuntime>(
         return tensor;
     }
 
-    let tensor = kernel::into_contiguous_aligned(tensor);
+    let mut tensor = kernel::into_contiguous_aligned(tensor);
     let client = R::client(device);
     tensor.to_client(client, device.clone())
 }
@@ -300,7 +308,7 @@ pub fn reshape<R: CubeRuntime>(mut tensor: CubeTensor<R>, shape: Shape) -> CubeT
         &out.client,
         tensor.binding(),
         out.clone().binding(),
-        out.dtype.into(),
+        dtype_to_storage_type(out.dtype),
     );
 
     out
@@ -308,7 +316,7 @@ pub fn reshape<R: CubeRuntime>(mut tensor: CubeTensor<R>, shape: Shape) -> CubeT
 
 /// Reshape a jit tensor to a new shape
 pub fn q_reshape<R: CubeRuntime>(mut tensor: CubeTensor<R>, shape: Shape) -> CubeTensor<R> {
-    let scheme = *tensor.scheme();
+    let scheme = tensor.scheme();
     let curr_shape = tensor.meta.shape();
 
     let shape_values = match scheme.store {

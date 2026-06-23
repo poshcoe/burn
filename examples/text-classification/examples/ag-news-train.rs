@@ -1,12 +1,13 @@
 #![recursion_limit = "256"]
 
-#[cfg(feature = "ddp")]
-use burn::tensor::backend::distributed::{DistributedBackend, DistributedConfig, ReduceOperation};
+// Only the CUDA `launch_multi` path uses these at the top level; the remote module imports
+// them locally. Gating on both features avoids an unused-import warning for `remote,ddp`.
+#[cfg(all(feature = "ddp", feature = "cuda"))]
+use burn::tensor::distributed::{DistributedConfig, ReduceOperation};
 use burn::{
     nn::transformer::TransformerEncoderConfig,
     optim::{AdamConfig, decay::WeightDecayConfig},
-    prelude::*,
-    tensor::backend::{AutodiffBackend, DeviceId},
+    tensor::{Device, DeviceConfig, Element},
     train::ExecutionStrategy,
 };
 
@@ -20,47 +21,51 @@ type ElemType = burn::tensor::f16;
 #[cfg(feature = "flex32")]
 type ElemType = burn::tensor::flex32;
 
-#[cfg(not(feature = "ddp"))]
-pub fn launch_multi<B: AutodiffBackend>() {
-    let type_id = 0;
-    let num_devices = B::device_count(type_id);
+#[cfg(all(feature = "cuda", not(feature = "ddp")))]
+pub fn launch_multi() {
+    let mut devices = Device::enumerate(burn::tensor::DeviceType::Cuda);
+    devices
+        .configure(DeviceConfig::default().float_dtype(ElemType::dtype()))
+        .unwrap();
 
-    let devices = (0..num_devices)
-        .map(|i| B::Device::from_id(DeviceId::new(type_id, i as u16)))
-        .collect();
-
-    launch::<B>(ExecutionStrategy::MultiDevice(
-        devices,
+    launch(ExecutionStrategy::MultiDevice(
+        devices.into_vec(),
         burn::train::MultiDeviceOptim::OptimSharded,
     ))
 }
 
-#[cfg(feature = "ddp")]
-pub fn launch_multi<B: AutodiffBackend + DistributedBackend>() {
-    let type_id = 0;
-    let num_devices = B::device_count(type_id);
+#[cfg(all(feature = "cuda", feature = "ddp"))]
+pub fn launch_multi() {
+    let mut devices = Device::enumerate(burn::tensor::DeviceType::Cuda);
+    devices
+        .configure(DeviceConfig::default().float_dtype(ElemType::dtype()))
+        .unwrap();
 
-    let devices = (0..num_devices)
-        .map(|i| B::Device::from_id(DeviceId::new(type_id, i as u16)))
-        .collect();
-
-    launch::<B>(ExecutionStrategy::ddp(
-        devices,
+    launch(ExecutionStrategy::ddp(
+        devices.into_vec(),
         DistributedConfig {
             all_reduce_op: ReduceOperation::Mean,
         },
     ))
 }
 
-pub fn launch<B: AutodiffBackend>(strategy: ExecutionStrategy<B>) {
+pub fn launch_single(mut device: Device) {
+    device
+        .configure(DeviceConfig::default().float_dtype(ElemType::dtype()))
+        .unwrap();
+
+    launch(ExecutionStrategy::SingleDevice(device))
+}
+
+pub fn launch(strategy: ExecutionStrategy) {
     let config = ExperimentConfig::new(
-        TransformerEncoderConfig::new(256, 1024, 8, 4)
+        TransformerEncoderConfig::new(128, 512, 4, 4)
             .with_norm_first(true)
             .with_quiet_softmax(true),
         AdamConfig::new().with_weight_decay(Some(WeightDecayConfig::new(5e-5))),
     );
 
-    text_classification::training::train::<B, AgNewsDataset>(
+    text_classification::training::train::<AgNewsDataset>(
         strategy,
         AgNewsDataset::train(),
         AgNewsDataset::test(),
@@ -71,124 +76,98 @@ pub fn launch<B: AutodiffBackend>(strategy: ExecutionStrategy<B>) {
 
 #[cfg(feature = "tch-gpu")]
 mod tch_gpu {
-    use super::*;
-    use crate::{ElemType, launch};
-    use burn::backend::autodiff::checkpoint::strategy::BalancedCheckpointing;
-    use burn::backend::{
-        Autodiff,
-        libtorch::{LibTorch, LibTorchDevice},
-    };
+    use burn::tensor::{Device, DeviceIndex};
 
     pub fn run() {
         #[cfg(not(target_os = "macos"))]
-        let device = LibTorchDevice::Cuda(0);
+        let device = Device::libtorch_cuda(DeviceIndex::Default);
         #[cfg(target_os = "macos")]
-        let device = LibTorchDevice::Mps;
+        let device = Device::libtorch_mps();
 
-        launch::<Autodiff<LibTorch<ElemType>>>(ExecutionStrategy::SingleDevice(device));
+        crate::launch_single(device);
     }
 }
 
 #[cfg(feature = "tch-cpu")]
 mod tch_cpu {
-    use super::*;
-    use burn::backend::{
-        Autodiff,
-        libtorch::{LibTorch, LibTorchDevice},
-    };
-
-    use crate::{ElemType, launch};
+    use burn::tensor::Device;
 
     pub fn run() {
-        launch::<Autodiff<LibTorch<ElemType>>>(ExecutionStrategy::SingleDevice(
-            LibTorchDevice::Cpu,
-        ));
+        crate::launch_single(Device::libtorch());
     }
 }
 
-#[cfg(feature = "wgpu")]
+#[cfg(any(feature = "wgpu", feature = "vulkan", feature = "metal"))]
 mod wgpu {
-    use super::*;
-    use crate::{ElemType, launch};
-    use burn::backend::{Autodiff, Wgpu};
+    use burn::tensor::{Device, DeviceKind};
 
     pub fn run() {
-        launch::<Autodiff<Wgpu<ElemType, i32>>>(
-            ExecutionStrategy::SingleDevice(Default::default()),
-        );
-    }
-}
-
-#[cfg(feature = "vulkan")]
-mod vulkan {
-    use super::*;
-    use crate::{ElemType, launch};
-    use burn::backend::{Autodiff, Vulkan, autodiff::checkpoint::strategy::BalancedCheckpointing};
-
-    pub fn run() {
-        type B = Autodiff<Vulkan<ElemType, i32>, BalancedCheckpointing>;
-        launch::<B>(ExecutionStrategy::SingleDevice(Default::default()));
-    }
-}
-
-#[cfg(feature = "metal")]
-mod metal {
-    use super::*;
-    use crate::{ElemType, launch};
-    use burn::backend::{Autodiff, Metal};
-
-    pub fn run() {
-        launch::<Autodiff<Metal<ElemType, i32>>>(ExecutionStrategy::SingleDevice(
-            Default::default(),
-        ));
+        crate::launch_single(Device::wgpu(DeviceKind::DefaultDevice));
     }
 }
 
 #[cfg(feature = "remote")]
 mod remote {
-    use super::*;
-    use crate::{ElemType, launch};
-    use burn::backend::{Autodiff, RemoteBackend};
+    use crate::ElemType;
+    #[cfg(feature = "ddp")]
+    use burn::tensor::distributed::{DistributedConfig, ReduceOperation};
+    use burn::tensor::{Device, DeviceConfig, DeviceType, Element};
+    #[cfg(feature = "ddp")]
+    use burn::train::ExecutionStrategy;
 
+    /// Address of the `burn-remote` server to train against.
+    const ADDRESS: &str = "ws://localhost:3000";
+
+    /// List every device the remote server hosts and train across all of them.
+    #[cfg(not(feature = "ddp"))]
     pub fn run() {
-        launch::<Autodiff<RemoteBackend>>(ExecutionStrategy::SingleDevice(Default::default()));
+        let mut devices = Device::enumerate(DeviceType::remote(ADDRESS));
+        devices
+            .configure(DeviceConfig::default().float_dtype(ElemType::dtype()))
+            .unwrap();
+
+        crate::launch_single(devices.into_vec().pop().unwrap());
+    }
+
+    /// Same enumeration, but drive the devices with distributed data-parallel training.
+    #[cfg(feature = "ddp")]
+    pub fn run() {
+        let mut devices = Device::enumerate(DeviceType::remote(ADDRESS));
+        devices
+            .configure(DeviceConfig::default().float_dtype(ElemType::dtype()))
+            .unwrap();
+
+        crate::launch(ExecutionStrategy::ddp(
+            devices.into_vec(),
+            DistributedConfig {
+                all_reduce_op: ReduceOperation::Mean,
+            },
+        ));
     }
 }
 
 #[cfg(feature = "cuda")]
 mod cuda {
-    use super::*;
-    use crate::{ElemType, launch_multi};
-    use burn::backend::{Autodiff, Cuda, autodiff::checkpoint::strategy::BalancedCheckpointing};
-
     pub fn run() {
-        launch_multi::<Autodiff<Cuda<ElemType, i32>, BalancedCheckpointing>>();
+        crate::launch_multi();
     }
 }
 
 #[cfg(feature = "rocm")]
 mod rocm {
-    use super::*;
-    use crate::{ElemType, launch};
-    use burn::backend::{Autodiff, Rocm, autodiff::checkpoint::strategy::BalancedCheckpointing};
+    use burn::tensor::{Device, DeviceIndex};
 
     pub fn run() {
-        launch::<Autodiff<Rocm<ElemType, i32>, BalancedCheckpointing>>(
-            ExecutionStrategy::SingleDevice(Default::default()),
-        );
+        crate::launch_single(Device::rocm(DeviceIndex::Default));
     }
 }
 
 #[cfg(feature = "flex")]
 mod flex {
-    use super::*;
-    use crate::launch;
-    use burn::backend::{Autodiff, Flex, autodiff::checkpoint::strategy::BalancedCheckpointing};
+    use burn::tensor::Device;
 
     pub fn run() {
-        launch::<Autodiff<Flex, BalancedCheckpointing>>(ExecutionStrategy::SingleDevice(
-            Default::default(),
-        ));
+        crate::launch_single(Device::flex());
     }
 }
 
@@ -197,7 +176,7 @@ fn main() {
     tch_gpu::run();
     #[cfg(feature = "tch-cpu")]
     tch_cpu::run();
-    #[cfg(feature = "wgpu")]
+    #[cfg(any(feature = "wgpu", feature = "vulkan", feature = "metal"))]
     wgpu::run();
     #[cfg(feature = "cuda")]
     cuda::run();
@@ -205,10 +184,6 @@ fn main() {
     rocm::run();
     #[cfg(feature = "remote")]
     remote::run();
-    #[cfg(feature = "vulkan")]
-    vulkan::run();
-    #[cfg(feature = "metal")]
-    metal::run();
     #[cfg(feature = "flex")]
     flex::run();
 }

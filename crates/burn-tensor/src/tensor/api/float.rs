@@ -1,24 +1,29 @@
 use crate::AsIndex;
 use crate::Cast;
+use crate::Device;
 use crate::Tensor;
 use crate::cast::ToElement;
 use crate::check;
 use crate::check::TensorCheck;
-use crate::ops::GridSampleOptions;
+use crate::kind::FloatMath;
+use crate::ops::{BridgeKind, BridgeTensor};
 use crate::quantization::{QuantScheme, QuantizationParameters};
-use crate::tensor::backend::Backend;
 use crate::tensor::stats;
 use crate::tensor::{Distribution, TensorData};
 use crate::{Bool, Float, Int, TensorPrimitive};
-#[cfg(feature = "distributed")]
+#[cfg(feature = "std")]
 use burn_backend::AutodiffBackend;
 use burn_backend::ElementConversion;
 use burn_backend::Scalar;
 use burn_backend::TensorMetadata;
-#[cfg(feature = "distributed")]
+#[cfg(feature = "std")]
 use burn_backend::distributed::DistributedParamId;
-use burn_backend::get_device_settings;
-use burn_backend::tensor::quantization::QuantizationParametersPrimitive;
+use burn_backend::ops::ActivationOps;
+use burn_backend::ops::FloatTensorOps;
+use burn_backend::ops::GridSampleOptions;
+use burn_backend::ops::QTensorOps;
+use burn_backend::quantization::QuantizationParametersPrimitive;
+use burn_dispatch::Dispatch;
 use core::f32;
 
 /// Default RTOL value for `is_close` and `all_close`.
@@ -27,40 +32,7 @@ pub const DEFAULT_RTOL: f64 = 1e-5;
 /// Default ATOL value for `is_close` and `all_close`.
 pub const DEFAULT_ATOL: f64 = 1e-8;
 
-impl<const D: usize, B> Tensor<B, D>
-where
-    B: Backend,
-{
-    /// Applies element wise exponential operation.
-    ///
-    #[cfg_attr(doc, doc = "$y_i = e^{x_i}$")]
-    #[cfg_attr(not(doc), doc = "`y = e^x`")]
-    pub fn exp(self) -> Self {
-        Self::new(TensorPrimitive::Float(B::float_exp(
-            self.primitive.tensor(),
-        )))
-    }
-
-    /// Applies element wise natural log operation *ln*.
-    ///
-    #[cfg_attr(doc, doc = r#"$y_i = \log_e\(x_i\)$"#)]
-    #[cfg_attr(not(doc), doc = "`y_i = log(x_i)`")]
-    pub fn log(self) -> Self {
-        Self::new(TensorPrimitive::Float(B::float_log(
-            self.primitive.tensor(),
-        )))
-    }
-
-    /// Applies the natural logarithm of one plus the input tensor, element-wise.
-    ///
-    #[cfg_attr(doc, doc = r#"$y_i = \log_e\(x_i + 1\)$"#)]
-    #[cfg_attr(not(doc), doc = "`y_i = log(x_i + 1)`")]
-    pub fn log1p(self) -> Self {
-        Self::new(TensorPrimitive::Float(B::float_log1p(
-            self.primitive.tensor(),
-        )))
-    }
-
+impl<const D: usize> Tensor<D> {
     /// Applies the [error function](https://en.wikipedia.org/wiki/Error_function) element wise.
     ///
     #[cfg_attr(
@@ -75,9 +47,15 @@ $$\text{erf}\(x\) = \frac{2}{\sqrt{\pi}} \int_0^x e^{-t^2} dt$$
     )]
     #[cfg_attr(not(doc), doc = "`y_i = erf(x_i)`")]
     pub fn erf(self) -> Self {
-        Self::new(TensorPrimitive::Float(B::float_erf(
-            self.primitive.tensor(),
-        )))
+        Self::new(erf_impl(self.primitive))
+    }
+
+    /// Applies [hypotenuse operation](https://en.wikipedia.org/wiki/Hypotenuse) element wise.
+    ///
+    #[cfg_attr(doc, doc = r#"$y_i = \sqrt{x_i^2 + y_i^2}$"#)]
+    #[cfg_attr(not(doc), doc = "`y_i = sqrt(x_i^2 + y_i^2)`")]
+    pub fn hypot(self, other: Self) -> Self {
+        Self::new(hypot_impl(self.primitive, other.primitive))
     }
 
     /// Applies [reciprocal operation](https://en.wikipedia.org/wiki/Multiplicative_inverse)
@@ -86,299 +64,7 @@ $$\text{erf}\(x\) = \frac{2}{\sqrt{\pi}} \int_0^x e^{-t^2} dt$$
     #[cfg_attr(doc, doc = r#"$y_i = \frac{1}{x_i}$"#)]
     #[cfg_attr(not(doc), doc = "`y_i = 1/x_i`")]
     pub fn recip(self) -> Self {
-        Self::new(TensorPrimitive::Float(B::float_recip(
-            self.primitive.tensor(),
-        )))
-    }
-
-    /// Applies element wise square operation.
-    ///
-    #[cfg_attr(doc, doc = r#"$y_i = x_i * x_i$"#)]
-    #[cfg_attr(not(doc), doc = "`y_i = x_i * x_i`")]
-    pub fn square(self) -> Self {
-        self.powi_scalar(2)
-    }
-
-    /// Applies element wise root square operation.
-    ///
-    #[cfg_attr(doc, doc = r#"$y_i = \sqrt{x_i}$"#)]
-    #[cfg_attr(not(doc), doc = "`y_i = sqrt(x_i)`")]
-    pub fn sqrt(self) -> Self {
-        Self::new(TensorPrimitive::Float(B::float_sqrt(
-            self.primitive.tensor(),
-        )))
-    }
-
-    /// Applies element wise cosine operation.
-    ///
-    #[cfg_attr(doc, doc = r#"$y_i = \cos\(x_i\)$"#)]
-    #[cfg_attr(not(doc), doc = "`y_i = cos(x_i)`")]
-    pub fn cos(self) -> Self {
-        Self::new(TensorPrimitive::Float(B::float_cos(
-            self.primitive.tensor(),
-        )))
-    }
-
-    /// Applies element wise sine operation.
-    ///
-    #[cfg_attr(doc, doc = r#"$y_i = \sin\(x_i\)$"#)]
-    #[cfg_attr(not(doc), doc = "`y_i = sin(x_i)`")]
-    pub fn sin(self) -> Self {
-        Self::new(TensorPrimitive::Float(B::float_sin(
-            self.primitive.tensor(),
-        )))
-    }
-
-    /// Applies element wise tangent operation.
-    ///
-    #[cfg_attr(doc, doc = r#"$y_i = \tan\(x_i\)$"#)]
-    #[cfg_attr(not(doc), doc = "`y_i = tan(x_i)`")]
-    pub fn tan(self) -> Self {
-        Self::new(TensorPrimitive::Float(B::float_tan(
-            self.primitive.tensor(),
-        )))
-    }
-
-    /// Applies element wise hyperbolic cosine operation.
-    ///
-    #[cfg_attr(doc, doc = r#"$y_i = \cosh\(x_i\)$"#)]
-    #[cfg_attr(not(doc), doc = "`y_i = cosh(x_i)`")]
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use burn_tensor::backend::Backend;
-    /// use burn_tensor::Tensor;
-    ///
-    /// fn example<B: Backend>() {
-    ///     let device = Default::default();
-    ///
-    ///     let tensor = Tensor::<B, 1>::from_data([0.0, -1.0, 2.0], &device);
-    ///     println!("{}", tensor.cosh()); // [1.0, 1.5430, 3.7621]
-    /// }
-    /// ```
-    pub fn cosh(self) -> Self {
-        Self::new(TensorPrimitive::Float(B::float_cosh(
-            self.primitive.tensor(),
-        )))
-    }
-
-    /// Applies element wise hyperbolic sine operation.
-    ///
-    #[cfg_attr(doc, doc = r#"$y_i = \sinh\(x_i\)$"#)]
-    #[cfg_attr(not(doc), doc = "`y_i = sinh(x_i)`")]
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use burn_tensor::backend::Backend;
-    /// use burn_tensor::Tensor;
-    ///
-    /// fn example<B: Backend>() {
-    ///     let device = Default::default();
-    ///
-    ///     let tensor = Tensor::<B, 1>::from_data([0.0, -1.0, 2.0], &device);
-    ///     println!("{}", tensor.sinh()); // [0.0, -1.1752, 3.6269]
-    /// }
-    /// ```
-    pub fn sinh(self) -> Self {
-        Self::new(TensorPrimitive::Float(B::float_sinh(
-            self.primitive.tensor(),
-        )))
-    }
-
-    /// Applies element wise hyperbolic tangent operation.
-    ///
-    #[cfg_attr(doc, doc = r#"$y_i = \tanh\(x_i\)$"#)]
-    #[cfg_attr(not(doc), doc = "`y_i = tanh(x_i)`")]
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use burn_tensor::backend::Backend;
-    /// use burn_tensor::Tensor;
-    ///
-    /// fn example<B: Backend>() {
-    ///     let device = Default::default();
-    ///
-    ///     let tensor = Tensor::<B, 1>::from_data([0.0, -1.0, 2.0], &device);
-    ///     println!("{}", tensor.tanh()); // [0.0, -0.7616, 0.9640]
-    /// }
-    /// ```
-    pub fn tanh(self) -> Self {
-        Self::new(TensorPrimitive::Float(B::float_tanh(
-            self.primitive.tensor(),
-        )))
-    }
-
-    /// Applies element wise inverse sine operation.
-    ///
-    #[cfg_attr(doc, doc = r#"$y_i = \asin\(x_i\)$"#)]
-    #[cfg_attr(not(doc), doc = "`y_i = asin(x_i)`")]
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use burn_tensor::backend::Backend;
-    /// use burn_tensor::Tensor;
-    ///
-    /// fn example<B: Backend>() {
-    ///     let device = Default::default();
-    ///
-    ///     let tensor = Tensor::<B, 1>::from_data([0.0, -1.0, 1.0], &device);
-    ///     println!("{}", tensor.asin()); // [ 0.0000, -1.5708,  1.5708]
-    /// }
-    /// ```
-    pub fn asin(self) -> Self {
-        Self::new(TensorPrimitive::Float(B::float_asin(
-            self.primitive.tensor(),
-        )))
-    }
-
-    /// Applies element wise inverse hyperbolic sine operation.
-    ///
-    #[cfg_attr(doc, doc = r#"$y_i = \asinh\(x_i\)$"#)]
-    #[cfg_attr(not(doc), doc = "`y_i = asinh(x_i)`")]
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use burn_tensor::backend::Backend;
-    /// use burn_tensor::Tensor;
-    ///
-    /// fn example<B: Backend>() {
-    ///     let device = Default::default();
-    ///
-    ///     let tensor = Tensor::<B, 1>::from_data([0.0, -1.0, 1.0], &device);
-    ///     println!("{}", tensor.asinh()); // [ 0.0000, -0.8814,  0.8814]
-    /// }
-    /// ```
-    pub fn asinh(self) -> Self {
-        Self::new(TensorPrimitive::Float(B::float_asinh(
-            self.primitive.tensor(),
-        )))
-    }
-
-    /// Applies element wise inverse cosine operation.
-    ///
-    #[cfg_attr(doc, doc = r#"$y_i = \acos\(x_i\)$"#)]
-    #[cfg_attr(not(doc), doc = "`y_i = acos(x_i)`")]
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use burn_tensor::backend::Backend;
-    /// use burn_tensor::Tensor;
-    ///
-    /// fn example<B: Backend>() {
-    ///     let device = Default::default();
-    ///
-    ///     let tensor = Tensor::<B, 1>::from_data([0.0, -1.0, 1.0], &device);
-    ///     println!("{}", tensor.acos()); // [1.5708, 3.1416, 0.0]
-    /// }
-    /// ```
-    pub fn acos(self) -> Self {
-        Self::new(TensorPrimitive::Float(B::float_acos(
-            self.primitive.tensor(),
-        )))
-    }
-
-    /// Applies element wise inverse hyperbolic cosine operation.
-    ///
-    #[cfg_attr(doc, doc = r#"$y_i = \acosh\(x_i\)$"#)]
-    #[cfg_attr(not(doc), doc = "`y_i = acosh(x_i)`")]
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use burn_tensor::backend::Backend;
-    /// use burn_tensor::Tensor;
-    ///
-    /// fn example<B: Backend>() {
-    ///     let device = Default::default();
-    ///
-    ///     let tensor = Tensor::<B, 1>::from_data([1.0, 2.0, 3.0], &device);
-    ///     println!("{}", tensor.sinh()); // [0.0000, 1.3170, 1.7627]
-    /// }
-    /// ```
-    pub fn acosh(self) -> Self {
-        Self::new(TensorPrimitive::Float(B::float_acosh(
-            self.primitive.tensor(),
-        )))
-    }
-
-    /// Applies element wise inverse tangent operation.
-    ///
-    #[cfg_attr(doc, doc = r#"$y_i = \atan\(x_i\)$"#)]
-    #[cfg_attr(not(doc), doc = "`y_i = atan(x_i)`")]
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use burn_tensor::backend::Backend;
-    /// use burn_tensor::Tensor;
-    ///
-    /// fn example<B: Backend>() {
-    ///     let device = Default::default();
-    ///
-    ///     let tensor = Tensor::<B, 1>::from_data([0.0, -1.0, 2.0], &device);
-    ///     println!("{}", tensor.sinh()); // [ 0.0, -0.7854,  1.1071]
-    /// }
-    /// ```
-    pub fn atan(self) -> Self {
-        Self::new(TensorPrimitive::Float(B::float_atan(
-            self.primitive.tensor(),
-        )))
-    }
-
-    /// Applies element wise inverse hyperbolic tangent operation.
-    ///
-    #[cfg_attr(doc, doc = r#"$y_i = \atan\(x_i\)$"#)]
-    #[cfg_attr(not(doc), doc = "`y_i = atan(x_i)`")]
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use burn_tensor::backend::Backend;
-    /// use burn_tensor::Tensor;
-    ///
-    /// fn example<B: Backend>() {
-    ///     let device = Default::default();
-    ///
-    ///     let tensor = Tensor::<B, 1>::from_data([0.0, -0.5, 0.5], &device);
-    ///     println!("{}", tensor.sinh()); // [ 0.0, -0.5493,  0.5493]
-    /// }
-    /// ```
-    pub fn atanh(self) -> Self {
-        Self::new(TensorPrimitive::Float(B::float_atanh(
-            self.primitive.tensor(),
-        )))
-    }
-
-    /// Applies element wise inverse tangent operation using the signs of arguments to determine the correct quadrant.
-    ///
-    #[cfg_attr(doc, doc = r#"$z_i = \atan2\(y_i, x_i\)$"#)]
-    #[cfg_attr(not(doc), doc = "`z_i = atan2(y_i, x_i)`")]
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use burn_tensor::backend::Backend;
-    /// use burn_tensor::Tensor;
-    ///
-    /// fn example<B: Backend>() {
-    ///     let device = Default::default();
-    ///
-    ///     let lhs = Tensor::<B, 1>::from_data([-2.0, 2.0, -2.0], &device);
-    ///     let rhs = Tensor::<B, 1>::from_data([1.0, -1.0, -1.0], &device);
-    ///     println!("{}", lhs.atan2(rhs)); // [-1.1071,  2.0344, -2.0344]
-    /// }
-    /// ```
-    pub fn atan2(self, other: Self) -> Self {
-        Self::new(TensorPrimitive::Float(B::float_atan2(
-            self.primitive.tensor(),
-            other.primitive.tensor(),
-        )))
+        Self::new(recip_impl(self.primitive))
     }
 
     /// Converts each of the elements of the input tensor from angles in degrees to radians.
@@ -406,23 +92,17 @@ $$\text{erf}\(x\) = \frac{2}{\sqrt{\pi}} \int_0^x e^{-t^2} dt$$
     /// This function implements the [round half to even](https://en.wikipedia.org/wiki/Rounding#Rounding_half_to_even)
     /// strategy, with halfway cases rounded to the nearest even integer value.
     pub fn round(self) -> Self {
-        Self::new(TensorPrimitive::Float(B::float_round(
-            self.primitive.tensor(),
-        )))
+        Self::new(round_impl(self.primitive))
     }
 
     /// Applies element wise floor operation.
     pub fn floor(self) -> Self {
-        Self::new(TensorPrimitive::Float(B::float_floor(
-            self.primitive.tensor(),
-        )))
+        Self::new(floor_impl(self.primitive))
     }
 
     /// Applies element wise ceil operation.
     pub fn ceil(self) -> Self {
-        Self::new(TensorPrimitive::Float(B::float_ceil(
-            self.primitive.tensor(),
-        )))
+        Self::new(ceil_impl(self.primitive))
     }
 
     /// Create a tensor from floats (f32) on a given device.
@@ -430,16 +110,15 @@ $$\text{erf}\(x\) = \frac{2}{\sqrt{\pi}} \int_0^x e^{-t^2} dt$$
     /// # Example
     ///
     /// ```rust
-    /// use burn_tensor::backend::Backend;
     /// use burn_tensor::Tensor;
     ///
-    /// fn example<B: Backend>() {
-    ///     let device = B::Device::default();
-    ///     let _ = Tensor::<B, 1>::from_floats([1.0, 2.0], &device);
-    ///     let _ = Tensor::<B, 2>::from_floats([[1.0, 2.0], [3.0, 4.0]], &device);
+    /// fn example() {
+    ///     let device = Default::default();
+    ///     let _ = Tensor::<1>::from_floats([1.0, 2.0], &device);
+    ///     let _ = Tensor::<2>::from_floats([[1.0, 2.0], [3.0, 4.0]], &device);
     /// }
     /// ```
-    pub fn from_floats<A: Into<TensorData>>(floats: A, device: &B::Device) -> Self {
+    pub fn from_floats<A: Into<TensorData>>(floats: A, device: &Device) -> Self {
         Self::from_data(floats.into().convert::<f32>(), device)
     }
 
@@ -449,29 +128,23 @@ $$\text{erf}\(x\) = \frac{2}{\sqrt{\pi}} \int_0^x e^{-t^2} dt$$
     /// # Example
     ///
     /// ```rust
-    /// use burn_tensor::backend::Backend;
     /// use burn_tensor::Tensor;
     ///
-    /// fn example<B: Backend>() {
+    /// fn example() {
     ///     let device = Default::default();
-    ///     let float_tensor = Tensor::<B, 1>::from_floats([1.0, 2.0], &device);
+    ///     let float_tensor = Tensor::<1>::from_floats([1.0, 2.0], &device);
     ///     let int_tensor = float_tensor.int();
     /// }
     /// ```
-    pub fn int(self) -> Tensor<B, D, Int> {
-        let out_dtype = get_device_settings::<B>(&self.device()).int_dtype;
-        Tensor::new(B::float_into_int(self.primitive.tensor(), out_dtype))
+    pub fn int(self) -> Tensor<D, Int> {
+        let device = self.device();
+        Tensor::new(int_impl(self.primitive, device))
     }
 
     /// Returns a new tensor with the same shape, dtype, and device as the current tensor filled random
     /// values sampled from the given distribution.
     pub fn random_like(&self, distribution: Distribution) -> Self {
-        Self::new(TensorPrimitive::Float(B::float_random(
-            self.shape(),
-            distribution,
-            &self.device(),
-            self.dtype().into(),
-        )))
+        Self::new(random_like_impl(&self.primitive, distribution))
     }
 
     /// Calculate the variance along the given dimension.
@@ -522,9 +195,8 @@ $$\text{erf}\(x\) = \frac{2}{\sqrt{\pi}} \int_0^x e^{-t^2} dt$$
     /// # Example 1
     ///
     /// ```ignore
-    /// // Assuming backend B
-    /// let device = B::Device::default();
-    /// let tensor = Tensor::<B, 2>::from_data(
+    /// let device = Default::default();
+    /// let tensor = Tensor::<2>::from_data(
     ///     [[1.0, 5.0, 3.0, 2.0], [8.0, 4.0, 6.0, 7.0]],
     ///     &device,
     /// );
@@ -546,7 +218,7 @@ $$\text{erf}\(x\) = \frac{2}{\sqrt{\pi}} \int_0^x e^{-t^2} dt$$
     ///
     /// ```ignore
     /// // D is the number of dimensions of the tensor
-    /// let flattened_tensor: Tensor<B, 1> = tensor.flatten(0, D - 1);
+    /// let flattened_tensor: Tensor<1> = tensor.flatten(0, D - 1);
     ///
     /// // Calculate median for dim 0 since the tensor has become 1 dimensional
     /// let median = flattened_tensor.median(0);
@@ -584,9 +256,8 @@ $$\text{erf}\(x\) = \frac{2}{\sqrt{\pi}} \int_0^x e^{-t^2} dt$$
     /// # Example
     ///
     /// ```ignore
-    /// // Assuming backend B
-    /// let device = B::Device::default();
-    /// let tensor = Tensor::<B, 2>::from_data(
+    /// let device = Default::default();
+    /// let tensor = Tensor::<2>::from_data(
     ///     [[1.0, 5.0, 3.0, 2.0], [8.0, 4.0, 6.0, 7.0]],
     ///     &device,
     /// );
@@ -596,7 +267,7 @@ $$\text{erf}\(x\) = \frac{2}{\sqrt{\pi}} \int_0^x e^{-t^2} dt$$
     /// let (values, indices) = tensor.median_with_indices(1);
     /// // values: [[2.0], [6.0]], indices: [[3], [2]] (position in the original tensor)
     /// ```
-    pub fn median_with_indices(self, dim: usize) -> (Self, Tensor<B, D, Int>) {
+    pub fn median_with_indices(self, dim: usize) -> (Self, Tensor<D, Int>) {
         // TODO: Allow backend specialization. Optimally, implement a median kernel for cubecl
         // instead of leveraging a full sort to get the median.
         stats::median_with_indices(self, dim)
@@ -612,12 +283,11 @@ $$\text{erf}\(x\) = \frac{2}{\sqrt{\pi}} \int_0^x e^{-t^2} dt$$
     /// # Example
     ///
     /// ```rust
-    /// use burn_tensor::backend::Backend;
     /// use burn_tensor::{Tensor, FloatDType, IntDType};
     ///
-    /// fn example<B: Backend>() {
+    /// fn example() {
     ///     let device = Default::default();
-    ///     let float_tensor = Tensor::<B, 1>::from_floats([1.0, 2.5], &device);
+    ///     let float_tensor = Tensor::<1>::from_floats([1.0, 2.5], &device);
     ///
     ///     // Within-kind cast (float to float)
     ///     let f64_tensor = float_tensor.clone().cast(FloatDType::F64);
@@ -627,8 +297,8 @@ $$\text{erf}\(x\) = \frac{2}{\sqrt{\pi}} \int_0^x e^{-t^2} dt$$
     /// }
     /// ```
     #[must_use]
-    pub fn cast<T: Cast<B, Float>>(self, dtype: T) -> Tensor<B, D, T::OutputKind> {
-        Tensor::new(T::cast(self.primitive, dtype))
+    pub fn cast<T: Cast<D, Float>>(self, dtype: T) -> Tensor<D, T::OutputKind> {
+        T::cast(self, dtype)
     }
 
     /// Detach the current tensor from the autodiff graph.
@@ -637,9 +307,7 @@ $$\text{erf}\(x\) = \frac{2}{\sqrt{\pi}} \int_0^x e^{-t^2} dt$$
     /// This can be used in batchers or elsewhere to ensure that previous operations are not
     /// considered in the autodiff graph.
     pub fn detach(self) -> Self {
-        Self::new(TensorPrimitive::Float(B::float_detach(
-            self.primitive.tensor(),
-        )))
+        Self::new(detach_impl(self.primitive))
     }
 
     /// Mark the tensor to keep gradients during the backward pass.
@@ -651,10 +319,7 @@ $$\text{erf}\(x\) = \frac{2}{\sqrt{\pi}} \int_0^x e^{-t^2} dt$$
 
     /// Returns true if the tensor requires gradients during the backward pass.
     pub fn is_require_grad(&self) -> bool {
-        match &self.primitive {
-            TensorPrimitive::Float(tensor) => B::float_is_require_grad(tensor),
-            TensorPrimitive::QFloat(tensor) => B::q_is_require_grad(tensor),
-        }
+        is_require_grad_impl(&self.primitive)
     }
 
     /// Mark the tensor as tracked or untracked depending on the require_grad argument.
@@ -662,20 +327,12 @@ $$\text{erf}\(x\) = \frac{2}{\sqrt{\pi}} \int_0^x e^{-t^2} dt$$
     ///
     /// This function does nothing when autodiff is not enabled.
     pub fn set_require_grad(self, require_grad: bool) -> Self {
-        let primitive = match self.primitive {
-            TensorPrimitive::Float(tensor) => {
-                TensorPrimitive::Float(B::float_set_require_grad(tensor, require_grad))
-            }
-            TensorPrimitive::QFloat(tensor) => {
-                TensorPrimitive::QFloat(B::q_set_require_grad(tensor, require_grad))
-            }
-        };
-        Self::new(primitive)
+        Self::new(set_require_grad_impl(self.primitive, require_grad))
     }
 
     /// Applies the relu function to the tensor.
     pub(crate) fn relu(self) -> Self {
-        Self::new(TensorPrimitive::Float(B::relu(self.primitive.tensor())))
+        Self::new(relu_impl(self.primitive))
     }
 
     /// Calculate covaraince matrix between different entries alongside a given dimension.
@@ -684,7 +341,7 @@ $$\text{erf}\(x\) = \frac{2}{\sqrt{\pi}} \int_0^x e^{-t^2} dt$$
     ///
     /// * `size` - The size of the square matrix.
     /// * `correction_factor` - Is usually 1 for samples and 0 for population.
-    pub fn cov(self, dim: usize, correction_factor: usize) -> Tensor<B, D> {
+    pub fn cov(self, dim: usize, correction_factor: usize) -> Tensor<D> {
         let n = self.dims()[dim];
         let centered = (self.clone() - self.mean_dim(dim)).swap_dims(dim, 0);
         centered
@@ -704,18 +361,12 @@ $$\text{erf}\(x\) = \frac{2}{\sqrt{\pi}} \int_0^x e^{-t^2} dt$$
     /// # Returns
     ///
     /// The quantized tensor.
-    pub fn quantize(
-        self,
-        scheme: &QuantScheme,
-        qparams: QuantizationParameters<B>,
-    ) -> Tensor<B, D> {
-        Tensor::new(TensorPrimitive::QFloat(B::quantize(
-            self.primitive.tensor(),
+    pub fn quantize(self, scheme: &QuantScheme, qparams: QuantizationParameters) -> Tensor<D> {
+        Tensor::new(quantize_impl(
+            self.primitive,
             scheme,
-            QuantizationParametersPrimitive {
-                scales: qparams.scales.primitive.tensor(),
-            },
-        )))
+            qparams.scales.primitive,
+        ))
     }
 
     /// Dynamically convert the tensor to a lower precision data type based on the quantization scheme.
@@ -730,11 +381,8 @@ $$\text{erf}\(x\) = \frac{2}{\sqrt{\pi}} \int_0^x e^{-t^2} dt$$
     ///
     /// # Notes
     /// This uses [min-max calibration](crate::quantization::Calibration::MinMax).
-    pub fn quantize_dynamic(self, scheme: &QuantScheme) -> Tensor<B, D> {
-        Tensor::new(TensorPrimitive::QFloat(B::quantize_dynamic(
-            self.primitive.tensor(),
-            scheme,
-        )))
+    pub fn quantize_dynamic(self, scheme: &QuantScheme) -> Tensor<D> {
+        Tensor::new(quantize_dynamic_impl(self.primitive, scheme))
     }
 
     /// Convert the tensor back to a higher precision data type.
@@ -744,8 +392,8 @@ $$\text{erf}\(x\) = \frac{2}{\sqrt{\pi}} \int_0^x e^{-t^2} dt$$
     /// # Returns
     ///
     /// The dequantized tensor.
-    pub fn dequantize(self) -> Tensor<B, D> {
-        Tensor::new(TensorPrimitive::Float(self.primitive.tensor()))
+    pub fn dequantize(self) -> Tensor<D> {
+        Tensor::new(dequantize_impl(self.primitive))
     }
 
     /// Checks element wise if the tensor is close to another tensor.
@@ -772,19 +420,18 @@ $$\text{erf}\(x\) = \frac{2}{\sqrt{\pi}} \int_0^x e^{-t^2} dt$$
     /// # Example
     ///
     /// ```rust
-    /// use burn_tensor::backend::Backend;
     /// use burn_tensor::{Tensor, Shape};
     ///
-    /// fn example<B: Backend>() {
-    ///    let device = B::Device::default();
-    ///    let tensor1 = Tensor::<B, 2>::from_data([[1.0, -2.0, 3.0], [5.0, 9.0, 6.0]], &device);
-    ///    let tensor2 = Tensor::<B, 2>::from_data([[1.0, -2.0, 3.0], [5.0, 9.0, 6.0]], &device);
+    /// fn example() {
+    ///    let device = Default::default();
+    ///    let tensor1 = Tensor::<2>::from_data([[1.0, -2.0, 3.0], [5.0, 9.0, 6.0]], &device);
+    ///    let tensor2 = Tensor::<2>::from_data([[1.0, -2.0, 3.0], [5.0, 9.0, 6.0]], &device);
     ///    let tensor = tensor1.is_close(tensor2, None, None);
     ///    println!("{tensor}");
     ///    // [[true, true, true], [true, true, true]]
     /// }
     /// ```
-    pub fn is_close(self, other: Self, rtol: Option<f64>, atol: Option<f64>) -> Tensor<B, D, Bool> {
+    pub fn is_close(self, other: Self, rtol: Option<f64>, atol: Option<f64>) -> Tensor<D, Bool> {
         let rtol = rtol.unwrap_or(DEFAULT_RTOL);
         let atol = atol.unwrap_or(DEFAULT_ATOL);
 
@@ -836,13 +483,12 @@ $$\text{erf}\(x\) = \frac{2}{\sqrt{\pi}} \int_0^x e^{-t^2} dt$$
     /// # Example
     ///
     /// ```rust
-    /// use burn_tensor::backend::Backend;
     /// use burn_tensor::{Tensor, Shape};
     ///
-    /// fn example<B: Backend>() {
-    ///    let device = B::Device::default();
-    ///    let tensor1 = Tensor::<B, 2>::from_data([[1.0, -2.0, 3.0], [5.0, 9.0, 6.0]], &device);
-    ///    let tensor2 = Tensor::<B, 2>::from_data([[1.0, -2.0, 3.0], [5.0, 9.0, 6.0]], &device);
+    /// fn example() {
+    ///    let device = Default::default();
+    ///    let tensor1 = Tensor::<2>::from_data([[1.0, -2.0, 3.0], [5.0, 9.0, 6.0]], &device);
+    ///    let tensor2 = Tensor::<2>::from_data([[1.0, -2.0, 3.0], [5.0, 9.0, 6.0]], &device);
     ///    let result = tensor1.all_close(tensor2, None, None);
     ///    println!("{}", result);
     ///    // true
@@ -851,7 +497,7 @@ $$\text{erf}\(x\) = \frac{2}{\sqrt{\pi}} \int_0^x e^{-t^2} dt$$
     pub fn all_close(self, other: Self, rtol: Option<f64>, atol: Option<f64>) -> bool {
         self.is_close(other, rtol, atol)
             .all()
-            .into_scalar()
+            .into_scalar::<u8>()
             .to_bool()
     }
 
@@ -864,20 +510,18 @@ $$\text{erf}\(x\) = \frac{2}{\sqrt{\pi}} \int_0^x e^{-t^2} dt$$
     /// # Example
     ///
     /// ```rust
-    /// use burn_tensor::backend::Backend;
     /// use burn_tensor::{Tensor, Bool, Shape};
     ///
-    /// fn example<B: Backend>() {
-    ///    let device = B::Device::default();
-    ///    let tensor = Tensor::<B, 2>::from_data([[1.0, f64::NAN, 3.0], [5.0, 9.0, 6.0]], &device);
+    /// fn example() {
+    ///    let device = Default::default();
+    ///    let tensor = Tensor::<2>::from_data([[1.0, f64::NAN, 3.0], [5.0, 9.0, 6.0]], &device);
     ///    let tensor = tensor.is_nan();
     ///    println!("{tensor}");
     ///    // [[false, true, false], [false, false, false]]
     /// }
     /// ```
-    pub fn is_nan(self) -> Tensor<B, D, Bool> {
-        let out_dtype = get_device_settings::<B>(&self.device()).bool_dtype;
-        Tensor::new(B::float_is_nan(self.primitive.tensor(), out_dtype))
+    pub fn is_nan(self) -> Tensor<D, Bool> {
+        Tensor::new(is_nan_impl(self.primitive))
     }
 
     /// Checks if the tensor contains any NaN values.
@@ -889,28 +533,22 @@ $$\text{erf}\(x\) = \frac{2}{\sqrt{\pi}} \int_0^x e^{-t^2} dt$$
     /// # Example
     ///
     /// ```rust
-    /// use burn_tensor::backend::Backend;
     /// use burn_tensor::{Tensor, Bool, Shape};
     ///
-    /// fn example<B: Backend>() {
-    ///   let device = B::Device::default();
-    ///   let tensor = Tensor::<B, 2>::from_data([[1.0, -2.0, 3.0], [f64::NAN, 9.0, 6.0]], &device);
+    /// fn example() {
+    ///   let device = Default::default();
+    ///   let tensor = Tensor::<2>::from_data([[1.0, -2.0, 3.0], [f64::NAN, 9.0, 6.0]], &device);
     ///   let tensor = tensor.contains_nan();
     ///   println!("{tensor}");
     ///   // [true]
-    ///   let tensor = Tensor::<B, 2>::from_data([[1.0, -2.0, 3.0], [5.0, 9.0, 6.0]], &device);
+    ///   let tensor = Tensor::<2>::from_data([[1.0, -2.0, 3.0], [5.0, 9.0, 6.0]], &device);
     ///   let tensor = tensor.contains_nan();
     ///   println!("{tensor}");
     ///   // [false]
     /// }
     /// ```
-    pub fn contains_nan(self) -> Tensor<B, 1, Bool> {
-        // Summing the tensor will result in NaN if the tensor contains any NaN values
-        // This is faster than checking each element individually
-        // because it rolls up the NaN values into a single value
-        let sum = self.sum();
-
-        sum.is_nan()
+    pub fn contains_nan(self) -> Tensor<1, Bool> {
+        self.is_nan().any()
     }
 
     /// Returns a new tensor with boolean elements indicating whether each element of the input is infinite (either +INF or -INF).
@@ -922,20 +560,18 @@ $$\text{erf}\(x\) = \frac{2}{\sqrt{\pi}} \int_0^x e^{-t^2} dt$$
     /// # Example
     ///
     /// ```rust
-    /// use burn_tensor::backend::Backend;
     /// use burn_tensor::{Tensor, Bool, Shape};
     ///
-    /// fn example<B: Backend>() {
-    ///    let device = B::Device::default();
-    ///    let tensor = Tensor::<B, 2>::from_data([[1.0, f64::INFINITY, 3.0], [f64::NAN, 9.0, 6.0]], &device);
+    /// fn example() {
+    ///    let device = Default::default();
+    ///    let tensor = Tensor::<2>::from_data([[1.0, f64::INFINITY, 3.0], [f64::NAN, 9.0, 6.0]], &device);
     ///    let tensor = tensor.is_finite();
     ///    println!("{tensor}");
     ///    // [[false, true, false], [false, false, false]]
     /// }
     /// ```
-    pub fn is_inf(self) -> Tensor<B, D, Bool> {
-        let out_dtype = get_device_settings::<B>(&self.device()).bool_dtype;
-        Tensor::new(B::float_is_inf(self.primitive.tensor(), out_dtype))
+    pub fn is_inf(self) -> Tensor<D, Bool> {
+        Tensor::new(is_inf_impl(self.primitive))
     }
 
     /// Returns a new tensor with boolean elements indicating whether each element of the input is finite
@@ -948,18 +584,17 @@ $$\text{erf}\(x\) = \frac{2}{\sqrt{\pi}} \int_0^x e^{-t^2} dt$$
     /// # Example
     ///
     /// ```rust
-    /// use burn_tensor::backend::Backend;
     /// use burn_tensor::{Tensor, Bool, Shape};
     ///
-    /// fn example<B: Backend>() {
-    ///    let device = B::Device::default();
-    ///    let tensor = Tensor::<B, 2>::from_data([[1.0, f64::INFINITY, 3.0], [f64::NAN, 9.0, 6.0]], &device);
+    /// fn example() {
+    ///    let device = Default::default();
+    ///    let tensor = Tensor::<2>::from_data([[1.0, f64::INFINITY, 3.0], [f64::NAN, 9.0, 6.0]], &device);
     ///    let tensor = tensor.is_finite();
     ///    println!("{tensor}");
     ///    // [[true, false, true], [false, true, true]]
     /// }
     /// ```
-    pub fn is_finite(self) -> Tensor<B, D, Bool> {
+    pub fn is_finite(self) -> Tensor<D, Bool> {
         self.clone()
             .is_nan()
             .bool_not()
@@ -995,14 +630,14 @@ $$\text{erf}\(x\) = \frac{2}{\sqrt{\pi}} \int_0^x e^{-t^2} dt$$
     /// ```
     pub fn grid_sample_2d(
         self,
-        grid: Tensor<B, D>,
+        grid: Tensor<D>,
         options: impl Into<GridSampleOptions>,
-    ) -> Tensor<B, D> {
-        Tensor::new(TensorPrimitive::Float(B::float_grid_sample_2d(
-            self.primitive.tensor(),
-            grid.primitive.tensor(),
+    ) -> Tensor<D> {
+        Tensor::new(grid_sample_2d_impl(
+            self.primitive,
+            grid.primitive,
             options.into(),
-        )))
+        ))
     }
 
     /// Computes the cross product of `self` and another tensor along a given dimension.
@@ -1018,14 +653,10 @@ $$\text{erf}\(x\) = \frac{2}{\sqrt{\pi}} \int_0^x e^{-t^2} dt$$
     /// # Returns
     ///
     /// A tensor containing the cross product of `self` and `other` along `dim`.
-    pub fn cross<Dim: AsIndex>(self, other: Tensor<B, D>, dim: Dim) -> Tensor<B, D> {
+    pub fn cross<Dim: AsIndex>(self, other: Tensor<D>, dim: Dim) -> Tensor<D> {
         let dim = dim.expect_dim_index(D);
         check!(TensorCheck::cross(&self, &other, dim));
-        Tensor::new(TensorPrimitive::Float(B::float_cross(
-            self.primitive.tensor(),
-            other.primitive.tensor(),
-            dim,
-        )))
+        Tensor::new(cross_impl(self.primitive, other.primitive, dim))
     }
 
     /// Applies element wise power operation with a float Tensor
@@ -1037,35 +668,19 @@ $$\text{erf}\(x\) = \frac{2}{\sqrt{\pi}} \int_0^x e^{-t^2} dt$$
     /// # Example
     ///
     /// ```rust
-    /// use burn_tensor::backend::Backend;
     /// use burn_tensor::{Tensor, Shape};
     ///
-    /// fn example<B: Backend>() {
-    ///    let device = B::Device::default();
-    ///    let tensor1 = Tensor::<B, 2>::from_data([[1.0, -2.0, 3.0], [5.0, 9.0, 6.0]], &device);
-    ///    let tensor2 = Tensor::<B, 2>::from_data([[2.0, 3.0, 4.0], [1.0, 2.0, 3.0]], &device);
+    /// fn example() {
+    ///    let device = Default::default();
+    ///    let tensor1 = Tensor::<2>::from_data([[1.0, -2.0, 3.0], [5.0, 9.0, 6.0]], &device);
+    ///    let tensor2 = Tensor::<2>::from_data([[2.0, 3.0, 4.0], [1.0, 2.0, 3.0]], &device);
     ///    let tensor = tensor1.powf(tensor2);
     ///    println!("{tensor}");
     ///    // [[1.0, 8.0, 81.0], [5.0, 81.0, 216.0]]
     /// }
     /// ```
     pub fn powf(self, other: Self) -> Self {
-        let primitive = match (self.primitive, other.primitive) {
-            (TensorPrimitive::Float(lhs), TensorPrimitive::Float(rhs)) => {
-                TensorPrimitive::Float(B::float_powf(lhs, rhs))
-            }
-            (TensorPrimitive::QFloat(lhs), TensorPrimitive::QFloat(rhs)) => B::q_powf(lhs, rhs),
-            (TensorPrimitive::QFloat(lhs), TensorPrimitive::Float(rhs)) => {
-                let dtype = rhs.dtype();
-                TensorPrimitive::Float(B::float_powf(B::dequantize(lhs, dtype.into()), rhs))
-            }
-            (TensorPrimitive::Float(lhs), TensorPrimitive::QFloat(rhs)) => {
-                let dtype = lhs.dtype();
-                TensorPrimitive::Float(B::float_powf(lhs, B::dequantize(rhs, dtype.into())))
-            }
-        };
-
-        Tensor::new(primitive)
+        Tensor::new(powf_impl(self.primitive, other.primitive))
     }
 
     /// Applies element wise power operation with a float scalar
@@ -1077,12 +692,11 @@ $$\text{erf}\(x\) = \frac{2}{\sqrt{\pi}} \int_0^x e^{-t^2} dt$$
     /// # Example
     ///
     /// ```rust
-    /// use burn_tensor::backend::Backend;
     /// use burn_tensor::{Tensor, Shape};
     ///
-    /// fn example<B: Backend>() {
-    ///    let device = B::Device::default();
-    ///    let tensor = Tensor::<B, 2>::from_data([[1.0, -2.0, 3.0], [5.0, 9.0, 6.0]], &device);
+    /// fn example() {
+    ///    let device = Default::default();
+    ///    let tensor = Tensor::<2>::from_data([[1.0, -2.0, 3.0], [5.0, 9.0, 6.0]], &device);
     ///    let tensor = tensor.powf_scalar(2.0);
     ///    println!("{tensor}");
     ///    // [[1.0, 4.0, 9.0], [25.0, 81.0, 36.0]]
@@ -1090,17 +704,11 @@ $$\text{erf}\(x\) = \frac{2}{\sqrt{\pi}} \int_0^x e^{-t^2} dt$$
     /// ```
     pub fn powf_scalar<E: ElementConversion>(self, other: E) -> Self {
         let rhs = Scalar::new(other, &self.dtype());
-
-        let primitive = match self.primitive {
-            TensorPrimitive::Float(lhs) => TensorPrimitive::Float(B::float_powf_scalar(lhs, rhs)),
-            TensorPrimitive::QFloat(lhs) => B::q_powf_scalar(lhs, rhs),
-        };
-
-        Tensor::new(primitive)
+        Tensor::new(powf_scalar_impl(self.primitive, rhs))
     }
 }
 
-impl<const D: usize, B: Backend> Tensor<B, D> {
+impl<const D: usize> Tensor<D> {
     /// Draws samples from a categorical distribution defined by the last dimension
     /// of the input tensor.
     ///
@@ -1132,12 +740,11 @@ impl<const D: usize, B: Backend> Tensor<B, D> {
     /// # Example
     ///
     /// ```rust
-    /// use burn_tensor::backend::Backend;
     /// use burn_tensor::Tensor;
     ///
-    /// fn example<B: Backend>() {
-    ///     let device = B::Device::default();
-    ///     let probs = Tensor::<B, 2>::from_floats(
+    /// fn example() {
+    ///     let device = Default::default();
+    ///     let probs = Tensor::<2>::from_floats(
     ///         [[0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
     ///         &device,
     ///     );
@@ -1146,16 +753,17 @@ impl<const D: usize, B: Backend> Tensor<B, D> {
     ///     println!("{samples}");
     /// }
     /// ```
-    pub fn categorical(self, num_samples: usize) -> Tensor<B, D, Int> {
+    pub fn categorical(self, num_samples: usize) -> Tensor<D, Int> {
         assert!(num_samples > 0, "categorical: num_samples must be >= 1");
 
         let shape = self.shape();
         let num_categories = shape[D - 1];
         let batch_size = (shape.num_elements() / num_categories).max(1);
         let device = self.device();
+        let dtype = self.dtype();
 
         // Flatten leading dimensions into a single batch dimension: [batch, categories]
-        let flat: Tensor<B, 2> = self.reshape([batch_size, num_categories]);
+        let flat: Tensor<2> = self.reshape([batch_size, num_categories]);
 
         // Normalize weights to probabilities
         let sum = flat.clone().sum_dim(1); // [batch, 1]
@@ -1165,21 +773,21 @@ impl<const D: usize, B: Backend> Tensor<B, D> {
         let cumsum = probs.cumsum(1); // [batch, categories]
 
         // Uniform random values for each sample
-        let uniform = Tensor::<B, 2>::random(
+        let uniform = Tensor::<2>::random(
             [batch_size, num_samples],
             Distribution::Uniform(0.0, 1.0),
-            &device,
+            (&device, dtype),
         ); // [batch, num_samples]
 
         // Expand dimensions for broadcasting:
         //   cumsum: [batch, categories, 1]
         //   uniform: [batch, 1, num_samples]
-        let cumsum_3d: Tensor<B, 3> = cumsum.unsqueeze_dim(2);
-        let uniform_3d: Tensor<B, 3> = uniform.unsqueeze_dim(1);
+        let cumsum_3d: Tensor<3> = cumsum.unsqueeze_dim(2);
+        let uniform_3d: Tensor<3> = uniform.unsqueeze_dim(1);
 
         // Count categories where cumsum < uniform (inverse CDF)
-        let mask: Tensor<B, 3, Bool> = cumsum_3d.lower(uniform_3d);
-        let indices: Tensor<B, 2, Int> = mask.int().sum_dim(1).squeeze_dim::<2>(1);
+        let mask: Tensor<3, Bool> = cumsum_3d.lower(uniform_3d);
+        let indices: Tensor<2, Int> = mask.int().sum_dim(1).squeeze_dim::<2>(1);
 
         // Clamp to valid range to guard against floating-point imprecision in cumsum
         let indices = indices.clamp(0, num_categories as i64 - 1);
@@ -1191,29 +799,478 @@ impl<const D: usize, B: Backend> Tensor<B, D> {
     }
 }
 
-#[cfg(feature = "distributed")]
-impl<const D: usize, B> Tensor<B, D>
-where
-    B: AutodiffBackend,
-{
+#[cfg(feature = "std")]
+impl<const D: usize> Tensor<D> {
     /// Returns true if the tensor is marked as distributed.
     pub fn is_distributed(&self) -> bool {
-        match &self.primitive {
-            TensorPrimitive::Float(tensor) => B::is_distributed(tensor),
-            TensorPrimitive::QFloat(_) => unimplemented!(),
-        }
+        is_distributed_impl(&self.primitive)
     }
 
     /// Mark the tensor as distributed.
     ///
     /// This function does nothing when autodiff or distributed is not enabled.
     pub fn set_distributed(self, param_id: DistributedParamId) -> Self {
-        let primitive = match self.primitive {
-            TensorPrimitive::Float(tensor) => {
-                TensorPrimitive::Float(B::set_distributed_params(tensor, param_id))
-            }
-            TensorPrimitive::QFloat(_) => unimplemented!(),
-        };
-        Self::new(primitive)
+        Self::new(set_distributed_impl(self.primitive, param_id))
+    }
+}
+
+impl<const D: usize, K> Tensor<D, K>
+where
+    K: FloatMath,
+{
+    /// Applies element wise square operation.
+    ///
+    #[cfg_attr(doc, doc = r#"$y_i = x_i * x_i$"#)]
+    #[cfg_attr(not(doc), doc = "`y_i = x_i * x_i`")]
+    pub fn square(self) -> Self {
+        Self::new(K::square(self.primitive))
+    }
+
+    /// Applies element wise exponential operation.
+    ///
+    #[cfg_attr(doc, doc = r#"$y_i = e^{x_i}$"#)]
+    #[cfg_attr(not(doc), doc = "`y = e^x`")]
+    pub fn exp(self) -> Self {
+        Self::new(K::exp(self.primitive))
+    }
+
+    /// Applies element wise natural logarithm of one plus the input tensor.
+    ///
+    #[cfg_attr(doc, doc = r#"$y_i = \log_e\(x_i + 1\)$"#)]
+    #[cfg_attr(not(doc), doc = "`y_i = log1p(x_i)`")]
+    pub fn log1p(self) -> Self {
+        Self::new(K::log1p(self.primitive))
+    }
+
+    /// Applies element wise natural log operation *ln*.
+    ///
+    #[cfg_attr(doc, doc = r#"$y_i = \log_e\(x_i\)$"#)]
+    #[cfg_attr(not(doc), doc = "`y_i = log(x_i)`")]
+    pub fn log(self) -> Self {
+        Self::new(K::log(self.primitive))
+    }
+
+    /// Applies element wise square root operation.
+    ///
+    pub fn sqrt(self) -> Self {
+        Tensor::new(K::sqrt(self.primitive))
+    }
+    /// Applies element wise cosine operation.
+    ///
+    #[cfg_attr(doc, doc = r#"$y_i = \cos\(x_i\)$"#)]
+    #[cfg_attr(not(doc), doc = "`y_i = cos(x_i)`")]
+    pub fn cos(self) -> Self {
+        Tensor::new(K::cos(self.primitive))
+    }
+
+    /// Applies element wise sine operation.
+    ///
+    #[cfg_attr(doc, doc = r#"$y_i = \sin\(x_i\)$"#)]
+    #[cfg_attr(not(doc), doc = "`y_i = sin(x_i)`")]
+    pub fn sin(self) -> Self {
+        Tensor::new(K::sin(self.primitive))
+    }
+
+    /// Applies element wise tangent operation.
+    ///
+    #[cfg_attr(doc, doc = r#"$y_i = \tan\(x_i\)$"#)]
+    #[cfg_attr(not(doc), doc = "`y_i = tan(x_i)`")]
+    pub fn tan(self) -> Self {
+        Tensor::new(K::tan(self.primitive))
+    }
+
+    /// Applies element wise hyperbolic cosine operation.
+    ///
+    #[cfg_attr(doc, doc = r#"$y_i = \cosh\(x_i\)$"#)]
+    #[cfg_attr(not(doc), doc = "`y_i = cosh(x_i)`")]
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use burn_tensor::Tensor;
+    ///
+    /// fn example() {
+    ///     let device = Default::default();
+    ///
+    ///     let tensor = Tensor::<1>::from_data([0.0, -1.0, 2.0], &device);
+    ///     println!("{}", tensor.cosh()); // [1.0, 1.5430, 3.7621]
+    /// }
+    /// ```
+    pub fn cosh(self) -> Self {
+        Tensor::new(K::cosh(self.primitive))
+    }
+
+    /// Applies element wise hyperbolic sine operation.
+    ///
+    #[cfg_attr(doc, doc = r#"$y_i = \sinh\(x_i\)$"#)]
+    #[cfg_attr(not(doc), doc = "`y_i = sinh(x_i)`")]
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use burn_tensor::Tensor;
+    ///
+    /// fn example() {
+    ///     let device = Default::default();
+    ///
+    ///     let tensor = Tensor::<1>::from_data([0.0, -1.0, 2.0], &device);
+    ///     println!("{}", tensor.sinh()); // [0.0, -1.1752, 3.6269]
+    /// }
+    /// ```
+    pub fn sinh(self) -> Self {
+        Tensor::new(K::sinh(self.primitive))
+    }
+
+    /// Applies element wise hyperbolic tangent operation.
+    ///
+    #[cfg_attr(doc, doc = r#"$y_i = \tanh\(x_i\)$"#)]
+    #[cfg_attr(not(doc), doc = "`y_i = tanh(x_i)`")]
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use burn_tensor::Tensor;
+    ///
+    /// fn example() {
+    ///     let device = Default::default();
+    ///
+    ///     let tensor = Tensor::<1>::from_data([0.0, -1.0, 2.0], &device);
+    ///     println!("{}", tensor.tanh()); // [0.0, -0.7616, 0.9640]
+    /// }
+    /// ```
+    pub fn tanh(self) -> Self {
+        Tensor::new(K::tanh(self.primitive))
+    }
+
+    /// Applies element wise inverse cosine operation.
+    ///
+    #[cfg_attr(doc, doc = r#"$y_i = \acos\(x_i\)$"#)]
+    #[cfg_attr(not(doc), doc = "`y_i = acos(x_i)`")]
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use burn_tensor::Tensor;
+    ///
+    /// fn example() {
+    ///     let device = Default::default();
+    ///
+    ///     let tensor = Tensor::<1>::from_data([0.0, -1.0, 1.0], &device);
+    ///     println!("{}", tensor.acos()); // [1.5708, 3.1416, 0.0]
+    /// }
+    /// ```
+    pub fn acos(self) -> Self {
+        Tensor::new(K::acos(self.primitive))
+    }
+
+    /// Applies element wise inverse hyperbolic cosine operation.
+    ///
+    #[cfg_attr(doc, doc = r#"$y_i = \acosh\(x_i\)$"#)]
+    #[cfg_attr(not(doc), doc = "`y_i = acosh(x_i)`")]
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use burn_tensor::Tensor;
+    ///
+    /// fn example() {
+    ///     let device = Default::default();
+    ///
+    ///     let tensor = Tensor::<1>::from_data([1.0, 2.0, 3.0], &device);
+    ///     println!("{}", tensor.acosh()); // [0.0000, 1.3170, 1.7627]
+    /// }
+    /// ```
+    pub fn acosh(self) -> Self {
+        Tensor::new(K::acosh(self.primitive))
+    }
+
+    /// Applies element wise inverse sine operation.
+    ///
+    #[cfg_attr(doc, doc = r#"$y_i = \asin\(x_i\)$"#)]
+    #[cfg_attr(not(doc), doc = "`y_i = asin(x_i)`")]
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use burn_tensor::Tensor;
+    ///
+    /// fn example() {
+    ///     let device = Default::default();
+    ///
+    ///     let tensor = Tensor::<1>::from_data([0.0, -1.0, 1.0], &device);
+    ///     println!("{}", tensor.asin()); // [ 0.0000, -1.5708,  1.5708]
+    /// }
+    /// ```
+    pub fn asin(self) -> Self {
+        Tensor::new(K::asin(self.primitive))
+    }
+
+    /// Applies element wise inverse hyperbolic sine operation.
+    ///
+    #[cfg_attr(doc, doc = r#"$y_i = \asinh\(x_i\)$"#)]
+    #[cfg_attr(not(doc), doc = "`y_i = asinh(x_i)`")]
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use burn_tensor::Tensor;
+    ///
+    /// fn example() {
+    ///     let device = Default::default();
+    ///
+    ///     let tensor = Tensor::<1>::from_data([0.0, -1.0, 1.0], &device);
+    ///     println!("{}", tensor.asinh()); // [ 0.0000, -0.8814,  0.8814]
+    /// }
+    /// ```
+    pub fn asinh(self) -> Self {
+        Tensor::new(K::asinh(self.primitive))
+    }
+
+    /// Applies element wise inverse tangent operation.
+    ///
+    #[cfg_attr(doc, doc = r#"$y_i = \atan\(x_i\)$"#)]
+    #[cfg_attr(not(doc), doc = "`y_i = atan(x_i)`")]
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use burn_tensor::Tensor;
+    ///
+    /// fn example() {
+    ///     let device = Default::default();
+    ///
+    ///     let tensor = Tensor::<1>::from_data([0.0, -1.0, 2.0], &device);
+    ///     println!("{}", tensor.atan()); // [ 0.0, -0.7854,  1.1071]
+    /// }
+    /// ```
+    pub fn atan(self) -> Self {
+        Tensor::new(K::atan(self.primitive))
+    }
+
+    /// Applies element wise inverse hyperbolic tangent operation.
+    ///
+    #[cfg_attr(doc, doc = r#"$y_i = \atanh\(x_i\)$"#)]
+    #[cfg_attr(not(doc), doc = "`y_i = atanh(x_i)`")]
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use burn_tensor::Tensor;
+    ///
+    /// fn example() {
+    ///     let device = Default::default();
+    ///
+    ///     let tensor = Tensor::<1>::from_data([0.0, -0.5, 0.5], &device);
+    ///     println!("{}", tensor.atanh()); // [ 0.0, -0.5493,  0.5493]
+    /// }
+    /// ```
+    pub fn atanh(self) -> Self {
+        Tensor::new(K::atanh(self.primitive))
+    }
+
+    /// Applies element wise inverse tangent operation using the signs of arguments to determine the correct quadrant.
+    ///
+    #[cfg_attr(doc, doc = r#"$z_i = \atan2\(y_i, x_i\)$"#)]
+    #[cfg_attr(not(doc), doc = "`z_i = atan2(y_i, x_i)`")]
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use burn_tensor::Tensor;
+    ///
+    /// fn example() {
+    ///     let device = Default::default();
+    ///
+    ///     let lhs = Tensor::<1>::from_data([-2.0, 2.0, -2.0], &device);
+    ///     let rhs = Tensor::<1>::from_data([1.0, -1.0, -1.0], &device);
+    ///     println!("{}", lhs.atan2(rhs)); // [-1.1071,  2.0344, -2.0344]
+    /// }
+    /// ```
+    pub fn atan2(self, other: Self) -> Self {
+        Tensor::new(K::atan2(self.primitive, other.primitive))
+    }
+}
+
+// =========================================================================
+// Non-generic implementation helpers (outlined from the public generic API).
+// See the crate-level docs for the rationale behind this pattern.
+// =========================================================================
+
+fn erf_impl(p: BridgeTensor) -> BridgeTensor {
+    BridgeTensor::float(Dispatch::float_erf(p.into_float()))
+}
+
+fn recip_impl(p: BridgeTensor) -> BridgeTensor {
+    BridgeTensor::float(Dispatch::float_recip(p.into_float()))
+}
+
+fn hypot_impl(lhs: BridgeTensor, rhs: BridgeTensor) -> BridgeTensor {
+    BridgeTensor::float(Dispatch::float_hypot(lhs.into_float(), rhs.into_float()))
+}
+
+fn round_impl(p: BridgeTensor) -> BridgeTensor {
+    BridgeTensor::float(Dispatch::float_round(p.into_float()))
+}
+
+fn floor_impl(p: BridgeTensor) -> BridgeTensor {
+    BridgeTensor::float(Dispatch::float_floor(p.into_float()))
+}
+
+fn ceil_impl(p: BridgeTensor) -> BridgeTensor {
+    BridgeTensor::float(Dispatch::float_ceil(p.into_float()))
+}
+
+fn int_impl(p: BridgeTensor, device: Device) -> BridgeTensor {
+    let out_dtype = device.settings().int_dtype;
+    BridgeTensor::int(Dispatch::float_into_int(p.into_float(), out_dtype))
+}
+
+fn random_like_impl(p: &BridgeTensor, distribution: Distribution) -> BridgeTensor {
+    BridgeTensor::float(Dispatch::float_random(
+        p.shape(),
+        distribution,
+        &p.as_dispatch().device(),
+        p.dtype().into(),
+    ))
+}
+
+fn detach_impl(p: BridgeTensor) -> BridgeTensor {
+    BridgeTensor::float(Dispatch::float_detach(p.into_float()))
+}
+
+fn is_require_grad_impl(p: &BridgeTensor) -> bool {
+    let (kind, tensor) = p.as_parts();
+    match kind {
+        BridgeKind::Float => Dispatch::float_is_require_grad(tensor),
+        BridgeKind::QFloat => Dispatch::q_is_require_grad(tensor),
+        _ => panic!("Should be Float primitive kind"),
+    }
+}
+
+fn set_require_grad_impl(p: BridgeTensor, require_grad: bool) -> BridgeTensor {
+    let (kind, tensor) = p.into_parts();
+    match kind {
+        BridgeKind::Float => {
+            BridgeTensor::float(Dispatch::float_set_require_grad(tensor, require_grad))
+        }
+        BridgeKind::QFloat => {
+            BridgeTensor::qfloat(Dispatch::q_set_require_grad(tensor, require_grad))
+        }
+        _ => panic!("Should be Float primitive kind"),
+    }
+}
+
+fn relu_impl(p: BridgeTensor) -> BridgeTensor {
+    BridgeTensor::float(Dispatch::relu(p.into_float()))
+}
+
+fn quantize_impl(p: BridgeTensor, scheme: &QuantScheme, scales: BridgeTensor) -> BridgeTensor {
+    BridgeTensor::qfloat(Dispatch::quantize(
+        p.into_float(),
+        scheme,
+        QuantizationParametersPrimitive {
+            scales: scales.into_float(),
+        },
+    ))
+}
+
+fn quantize_dynamic_impl(p: BridgeTensor, scheme: &QuantScheme) -> BridgeTensor {
+    BridgeTensor::qfloat(Dispatch::quantize_dynamic(p.into_float(), scheme))
+}
+
+fn dequantize_impl(p: BridgeTensor) -> BridgeTensor {
+    BridgeTensor::float(p.into_float())
+}
+
+fn is_nan_impl(p: BridgeTensor) -> BridgeTensor {
+    let bool_dtype = p.device_settings().bool_dtype;
+    BridgeTensor::bool(Dispatch::float_is_nan(p.into_float(), bool_dtype))
+}
+
+fn is_inf_impl(p: BridgeTensor) -> BridgeTensor {
+    let bool_dtype = p.device_settings().bool_dtype;
+    BridgeTensor::bool(Dispatch::float_is_inf(p.into_float(), bool_dtype))
+}
+
+fn grid_sample_2d_impl(
+    p: BridgeTensor,
+    grid: BridgeTensor,
+    options: GridSampleOptions,
+) -> BridgeTensor {
+    BridgeTensor::float(Dispatch::float_grid_sample_2d(
+        p.into_float(),
+        grid.into_float(),
+        options,
+    ))
+}
+
+fn cross_impl(p: BridgeTensor, other: BridgeTensor, dim: usize) -> BridgeTensor {
+    BridgeTensor::float(Dispatch::float_cross(
+        p.into_float(),
+        other.into_float(),
+        dim,
+    ))
+}
+
+fn powf_impl(lhs: BridgeTensor, rhs: BridgeTensor) -> BridgeTensor {
+    let (lkind, lhs) = lhs.into_parts();
+    let (rkind, rhs) = rhs.into_parts();
+    match (lkind, rkind) {
+        (BridgeKind::Float, BridgeKind::Float) => {
+            BridgeTensor::float(Dispatch::float_powf(lhs, rhs))
+        }
+        (BridgeKind::QFloat, BridgeKind::QFloat) => match Dispatch::q_powf(lhs, rhs) {
+            TensorPrimitive::Float(out) => BridgeTensor::float(out),
+            TensorPrimitive::QFloat(out) => BridgeTensor::qfloat(out),
+        },
+        (BridgeKind::QFloat, BridgeKind::Float) => {
+            let dtype = rhs.dtype();
+            BridgeTensor::float(Dispatch::float_powf(
+                Dispatch::dequantize(lhs, dtype.into()),
+                rhs,
+            ))
+        }
+        (BridgeKind::Float, BridgeKind::QFloat) => {
+            let dtype = lhs.dtype();
+            BridgeTensor::float(Dispatch::float_powf(
+                lhs,
+                Dispatch::dequantize(rhs, dtype.into()),
+            ))
+        }
+        _ => panic!("Should be Float primitive kind"),
+    }
+}
+
+fn powf_scalar_impl(p: BridgeTensor, rhs: Scalar) -> BridgeTensor {
+    let (kind, lhs) = p.into_parts();
+    match kind {
+        BridgeKind::Float => BridgeTensor::float(Dispatch::float_powf_scalar(lhs, rhs)),
+        BridgeKind::QFloat => match Dispatch::q_powf_scalar(lhs, rhs) {
+            TensorPrimitive::Float(out) => BridgeTensor::float(out),
+            TensorPrimitive::QFloat(out) => BridgeTensor::qfloat(out),
+        },
+        _ => panic!("Should be Float primitive kind"),
+    }
+}
+
+#[cfg(feature = "std")]
+fn is_distributed_impl(p: &BridgeTensor) -> bool {
+    let (kind, tensor) = p.as_parts();
+    match kind {
+        BridgeKind::Float => Dispatch::is_distributed(tensor),
+        BridgeKind::QFloat => unimplemented!(),
+        _ => panic!("Should be Float primitive kind"),
+    }
+}
+
+#[cfg(feature = "std")]
+fn set_distributed_impl(p: BridgeTensor, param_id: DistributedParamId) -> BridgeTensor {
+    let (kind, tensor) = p.into_parts();
+    match kind {
+        BridgeKind::Float => {
+            BridgeTensor::float(Dispatch::set_distributed_params(tensor, param_id))
+        }
+        BridgeKind::QFloat => unimplemented!(),
+        _ => panic!("Should be Float primitive kind"),
     }
 }

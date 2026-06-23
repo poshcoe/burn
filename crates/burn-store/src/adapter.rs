@@ -14,8 +14,8 @@ use alloc::string::String;
 use alloc::string::ToString;
 use alloc::vec;
 
-use burn_tensor::shape;
-use burn_tensor::{DType, TensorData};
+use burn_core::tensor::shape;
+use burn_core::tensor::{DType, TensorData};
 use hashbrown::HashSet;
 
 // Module type names as they appear in the container_type field
@@ -374,7 +374,10 @@ enum PyTorchConversionDirection {
 fn is_normalization_layer(container_type: &str) -> bool {
     matches!(
         container_type,
-        module_names::BATCH_NORM | module_names::LAYER_NORM | module_names::GROUP_NORM
+        module_names::BATCH_NORM
+            | module_names::LAYER_NORM
+            | module_names::GROUP_NORM
+            | module_names::RMS_NORM
     )
 }
 
@@ -520,7 +523,7 @@ mod tests {
     use super::*;
     use alloc::rc::Rc;
     use alloc::sync::Arc;
-    use burn_tensor::{DType, Shape, TensorData};
+    use burn_core::tensor::{DType, Shape, TensorData};
     use core::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
@@ -974,7 +977,7 @@ mod tests {
 
     #[test]
     fn test_half_precision_skips_non_float() {
-        use burn_tensor::quantization::QuantScheme;
+        use burn_core::tensor::quantization::QuantScheme;
 
         let adapter = HalfPrecisionAdapter::new();
 

@@ -5,7 +5,7 @@ use crate::cache::TensorCache;
 use crate::{Dropout, DropoutConfig, Linear, LinearConfig};
 use burn::config::Config;
 use burn::module::{Content, DisplaySettings, Initializer, Module, ModuleDisplay};
-use burn::tensor::{Bool, Tensor, backend::Backend};
+use burn::tensor::{Bool, Device, Tensor};
 
 use burn::tensor::activation::{quiet_softmax, softmax};
 #[cfg(not(feature = "std"))]
@@ -40,6 +40,22 @@ pub struct MultiHeadAttentionConfig {
         default = "Initializer::KaimingUniform{gain:1.0/num_traits::Float::sqrt(3.0), fan_out_only:false}"
     )]
     pub initializer: Initializer,
+
+    /// Enable bias for the key [Linear] layer.
+    #[config(default = true)]
+    pub key_bias: bool,
+
+    /// Enable bias for the value [Linear] layer.
+    #[config(default = true)]
+    pub value_bias: bool,
+
+    /// Enable bias for the query [Linear] layer.
+    #[config(default = true)]
+    pub query_bias: bool,
+
+    /// Enable bias for the output [Linear] layer.
+    #[config(default = true)]
+    pub output_bias: bool,
 }
 
 /// The multihead attention module as describe in the paper [Attention Is All You Need](https://arxiv.org/abs/1706.03762).
@@ -54,15 +70,15 @@ pub struct MultiHeadAttentionConfig {
 /// Should be created with [MultiHeadAttentionConfig].
 #[derive(Module, Debug)]
 #[module(custom_display)]
-pub struct MultiHeadAttention<B: Backend> {
+pub struct MultiHeadAttention {
     /// Linear layer to transform the input features into the query space.
-    pub query: Linear<B>,
+    pub query: Linear,
     /// Linear layer to transform the input features into the key space.
-    pub key: Linear<B>,
+    pub key: Linear,
     /// Linear layer to transform the input features into the value space.
-    pub value: Linear<B>,
+    pub value: Linear,
     /// Linear layer to transform the output features back to the original space.
-    pub output: Linear<B>,
+    pub output: Linear,
     /// Dropout layer.
     pub dropout: Dropout,
     /// Activation function.
@@ -79,7 +95,7 @@ pub struct MultiHeadAttention<B: Backend> {
     pub quiet_softmax: bool,
 }
 
-impl<B: Backend> ModuleDisplay for MultiHeadAttention<B> {
+impl ModuleDisplay for MultiHeadAttention {
     fn custom_settings(&self) -> Option<DisplaySettings> {
         DisplaySettings::new()
             .with_new_line_after_attribute(false)
@@ -100,31 +116,28 @@ impl<B: Backend> ModuleDisplay for MultiHeadAttention<B> {
 
 /// [Multihead attention](MultiHeadAttention) forward pass input argument.
 #[derive(Debug, Clone)]
-pub struct MhaInput<B: Backend> {
+pub struct MhaInput {
     /// Shape `[batch_size, seq_length_1, d_model]`
-    query: Tensor<B, 3>,
+    query: Tensor<3>,
     /// Shape `[batch_size, seq_length_2, d_model]`
-    key: Tensor<B, 3>,
+    key: Tensor<3>,
     /// Shape `[batch_size, seq_length_2, d_model]`
-    value: Tensor<B, 3>,
-    mask_pad: Option<Tensor<B, 2, Bool>>,
-    mask_attn: Option<Tensor<B, 3, Bool>>,
+    value: Tensor<3>,
+    mask_pad: Option<Tensor<2, Bool>>,
+    mask_attn: Option<Tensor<3, Bool>>,
 }
 
 impl MultiHeadAttentionConfig {
     /// Initialize a new [multihead attention](MultiHeadAttention) module.
-    pub fn init<B: Backend>(&self, device: &B::Device) -> MultiHeadAttention<B> {
-        let linear = |config: &Self| {
-            LinearConfig::new(config.d_model, config.d_model)
-                .with_initializer(self.initializer.clone())
-                .init(device)
-        };
+    pub fn init(&self, device: &Device) -> MultiHeadAttention {
+        let linear_cfg = LinearConfig::new(self.d_model, self.d_model)
+            .with_initializer(self.initializer.clone());
 
         MultiHeadAttention {
-            query: linear(self),
-            key: linear(self),
-            value: linear(self),
-            output: linear(self),
+            query: linear_cfg.clone().with_bias(self.query_bias).init(device),
+            key: linear_cfg.clone().with_bias(self.key_bias).init(device),
+            value: linear_cfg.clone().with_bias(self.value_bias).init(device),
+            output: linear_cfg.clone().with_bias(self.output_bias).init(device),
             dropout: DropoutConfig::new(self.dropout).init(),
             activation: Gelu::new(),
             n_heads: self.n_heads,
@@ -136,13 +149,13 @@ impl MultiHeadAttentionConfig {
     }
 }
 
-impl<B: Backend> MhaInput<B> {
+impl MhaInput {
     /// Create a [multihead attention](MultiHeadAttention) input argument
     /// by setting the query, key and value to the given tensor.
     ///
     /// # Shape
     /// - tensor: `[batch_size, seq_length, d_model]`
-    pub fn self_attn(tensor: Tensor<B, 3>) -> Self {
+    pub fn self_attn(tensor: Tensor<3>) -> Self {
         Self {
             query: tensor.clone(),
             key: tensor.clone(),
@@ -153,7 +166,7 @@ impl<B: Backend> MhaInput<B> {
     }
 
     /// Create a [multihead attention](MultiHeadAttention) input argument.
-    pub fn new(query: Tensor<B, 3>, key: Tensor<B, 3>, value: Tensor<B, 3>) -> Self {
+    pub fn new(query: Tensor<3>, key: Tensor<3>, value: Tensor<3>) -> Self {
         Self {
             query,
             key,
@@ -164,13 +177,13 @@ impl<B: Backend> MhaInput<B> {
     }
 
     /// Register the padding mask.
-    pub fn mask_pad(mut self, mask_pad: Tensor<B, 2, Bool>) -> Self {
+    pub fn mask_pad(mut self, mask_pad: Tensor<2, Bool>) -> Self {
         self.mask_pad = Some(mask_pad);
         self
     }
 
     /// Register the attention mask.
-    pub fn mask_attn(mut self, mask_attn: Tensor<B, 3, Bool>) -> Self {
+    pub fn mask_attn(mut self, mask_attn: Tensor<3, Bool>) -> Self {
         self.mask_attn = Some(mask_attn);
         self
     }
@@ -178,14 +191,14 @@ impl<B: Backend> MhaInput<B> {
 
 /// [Multihead attention](MultiHeadAttention) outputs.
 #[derive(Debug, Clone)]
-pub struct MhaOutput<B: Backend> {
+pub struct MhaOutput {
     /// The attention weights `[batch_size, n_heads, seq_length_1, seq_length_2]`.
-    pub weights: Tensor<B, 4>,
+    pub weights: Tensor<4>,
     /// The context tensor `[batch_size, seq_length_1, d_model]`.
-    pub context: Tensor<B, 3>,
+    pub context: Tensor<3>,
 }
 
-impl<B: Backend> MultiHeadAttention<B> {
+impl MultiHeadAttention {
     /// Applies the forward pass on the input tensors.
     ///
     /// See [MultiHeadAttention](MultiHeadAttention) for more information.
@@ -196,7 +209,7 @@ impl<B: Backend> MultiHeadAttention<B> {
     /// - key: `[batch_size, seq_length_2, d_model]`
     /// - value: `[batch_size, seq_length_2, d_model]`
     /// - output: `[batch_size, seq_length_1, d_model]`
-    pub fn forward(&self, input: MhaInput<B>) -> MhaOutput<B> {
+    pub fn forward(&self, input: MhaInput) -> MhaOutput {
         let [batch_size, seq_length_1, d_model] = input.query.dims();
 
         let query = self.attention_linear(input.query, &self.query);
@@ -223,7 +236,7 @@ impl<B: Backend> MultiHeadAttention<B> {
     /// - key: `[batch_size, seq_length_2, d_model]`
     /// - value: `[batch_size, seq_length_2, d_model]`
     /// - output: `[batch_size, seq_length_1, d_model]`
-    pub fn forward_cache(&self, input: MhaInput<B>, cache: &mut MhaCache<B>) -> MhaOutput<B> {
+    pub fn forward_cache(&self, input: MhaInput, cache: &mut MhaCache) -> MhaOutput {
         let [batch_size, seq_length_1, d_model] = input.query.dims();
 
         let query = cache
@@ -249,7 +262,7 @@ impl<B: Backend> MultiHeadAttention<B> {
         MhaOutput { weights, context }
     }
 
-    fn attn_scores(&self, query: Tensor<B, 4>, key: Tensor<B, 4>) -> Tensor<B, 4> {
+    fn attn_scores(&self, query: Tensor<4>, key: Tensor<4>) -> Tensor<4> {
         let attn_scores = query
             .matmul(key.transpose())
             .div_scalar((self.d_k as f32).sqrt());
@@ -259,10 +272,10 @@ impl<B: Backend> MultiHeadAttention<B> {
 
     fn attn_weights(
         &self,
-        mut attn_scores: Tensor<B, 4>,
-        mask_pad: Option<Tensor<B, 2, Bool>>,
-        mask_attn: Option<Tensor<B, 3, Bool>>,
-    ) -> Tensor<B, 4> {
+        mut attn_scores: Tensor<4>,
+        mask_pad: Option<Tensor<2, Bool>>,
+        mask_attn: Option<Tensor<3, Bool>>,
+    ) -> Tensor<4> {
         if let Some(mask_pad) = mask_pad {
             let [batch_size, seq_length] = mask_pad.dims();
 
@@ -288,7 +301,7 @@ impl<B: Backend> MultiHeadAttention<B> {
         }
     }
 
-    fn attention_linear(&self, x: Tensor<B, 3>, linear: &Linear<B>) -> Tensor<B, 4> {
+    fn attention_linear(&self, x: Tensor<3>, linear: &Linear) -> Tensor<4> {
         let [batch_size, seq_length, _d_model] = x.dims();
         linear
             .forward(x)
@@ -300,19 +313,19 @@ impl<B: Backend> MultiHeadAttention<B> {
 /// Cache for the [Multi Head Attention](MultiHeadAttention) layer.
 ///
 /// To be used during inference when decoding tokens.
-pub struct MhaCache<B: Backend> {
-    query: MhaLinearCache<B, 4>,
-    key: MhaLinearCache<B, 4>,
-    value: MhaLinearCache<B, 4>,
-    output: MhaLinearCache<B, 3>,
+pub struct MhaCache {
+    query: MhaLinearCache<4>,
+    key: MhaLinearCache<4>,
+    value: MhaLinearCache<4>,
+    output: MhaLinearCache<3>,
 }
 
-enum MhaLinearCache<B: Backend, const D: usize> {
-    Autoregressive(TensorCache<B, D>, usize),
-    Full(TensorCache<B, D>),
+enum MhaLinearCache<const D: usize> {
+    Autoregressive(TensorCache<D>, usize),
+    Full(TensorCache<D>),
 }
 
-impl<B: Backend> MhaCache<B> {
+impl MhaCache {
     /// Initialize a cache for autoregressive inference.
     pub fn autoregressive() -> Self {
         Self {
@@ -335,12 +348,12 @@ impl<B: Backend> MhaCache<B> {
     }
 }
 
-impl<B: Backend, const D: usize> MhaLinearCache<B, D> {
-    pub fn forward<F: Fn(Tensor<B, 3>) -> Tensor<B, D>>(
+impl<const D: usize> MhaLinearCache<D> {
+    pub fn forward<F: Fn(Tensor<3>) -> Tensor<D>>(
         &mut self,
-        tensor: Tensor<B, 3>,
+        tensor: Tensor<3>,
         func: F,
-    ) -> Tensor<B, D> {
+    ) -> Tensor<D> {
         match self {
             MhaLinearCache::Autoregressive(cache, dim) => {
                 cache.forward_autoregressive(tensor, *dim, func)
@@ -353,18 +366,57 @@ impl<B: Backend, const D: usize> MhaLinearCache<B, D> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{TestBackend, attention::generate_autoregressive_mask};
+    use crate::attention::generate_autoregressive_mask;
     use alloc::vec::Vec;
     use burn::tensor::Int;
     use burn::tensor::Tolerance;
-    use burn::tensor::ops::FloatElem;
     use burn::tensor::{Distribution, Shape};
+
+    #[test]
+    fn test_enable_bias() {
+        let d_model = 32;
+        let n_heads = 4;
+        let device = Default::default();
+
+        let base_cfg = MultiHeadAttentionConfig::new(d_model, n_heads);
+
+        // Default, everything is enabled.
+        let mha = base_cfg.init(&device);
+        assert!(mha.query.bias.is_some());
+        assert!(mha.key.bias.is_some());
+        assert!(mha.value.bias.is_some());
+        assert!(mha.output.bias.is_some());
+
+        let mha = base_cfg.clone().with_query_bias(false).init(&device);
+        assert!(mha.query.bias.is_none());
+        assert!(mha.key.bias.is_some());
+        assert!(mha.value.bias.is_some());
+        assert!(mha.output.bias.is_some());
+
+        let mha = base_cfg.clone().with_key_bias(false).init(&device);
+        assert!(mha.query.bias.is_some());
+        assert!(mha.key.bias.is_none());
+        assert!(mha.value.bias.is_some());
+        assert!(mha.output.bias.is_some());
+
+        let mha = base_cfg.clone().with_value_bias(false).init(&device);
+        assert!(mha.query.bias.is_some());
+        assert!(mha.key.bias.is_some());
+        assert!(mha.value.bias.is_none());
+        assert!(mha.output.bias.is_some());
+
+        let mha = base_cfg.clone().with_output_bias(false).init(&device);
+        assert!(mha.query.bias.is_some());
+        assert!(mha.key.bias.is_some());
+        assert!(mha.value.bias.is_some());
+        assert!(mha.output.bias.is_none());
+    }
 
     #[test]
     fn test_self_attention_shapes() {
         let [batch_size, seq_length, d_model, n_heads] = [7, 13, 32, 4];
         let device = Default::default();
-        let mha = MultiHeadAttentionConfig::new(d_model, n_heads).init::<TestBackend>(&device);
+        let mha = MultiHeadAttentionConfig::new(d_model, n_heads).init(&device);
         let input = MhaInput::self_attn(Tensor::random(
             [batch_size, seq_length, d_model],
             Distribution::Default,
@@ -388,8 +440,7 @@ mod tests {
     #[test]
     fn test_generic_mha_shapes() {
         let [batch_size, seq_length_1, seq_length_2, d_model, n_heads] = [7, 13, 15, 32, 4];
-        let mha = MultiHeadAttentionConfig::new(d_model, n_heads)
-            .init::<TestBackend>(&Default::default());
+        let mha = MultiHeadAttentionConfig::new(d_model, n_heads).init(&Default::default());
         let device = Default::default();
         let input = MhaInput::new(
             Tensor::random(
@@ -427,18 +478,17 @@ mod tests {
     fn test_self_attention_mask_pad() {
         let [batch_size, seq_length, d_model, n_heads, num_padded] = [3, 6, 32, 2, 2];
         let device = Default::default();
-        let mha = MultiHeadAttentionConfig::new(d_model, n_heads).init::<TestBackend>(&device);
+        let mha = MultiHeadAttentionConfig::new(d_model, n_heads).init(&device);
 
         // Create a padding mask
-        let mask_pad: Tensor<TestBackend, 2, Int> =
-            Tensor::zeros([batch_size, seq_length], &device);
+        let mask_pad: Tensor<2, Int> = Tensor::zeros([batch_size, seq_length], &device);
         let mask_pad = mask_pad.slice_assign(
             [0..batch_size, seq_length - num_padded..seq_length],
             Tensor::ones([batch_size, num_padded], &device),
         );
         let mask_pad = mask_pad.equal_elem(1).to_device(&device);
 
-        let tensor_1 = Tensor::<TestBackend, 3>::random(
+        let tensor_1 = Tensor::<3>::random(
             [batch_size, seq_length, d_model],
             Distribution::Default,
             &device,
@@ -481,9 +531,9 @@ mod tests {
     fn test_autoregressive_mask_should_have_same_output_as_autoregressive_decoding() {
         let [batch_size, seq_length, d_model, n_heads] = [3, 4, 12, 2];
         let device = Default::default();
-        let mha = MultiHeadAttentionConfig::new(d_model, n_heads).init::<TestBackend>(&device);
+        let mha = MultiHeadAttentionConfig::new(d_model, n_heads).init(&device);
 
-        let tensor = Tensor::<TestBackend, 3>::random(
+        let tensor = Tensor::<3>::random(
             [batch_size, seq_length, d_model],
             Distribution::Default,
             &device,
@@ -511,16 +561,13 @@ mod tests {
         output_1
             .context
             .into_data()
-            .assert_approx_eq::<FloatElem<TestBackend>>(
-                &output_2.into_data(),
-                Tolerance::default(),
-            );
+            .assert_approx_eq::<f32>(&output_2.into_data(), Tolerance::default());
     }
 
     #[test]
     fn display() {
         let config = MultiHeadAttentionConfig::new(2, 4);
-        let mha = config.init::<TestBackend>(&Default::default());
+        let mha = config.init(&Default::default());
 
         assert_eq!(
             alloc::format!("{mha}"),

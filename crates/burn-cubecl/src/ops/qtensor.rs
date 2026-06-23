@@ -1,20 +1,19 @@
 use burn_backend::{
-    Bytes, DType, ExecutionError, QTensorPrimitive, Shape, Slice, TensorData, TensorMetadata,
-    TensorPrimitive,
+    Bytes, DType, ExecutionError, Shape, SplitPolicy, TensorData, TensorMetadata, TensorPrimitive,
+    get_device_settings,
     ops::QTensorOps,
     quantization::{
         QParamTensor, QuantLevel, QuantMode, QuantParam, QuantPropagation, QuantScheme, QuantValue,
         QuantizationParametersPrimitive, params_shape,
     },
-    tensor::{Device, FloatTensor, IntTensor, QuantizedTensor},
+    tensor::{Device, FloatTensor, QuantizedTensor},
 };
 use burn_std::{FloatDType, Metadata};
 use cubecl::server::{MemoryLayout, MemoryLayoutDescriptor, MemoryLayoutStrategy};
 use cubecl::{e2m1x2, quant::scheme::QuantStore};
 
 use crate::{
-    CubeBackend, CubeRuntime, FloatElement, IntElement,
-    element::BoolElement,
+    CubeBackend, CubeRuntime,
     kernel::{self, matmul::MatmulStrategy},
     tensor::{CubeTensor, QParams},
 };
@@ -119,7 +118,7 @@ fn new_quantized<R: CubeRuntime>(
         Some(data) => {
             let num_bytes = shape_value.num_elements() * data_size;
 
-            match data.split(num_bytes) {
+            match data.split(num_bytes, SplitPolicy::Shared) {
                 Ok((bytes_data, bytes_scales)) => client
                     .create_tensors(vec![(data_desc, bytes_data), (scales_desc, bytes_scales)]),
                 Err((data, _)) => client.create_tensors_from_slices(vec![
@@ -155,13 +154,7 @@ fn new_quantized<R: CubeRuntime>(
     )
 }
 
-impl<R, F, I, BT> QTensorOps<Self> for CubeBackend<R, F, I, BT>
-where
-    R: CubeRuntime,
-    F: FloatElement,
-    I: IntElement,
-    BT: BoolElement,
-{
+impl<R: CubeRuntime> QTensorOps<Self> for CubeBackend<R> {
     fn q_from_data(data: TensorData, device: &Device<Self>) -> QuantizedTensor<Self> {
         match data.dtype {
             DType::QFloat(scheme) => match scheme {
@@ -204,10 +197,6 @@ where
 
     fn dequantize(tensor: QuantizedTensor<Self>, dtype: FloatDType) -> FloatTensor<Self> {
         kernel::quantization::dequantize(tensor, dtype.into())
-    }
-
-    fn q_device(tensor: &QuantizedTensor<Self>) -> Device<Self> {
-        tensor.device.clone()
     }
 
     fn q_to_device(tensor: QuantizedTensor<Self>, device: &Device<Self>) -> QuantizedTensor<Self> {
@@ -254,34 +243,14 @@ where
         unimplemented!()
     }
 
-    fn q_gather(
-        _dim: usize,
-        _tensor: QuantizedTensor<Self>,
-        _indices: IntTensor<Self>,
-    ) -> QuantizedTensor<Self> {
-        unimplemented!()
-    }
-
-    fn q_select(
-        _tensor: QuantizedTensor<Self>,
-        _dim: usize,
-        _indices: IntTensor<Self>,
-    ) -> QuantizedTensor<Self> {
-        unimplemented!()
-    }
-
-    fn q_slice(_tensor: QuantizedTensor<Self>, _slices: &[Slice]) -> QuantizedTensor<Self> {
-        unimplemented!()
-    }
-
-    fn q_expand(_tensor: QuantizedTensor<Self>, _shape: Shape) -> QuantizedTensor<Self> {
-        unimplemented!()
-    }
-
     fn q_matmul(lhs: TensorPrimitive<Self>, rhs: TensorPrimitive<Self>) -> TensorPrimitive<Self> {
-        let (propagation, scheme) = match (&lhs, &rhs) {
-            (TensorPrimitive::QFloat(lhs), _) => (lhs.propagation(), *lhs.scheme()),
-            (_, TensorPrimitive::QFloat(rhs)) => (rhs.propagation(), *rhs.scheme()),
+        let (settings, scheme) = match (&lhs, &rhs) {
+            (TensorPrimitive::QFloat(lhs), _) => {
+                (get_device_settings::<Self>(&lhs.device), lhs.scheme())
+            }
+            (_, TensorPrimitive::QFloat(rhs)) => {
+                (get_device_settings::<Self>(&rhs.device), rhs.scheme())
+            }
             _ => unreachable!(),
         };
 
@@ -289,7 +258,7 @@ where
         let out_dtype = match (&lhs, &rhs) {
             (TensorPrimitive::Float(lhs), _) => lhs.dtype,
             (_, TensorPrimitive::Float(rhs)) => rhs.dtype,
-            _ => F::dtype(),
+            _ => settings.float_dtype.into(),
         };
 
         let (_lhs_dtype, lhs) = match lhs {
@@ -304,7 +273,7 @@ where
         let out =
             kernel::matmul::matmul(lhs, rhs, None, MatmulStrategy::default(), out_dtype).unwrap();
 
-        match propagation {
+        match settings.quantization.propagation {
             QuantPropagation::Propagate => {
                 TensorPrimitive::QFloat(Self::quantize_dynamic(out, &scheme))
             }

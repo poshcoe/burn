@@ -16,6 +16,9 @@ workspace = true
 
 [features]
 default = ["fusion", "burn-cubecl/default", "cubecl/default"]
+doc = ["burn-cubecl/doc"]
+std = ["burn-cubecl/std", "cubecl/std"]
+
 tracing = [
     "cubecl/tracing",
     "burn-cubecl/tracing",
@@ -26,16 +29,15 @@ tracing = [
 fusion = ["burn-fusion", "burn-cubecl/fusion"]
 autotune = ["burn-cubecl/autotune"]
 autotune-checks = ["burn-cubecl/autotune-checks"]
-doc = ["burn-cubecl/doc"]
-std = ["burn-cubecl/std", "cubecl/std"]
 
 [dependencies]
 cubecl = { workspace = true, features = ["hip"] }
-burn-cubecl = { path = "../burn-cubecl", version = "=0.21.0-pre.3", default-features = true }
-burn-backend = { path = "../burn-backend", version = "=0.21.0-pre.3", features = [
+burn-cubecl = { workspace = true, features = ["default"] }
+burn-backend = { workspace = true, features = [
+    "default",
     "cubecl-hip",
 ] }
-burn-fusion = { path = "../burn-fusion", version = "=0.21.0-pre.3", optional = true }
+burn-fusion = { workspace = true, optional = true, features = ["default"] }
 
 [package.metadata.docs.rs]
 features = ["doc"]

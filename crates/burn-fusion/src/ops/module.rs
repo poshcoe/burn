@@ -1,9 +1,8 @@
 use crate::{
     Fusion, FusionBackend,
-    stream::{OperationStreams, execution::Operation},
+    stream::{StreamId, execution::Operation},
 };
 use burn_backend::{
-    Element,
     ops::{
         ConvOptions, ConvTransposeOptions, DeformConv2dBackward, DeformConvOptions,
         InterpolateOptions, MaxPool1dBackward, MaxPool1dWithIndices, MaxPool2dBackward,
@@ -13,6 +12,7 @@ use burn_backend::{
     tensor::{FloatTensor, IntTensor},
 };
 use burn_ir::*;
+use burn_std::IntDType;
 use std::marker::PhantomData;
 
 macro_rules! make_ops {
@@ -33,6 +33,10 @@ macro_rules! make_ops {
 }
 
 impl<B: FusionBackend> ModuleOps<Fusion<B>> for Fusion<B> {
+    // linear and its backward ops fall back to the default ModuleOps impl,
+    // which decomposes into matmul + add / matmul + sum. This preserves
+    // downstream fusion in burn-cubecl-fusion, which matches on those
+    // primitive IR nodes.
     fn conv1d(
         x: FloatTensor<Self>,
         weight: FloatTensor<Self>,
@@ -53,10 +57,7 @@ impl<B: FusionBackend> ModuleOps<Fusion<B>> for Fusion<B> {
             handles.register_float_tensor::<B>(&desc.out.id, output);
         });
 
-        let mut streams = OperationStreams::with_inputs([&x, &weight]);
-        if let Some(bias) = bias.as_ref() {
-            streams.tensor(bias)
-        }
+        let streams = StreamId::current();
 
         let client = x.client.clone();
         let desc = Conv1dOpIr::create(
@@ -95,7 +96,7 @@ impl<B: FusionBackend> ModuleOps<Fusion<B>> for Fusion<B> {
             }
         );
 
-        let streams = OperationStreams::with_inputs([&x, &weight, &output_grad]);
+        let streams = StreamId::current();
 
         let client = x.client.clone();
         let desc = Conv1dXBackwardOpIr::create(
@@ -134,7 +135,7 @@ impl<B: FusionBackend> ModuleOps<Fusion<B>> for Fusion<B> {
             }
         );
 
-        let streams = OperationStreams::with_inputs([&x, &weight, &output_grad]);
+        let streams = StreamId::current();
 
         let client = x.client.clone();
         let desc = Conv1dWeightBackwardOpIr::create(
@@ -171,7 +172,7 @@ impl<B: FusionBackend> ModuleOps<Fusion<B>> for Fusion<B> {
             }
         );
 
-        let streams = OperationStreams::with_inputs([&x, &bias, &output_grad]);
+        let streams = StreamId::current();
 
         let client = x.client.clone();
         let desc = Conv1dBiasBackwardOpIr::create(
@@ -212,10 +213,7 @@ impl<B: FusionBackend> ModuleOps<Fusion<B>> for Fusion<B> {
             handles.register_float_tensor::<B>(&args.out.id, output);
         });
 
-        let mut streams = OperationStreams::with_inputs([&x, &weight]);
-        if let Some(bias) = bias.as_ref() {
-            streams.tensor(bias)
-        }
+        let streams = StreamId::current();
 
         let client = x.client.clone();
         let desc = Conv2dOpIr::create(
@@ -254,7 +252,7 @@ impl<B: FusionBackend> ModuleOps<Fusion<B>> for Fusion<B> {
             }
         );
 
-        let streams = OperationStreams::with_inputs([&x, &weight, &output_grad]);
+        let streams = StreamId::current();
 
         let client = x.client.clone();
         let desc = Conv2dXBackwardOpIr::create(
@@ -293,7 +291,7 @@ impl<B: FusionBackend> ModuleOps<Fusion<B>> for Fusion<B> {
             }
         );
 
-        let streams = OperationStreams::with_inputs([&x, &weight, &output_grad]);
+        let streams = StreamId::current();
 
         let client = x.client.clone();
         let desc = Conv2dWeightBackwardOpIr::create(
@@ -330,7 +328,7 @@ impl<B: FusionBackend> ModuleOps<Fusion<B>> for Fusion<B> {
             }
         );
 
-        let streams = OperationStreams::with_inputs([&x, &bias, &output_grad]);
+        let streams = StreamId::current();
 
         let client = x.client.clone();
         let desc = Conv2dBiasBackwardOpIr::create(
@@ -379,13 +377,7 @@ impl<B: FusionBackend> ModuleOps<Fusion<B>> for Fusion<B> {
                 handles.register_float_tensor::<B>(&args.out.id, output);
             }
         );
-        let mut streams = OperationStreams::with_inputs([&x, &offset, &weight]);
-        if let Some(bias) = bias.as_ref() {
-            streams.tensor(bias)
-        }
-        if let Some(mask) = mask.as_ref() {
-            streams.tensor(mask)
-        }
+        let streams = StreamId::current();
 
         let client = x.client.clone();
         let desc = DeformConv2dOpIr::create(
@@ -458,13 +450,7 @@ impl<B: FusionBackend> ModuleOps<Fusion<B>> for Fusion<B> {
         let has_bias = bias.is_some();
         let has_mask = mask.is_some();
 
-        let mut streams = OperationStreams::with_inputs([&x, &offset, &weight, &output_grad]);
-        if let Some(bias) = bias.as_ref() {
-            streams.tensor(bias);
-        }
-        if let Some(mask) = mask.as_ref() {
-            streams.tensor(mask);
-        }
+        let streams = StreamId::current();
 
         let client = x.client.clone();
         let desc = DeformConv2dBackwardOpIr::create(
@@ -520,10 +506,7 @@ impl<B: FusionBackend> ModuleOps<Fusion<B>> for Fusion<B> {
             handles.register_float_tensor::<B>(&args.out.id, output);
         });
 
-        let mut streams = OperationStreams::with_inputs([&x, &weight]);
-        if let Some(bias) = bias.as_ref() {
-            streams.tensor(bias)
-        }
+        let streams = StreamId::current();
 
         let client = x.client.clone();
         let desc = Conv3dOpIr::create(
@@ -562,7 +545,7 @@ impl<B: FusionBackend> ModuleOps<Fusion<B>> for Fusion<B> {
             }
         );
 
-        let streams = OperationStreams::with_inputs([&x, &weight, &output_grad]);
+        let streams = StreamId::current();
 
         let client = x.client.clone();
         let desc = Conv3dXBackwardOpIr::create(
@@ -601,7 +584,7 @@ impl<B: FusionBackend> ModuleOps<Fusion<B>> for Fusion<B> {
             }
         );
 
-        let streams = OperationStreams::with_inputs([&x, &weight, &output_grad]);
+        let streams = StreamId::current();
 
         let client = x.client.clone();
         let desc = Conv3dWeightBackwardOpIr::create(
@@ -638,7 +621,7 @@ impl<B: FusionBackend> ModuleOps<Fusion<B>> for Fusion<B> {
             }
         );
 
-        let streams = OperationStreams::with_inputs([&x, &bias, &output_grad]);
+        let streams = StreamId::current();
 
         let client = x.client.clone();
         let desc = Conv3dBiasBackwardOpIr::create(
@@ -679,10 +662,7 @@ impl<B: FusionBackend> ModuleOps<Fusion<B>> for Fusion<B> {
                 handles.register_float_tensor::<B>(&args.out.id, output);
             }
         );
-        let mut streams = OperationStreams::with_inputs([&x, &weight]);
-        if let Some(bias) = bias.as_ref() {
-            streams.tensor(bias)
-        }
+        let streams = StreamId::current();
 
         let client = x.client.clone();
         let desc = ConvTranspose1dOpIr::create(
@@ -724,10 +704,7 @@ impl<B: FusionBackend> ModuleOps<Fusion<B>> for Fusion<B> {
                 handles.register_float_tensor::<B>(&args.out.id, output);
             }
         );
-        let mut streams = OperationStreams::with_inputs([&x, &weight]);
-        if let Some(bias) = bias.as_ref() {
-            streams.tensor(bias)
-        }
+        let streams = StreamId::current();
 
         let client = x.client.clone();
         let desc = ConvTranspose2dOpIr::create(
@@ -769,10 +746,7 @@ impl<B: FusionBackend> ModuleOps<Fusion<B>> for Fusion<B> {
                 handles.register_float_tensor::<B>(&args.out.id, output);
             }
         );
-        let mut streams = OperationStreams::with_inputs([&x, &weight]);
-        if let Some(bias) = bias.as_ref() {
-            streams.tensor(bias)
-        }
+        let streams = StreamId::current();
 
         let client = x.client.clone();
         let desc = ConvTranspose3dOpIr::create(
@@ -817,7 +791,7 @@ impl<B: FusionBackend> ModuleOps<Fusion<B>> for Fusion<B> {
                 handles.register_float_tensor::<B>(&args.out.id, output);
             }
         );
-        let streams = OperationStreams::with_inputs([&x]);
+        let streams = StreamId::current();
 
         let client = x.client.clone();
         let desc = AvgPool1dOpIr::create(
@@ -865,7 +839,7 @@ impl<B: FusionBackend> ModuleOps<Fusion<B>> for Fusion<B> {
             }
         );
 
-        let streams = OperationStreams::with_inputs([&x]);
+        let streams = StreamId::current();
 
         let client = x.client.clone();
         let desc = AvgPool2dOpIr::create(
@@ -916,7 +890,7 @@ impl<B: FusionBackend> ModuleOps<Fusion<B>> for Fusion<B> {
             }
         );
 
-        let streams = OperationStreams::with_inputs([&x, &grad]);
+        let streams = StreamId::current();
 
         let client = x.client.clone();
         let desc = AvgPool1dBackwardOpIr::create(
@@ -968,7 +942,7 @@ impl<B: FusionBackend> ModuleOps<Fusion<B>> for Fusion<B> {
             }
         );
 
-        let streams = OperationStreams::with_inputs([&x, &grad]);
+        let streams = StreamId::current();
 
         let client = x.client.clone();
         let desc = AvgPool2dBackwardOpIr::create(
@@ -1017,7 +991,7 @@ impl<B: FusionBackend> ModuleOps<Fusion<B>> for Fusion<B> {
             }
         );
 
-        let streams = OperationStreams::with_inputs([&x]);
+        let streams = StreamId::current();
 
         let client = x.client.clone();
         let desc = MaxPool1dOpIr::create(
@@ -1065,7 +1039,7 @@ impl<B: FusionBackend> ModuleOps<Fusion<B>> for Fusion<B> {
             }
         );
 
-        let streams = OperationStreams::with_inputs([&x]);
+        let streams = StreamId::current();
 
         let client = x.client.clone();
         let desc = MaxPool2dOpIr::create(
@@ -1094,6 +1068,7 @@ impl<B: FusionBackend> ModuleOps<Fusion<B>> for Fusion<B> {
         padding: usize,
         dilation: usize,
         ceil_mode: bool,
+        indices_dtype: IntDType,
     ) -> MaxPool1dWithIndices<Self> {
         make_ops!(
             MaxPool1dWithIndicesOps,
@@ -1107,6 +1082,7 @@ impl<B: FusionBackend> ModuleOps<Fusion<B>> for Fusion<B> {
                     args.padding,
                     args.dilation,
                     args.ceil_mode,
+                    args.out_indices.dtype.into(),
                 );
 
                 handles.register_float_tensor::<B>(&args.out.id, output.output);
@@ -1114,7 +1090,7 @@ impl<B: FusionBackend> ModuleOps<Fusion<B>> for Fusion<B> {
             }
         );
 
-        let streams = OperationStreams::with_inputs([&x]);
+        let streams = StreamId::current();
 
         let client = x.client.clone();
         let desc = MaxPool1dWithIndicesOpIr::create(
@@ -1124,7 +1100,7 @@ impl<B: FusionBackend> ModuleOps<Fusion<B>> for Fusion<B> {
             padding,
             dilation,
             ceil_mode,
-            B::IntElem::dtype(),
+            indices_dtype.into(),
             || client.create_empty_handle(),
         );
 
@@ -1146,6 +1122,7 @@ impl<B: FusionBackend> ModuleOps<Fusion<B>> for Fusion<B> {
         padding: [usize; 2],
         dilation: [usize; 2],
         ceil_mode: bool,
+        indices_dtype: IntDType,
     ) -> MaxPool2dWithIndices<Self> {
         make_ops!(
             MaxPool2dWithIndicesOps,
@@ -1159,6 +1136,7 @@ impl<B: FusionBackend> ModuleOps<Fusion<B>> for Fusion<B> {
                     args.padding,
                     args.dilation,
                     args.ceil_mode,
+                    args.out_indices.dtype.into(),
                 );
 
                 handles.register_float_tensor::<B>(&args.out.id, output.output);
@@ -1166,7 +1144,7 @@ impl<B: FusionBackend> ModuleOps<Fusion<B>> for Fusion<B> {
             }
         );
 
-        let streams = OperationStreams::with_inputs([&x]);
+        let streams = StreamId::current();
 
         let client = x.client.clone();
         let desc = MaxPool2dWithIndicesOpIr::create(
@@ -1176,7 +1154,7 @@ impl<B: FusionBackend> ModuleOps<Fusion<B>> for Fusion<B> {
             padding,
             dilation,
             ceil_mode,
-            B::IntElem::dtype(),
+            indices_dtype.into(),
             || client.create_empty_handle(),
         );
 
@@ -1223,7 +1201,7 @@ impl<B: FusionBackend> ModuleOps<Fusion<B>> for Fusion<B> {
             }
         );
 
-        let streams = OperationStreams::with_inputs([&x, &output_grad, &indices]);
+        let streams = StreamId::current();
 
         let client = x.client.clone();
         let desc = MaxPool1dWithIndicesBackwardOpIr::create(
@@ -1283,7 +1261,7 @@ impl<B: FusionBackend> ModuleOps<Fusion<B>> for Fusion<B> {
             }
         );
 
-        let streams = OperationStreams::with_inputs([&x, &output_grad, &indices]);
+        let streams = StreamId::current();
 
         let client = x.client.clone();
         let desc = MaxPool2dWithIndicesBackwardOpIr::create(
@@ -1323,7 +1301,7 @@ impl<B: FusionBackend> ModuleOps<Fusion<B>> for Fusion<B> {
             }
         );
 
-        let streams = OperationStreams::with_inputs([&x]);
+        let streams = StreamId::current();
 
         let client = x.client.clone();
         let desc = AdaptiveAvgPool1dOpIr::create(x.into_ir(), output_size, || {
@@ -1351,7 +1329,7 @@ impl<B: FusionBackend> ModuleOps<Fusion<B>> for Fusion<B> {
             }
         );
 
-        let streams = OperationStreams::with_inputs([&x]);
+        let streams = StreamId::current();
 
         let client = x.client.clone();
         let desc = AdaptiveAvgPool2dOpIr::create(x.into_ir(), output_size, || {
@@ -1383,7 +1361,7 @@ impl<B: FusionBackend> ModuleOps<Fusion<B>> for Fusion<B> {
             }
         );
 
-        let streams = OperationStreams::with_inputs([&x, &grad]);
+        let streams = StreamId::current();
 
         let client = x.client.clone();
         let desc = AdaptiveAvgPool1dBackwardOpIr::create(x.into_ir(), grad.into_ir(), || {
@@ -1414,7 +1392,7 @@ impl<B: FusionBackend> ModuleOps<Fusion<B>> for Fusion<B> {
                 handles.register_float_tensor::<B>(&args.out.id, output);
             }
         );
-        let streams = OperationStreams::with_inputs([&x, &grad]);
+        let streams = StreamId::current();
 
         let client = x.client.clone();
         let desc = AdaptiveAvgPool2dBackwardOpIr::create(x.into_ir(), grad.into_ir(), || {
@@ -1445,7 +1423,7 @@ impl<B: FusionBackend> ModuleOps<Fusion<B>> for Fusion<B> {
             }
         );
 
-        let streams = OperationStreams::with_inputs([&x]);
+        let streams = StreamId::current();
 
         let client = x.client.clone();
         let desc = InterpolateOpIr::create(x.into_ir(), output_size, options.into(), || {
@@ -1480,7 +1458,7 @@ impl<B: FusionBackend> ModuleOps<Fusion<B>> for Fusion<B> {
             }
         );
 
-        let streams = OperationStreams::with_inputs([&x, &grad]);
+        let streams = StreamId::current();
 
         let client = x.client.clone();
         let desc = InterpolateBackwardOpIr::create(
@@ -1534,13 +1512,7 @@ impl<B: FusionBackend> ModuleOps<Fusion<B>> for Fusion<B> {
             }
         );
 
-        let mut streams = OperationStreams::with_inputs([&query, &key, &value]);
-        if let Some(mask) = &mask {
-            streams.tensor(mask);
-        }
-        if let Some(attn_bias) = &attn_bias {
-            streams.tensor(attn_bias);
-        }
+        let streams = StreamId::current();
 
         let client = query.client.clone();
         let desc = AttentionOpIr::create(
@@ -1578,7 +1550,7 @@ impl<B: FusionBackend> ModuleOps<Fusion<B>> for Fusion<B> {
             handles.register_float_tensor::<B>(&desc.out_im.id, im);
         });
 
-        let streams = OperationStreams::with_inputs([&signal]);
+        let streams = StreamId::current();
         let client = signal.client.clone();
 
         let desc = RfftOpIr::create(signal.into_ir(), dim, n, || client.create_empty_handle());
@@ -1611,7 +1583,7 @@ impl<B: FusionBackend> ModuleOps<Fusion<B>> for Fusion<B> {
             handles.register_float_tensor::<B>(&desc.out_signal.id, signal);
         });
 
-        let streams = OperationStreams::with_inputs([&spectrum_re, &spectrum_im]);
+        let streams = StreamId::current();
         let client = spectrum_re.client.clone();
 
         let desc = IRfftOpIr::create(spectrum_re.into_ir(), spectrum_im.into_ir(), dim, n, || {
@@ -1627,6 +1599,113 @@ impl<B: FusionBackend> ModuleOps<Fusion<B>> for Fusion<B> {
             .into_iter();
 
         outputs.next().unwrap()
+    }
+
+    fn has_ctc_loss_backward() -> bool {
+        B::has_ctc_loss_backward()
+    }
+
+    fn ctc_loss(
+        log_probs: FloatTensor<Fusion<B>>,
+        targets: IntTensor<Fusion<B>>,
+        input_lengths: IntTensor<Fusion<B>>,
+        target_lengths: IntTensor<Fusion<B>>,
+        blank: usize,
+    ) -> FloatTensor<Fusion<B>> {
+        // CTC is treated as its own non-fuseable IR node, the same way
+        // `attention` and `conv2d` are. The execute callback drains the input
+        // handles and dispatches to `B::ctc_loss` on the inner backend, which
+        // either runs a native kernel (cubecl, libtorch) or the decomposed
+        // default - either way it executes on raw inner-backend tensors,
+        // never re-entering the fusion stream.
+        make_ops!(CtcLossOps, CtcLossOpIr, |args: &CtcLossOpIr,
+                                            handles: &mut HandleContainer<
+            B::Handle,
+        >| {
+            let log_probs = handles.get_float_tensor::<B>(&args.log_probs);
+            let targets = handles.get_int_tensor::<B>(&args.targets);
+            let input_lengths = handles.get_int_tensor::<B>(&args.input_lengths);
+            let target_lengths = handles.get_int_tensor::<B>(&args.target_lengths);
+            let output = B::ctc_loss(
+                log_probs,
+                targets,
+                input_lengths,
+                target_lengths,
+                args.blank,
+            );
+            handles.register_float_tensor::<B>(&args.out.id, output);
+        });
+
+        let streams = StreamId::current();
+        let client = log_probs.client.clone();
+        let desc = CtcLossOpIr::create(
+            log_probs.into_ir(),
+            targets.into_ir(),
+            input_lengths.into_ir(),
+            target_lengths.into_ir(),
+            blank,
+            || client.create_empty_handle(),
+        );
+
+        client
+            .register(
+                streams,
+                OperationIr::Module(ModuleOperationIr::CtcLoss(desc.clone())),
+                CtcLossOps::<B>::new(desc),
+            )
+            .output()
+    }
+
+    fn ctc_loss_backward(
+        log_probs: FloatTensor<Fusion<B>>,
+        targets: IntTensor<Fusion<B>>,
+        input_lengths: IntTensor<Fusion<B>>,
+        target_lengths: IntTensor<Fusion<B>>,
+        grad_loss: FloatTensor<Fusion<B>>,
+        blank: usize,
+    ) -> FloatTensor<Fusion<B>> {
+        // Mirrors `ctc_loss`: a typed IR node that dispatches to the inner
+        // backend's native backward kernel.
+        make_ops!(
+            CtcLossBackwardOps,
+            CtcLossBackwardOpIr,
+            |args: &CtcLossBackwardOpIr, handles: &mut HandleContainer<B::Handle>| {
+                let log_probs = handles.get_float_tensor::<B>(&args.log_probs);
+                let targets = handles.get_int_tensor::<B>(&args.targets);
+                let input_lengths = handles.get_int_tensor::<B>(&args.input_lengths);
+                let target_lengths = handles.get_int_tensor::<B>(&args.target_lengths);
+                let grad_loss = handles.get_float_tensor::<B>(&args.grad_loss);
+                let output = B::ctc_loss_backward(
+                    log_probs,
+                    targets,
+                    input_lengths,
+                    target_lengths,
+                    grad_loss,
+                    args.blank,
+                );
+                handles.register_float_tensor::<B>(&args.out.id, output);
+            }
+        );
+
+        let streams = StreamId::current();
+        let client = log_probs.client.clone();
+        let desc = CtcLossBackwardOpIr::create(
+            log_probs.into_ir(),
+            targets.into_ir(),
+            input_lengths.into_ir(),
+            target_lengths.into_ir(),
+            grad_loss.into_ir(),
+            blank,
+            || client.create_empty_handle(),
+        );
+
+        client
+            .register(
+                streams,
+                OperationIr::Module(ModuleOperationIr::CtcLossBackward(desc.clone())),
+                CtcLossBackwardOps::<B>::new(desc),
+            )
+            .output()
     }
 }
 

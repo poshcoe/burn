@@ -4,26 +4,23 @@ use crate::module::generics::{
     GenericKind, ModuleGenerics, parse_module_generics, parse_ty_generics,
 };
 
-use super::{codegen::ModuleCodegen, record_struct::StructModuleRecordCodegen};
+use super::codegen::ModuleCodegen;
 use proc_macro2::{Ident, TokenStream};
 use quote::{ToTokens, quote};
-use syn::{Field, Visibility};
+use syn::Field;
 
 pub(crate) struct StructModuleCodegen {
     pub name: Ident,
     pub fields: Vec<ModuleField>,
-    pub vis: Visibility,
     pub generics: ModuleGenerics,
 }
 
 impl ModuleCodegen for StructModuleCodegen {
-    type RecordCodegen = StructModuleRecordCodegen;
-
     fn gen_num_params(&self) -> TokenStream {
         let body = self.gen_fields_fn(|name, field_type| {
             if field_type.is_parameter_module() || field_type.maybe_generic_module() {
                 quote! {
-                    num_params += burn::module::Module::<B>::num_params(&self.#name);
+                    num_params += burn::module::Module::num_params(&self.#name);
                 }
             } else {
                 quote! {} // other fields have 0 params
@@ -56,7 +53,7 @@ impl ModuleCodegen for StructModuleCodegen {
         });
 
         quote! {
-            fn visit<Visitor: burn::module::ModuleVisitor<B>>(&self, visitor: &mut Visitor) {
+            fn visit<Visitor: burn::module::ModuleVisitor>(&self, visitor: &mut Visitor) {
                 #body
             }
         }
@@ -66,7 +63,7 @@ impl ModuleCodegen for StructModuleCodegen {
         let body = self.gen_fields_fn(|name, field_type| {
             if field_type.is_module || field_type.maybe_generic_module() {
                 quote! {
-                    let devices = burn::module::Module::<B>::collect_devices(&self.#name, devices);
+                    let devices = burn::module::Module::collect_devices(&self.#name, devices);
                 }
             } else {
                 quote! {}
@@ -76,8 +73,8 @@ impl ModuleCodegen for StructModuleCodegen {
         quote! {
             fn collect_devices(
                 &self,
-                devices: burn::module::Devices<B>
-            ) -> burn::module::Devices<B> {
+                devices: burn::module::Devices
+            ) -> burn::module::Devices {
                 #body
                 devices
             }
@@ -88,7 +85,7 @@ impl ModuleCodegen for StructModuleCodegen {
         let (names, body) = self.gen_fields_fn_names(|name, field_type| {
             if field_type.is_module || field_type.maybe_generic_module() {
                 quote! {
-                    let #name = burn::module::Module::<B>::to_device(self.#name, device);
+                    let #name = burn::module::Module::to_device(self.#name, device);
                 }
             } else {
                 quote! { let #name = self.#name; }
@@ -96,7 +93,7 @@ impl ModuleCodegen for StructModuleCodegen {
         });
 
         quote! {
-            fn to_device(self, device: &B::Device) -> Self {
+            fn to_device(self, device: &burn::tensor::Device) -> Self {
                 #body
                 Self { #(#names),* }
             }
@@ -107,7 +104,7 @@ impl ModuleCodegen for StructModuleCodegen {
         let (names, body) = self.gen_fields_fn_names(|name, field_type| {
             if field_type.is_module || field_type.maybe_generic_module() {
                 quote! {
-                    let #name = burn::module::Module::<B>::fork(self.#name, device);
+                    let #name = burn::module::Module::fork(self.#name, device);
                 }
             } else {
                 quote! { let #name = self.#name; }
@@ -115,7 +112,7 @@ impl ModuleCodegen for StructModuleCodegen {
         });
 
         quote! {
-            fn fork(self, device: &B::Device) -> Self {
+            fn fork(self, device: &burn::tensor::Device) -> Self {
                 #body
                 Self { #(#names),* }
             }
@@ -130,7 +127,7 @@ impl ModuleCodegen for StructModuleCodegen {
                 let name_str = name.to_string();
                 quote! {
                     mapper.enter_module(#name_str, #container_type);
-                    let #name = burn::module::Module::<B>::map(self.#name, mapper);
+                    let #name = burn::module::Module::map(self.#name, mapper);
                     mapper.exit_module(#name_str, #container_type);
                 }
             } else {
@@ -139,7 +136,7 @@ impl ModuleCodegen for StructModuleCodegen {
         });
 
         quote! {
-            fn map<Mapper: burn::module::ModuleMapper<B>>(self, mapper: &mut Mapper) -> Self {
+            fn map<Mapper: burn::module::ModuleMapper>(self, mapper: &mut Mapper) -> Self {
                 #body
                 Self { #(#names),* }
             }
@@ -150,7 +147,7 @@ impl ModuleCodegen for StructModuleCodegen {
         let (names, body) = self.gen_fields_fn_names(|name, field_type| {
             if field_type.is_module || field_type.maybe_generic_module() {
                 quote! {
-                    let #name = burn::module::AutodiffModule::<B>::valid(&self.#name);
+                    let #name = burn::module::AutodiffModule::valid(&self.#name);
                 }
             } else {
                 quote! { let #name = self.#name.clone(); }
@@ -158,9 +155,9 @@ impl ModuleCodegen for StructModuleCodegen {
         });
 
         quote! {
-            fn valid(&self) -> Self::InnerModule {
+            fn valid(&self) -> Self {
                 #body
-                Self::InnerModule { #(#names),* }
+                Self { #(#names),* }
             }
         }
     }
@@ -169,7 +166,7 @@ impl ModuleCodegen for StructModuleCodegen {
         let (names, body) = self.gen_fields_fn_names(|name, field_type| {
             if field_type.is_module || field_type.maybe_generic_module() {
                 quote! {
-                    let #name = burn::module::AutodiffModule::<B>::from_inner(#name);
+                    let #name = burn::module::AutodiffModule::from_inner(#name);
                 }
             } else {
                 quote! { let #name = #name; }
@@ -177,56 +174,14 @@ impl ModuleCodegen for StructModuleCodegen {
         });
 
         let destructure = quote! {
-            let Self::InnerModule { #(#names),* } = module;
+            let Self { #(#names),* } = module;
         };
 
         quote! {
-            fn from_inner(module: Self::InnerModule) -> Self {
+            fn from_inner(module: Self) -> Self {
                 #destructure
                 #body
                 Self { #(#names),* }
-            }
-        }
-    }
-
-    fn gen_into_record(&self) -> TokenStream {
-        let body = self.gen_fields_fn(|name, field_type| {
-            if field_type.is_persistent_module() || field_type.maybe_generic_module() {
-                quote! { #name: burn::module::Module::<B>::into_record(self.#name), }
-            } else {
-                match field_type.attr {
-                    // Default (None) gets skipped
-                    None | Some(ModuleFieldAttribute::Skip) => {
-                        quote! { #name: burn::module::EmptyRecord::new(), }
-                    }
-                }
-            }
-        });
-
-        quote! {
-            fn into_record(self) -> Self::Record {
-                Self::Record { #body }
-            }
-        }
-    }
-
-    fn gen_load_record(&self) -> TokenStream {
-        let body = self.gen_fields_fn(|name, field_type| {
-            if field_type.is_persistent_module() || field_type.maybe_generic_module() {
-                quote! { #name: burn::module::Module::<B>::load_record(self.#name, record.#name), }
-            } else {
-                match field_type.attr {
-                    // Default (None) gets skipped
-                    None | Some(ModuleFieldAttribute::Skip) => {
-                        quote! { #name: self.#name, }
-                    }
-                }
-            }
-        });
-
-        quote! {
-            fn load_record(self, record: Self::Record) -> Self {
-                Self { #body }
             }
         }
     }
@@ -246,16 +201,13 @@ impl ModuleCodegen for StructModuleCodegen {
         }
     }
 
-    fn record_codegen(self) -> Self::RecordCodegen {
-        StructModuleRecordCodegen::new(self.fields, self.vis)
-    }
-
     fn module_generics(&self) -> &ModuleGenerics {
         &self.generics
     }
 
     fn gen_display(&self) -> TokenStream {
-        let struct_name = self.name.to_string();
+        // let struct_name = self.name.to_string();
+        let struct_ident = &self.name;
         let field_prints = self.fields.iter().map(|field| {
             let field_name = field.ident();
             if field.field_type.is_module || field.field_type.maybe_generic_module() {
@@ -271,7 +223,7 @@ impl ModuleCodegen for StructModuleCodegen {
         quote! {
             fn content(&self, mut content: burn::module::Content) -> Option<burn::module::Content> {
                 content
-                    .set_top_level_type(&stringify!(#struct_name))
+                    .set_top_level_type(&stringify!(#struct_ident))
                     #(#field_prints)*
                     .optional()
             }
@@ -285,7 +237,6 @@ impl StructModuleCodegen {
         Ok(Self {
             name: ast.ident.clone(),
             fields: parse_module_fields(ast, &mut generics)?,
-            vis: ast.vis.clone(),
             generics,
         })
     }
@@ -319,9 +270,15 @@ impl StructModuleCodegen {
 
         body
     }
+
+    pub fn has_module_fields(&self) -> bool {
+        // let has_module_fields = self.fields.iter().any(|f| f.field_type.is_module);
+        // eprintln!("[HAS MODULE FIELDS] {}: {has_module_fields:?}", self.name);
+        self.fields.iter().any(|f| f.field_type.is_module)
+    }
 }
 
-#[derive(new)]
+#[derive(new, Debug)]
 pub struct ModuleField {
     pub field: Field,
     pub field_type: ModuleFieldType,
@@ -352,11 +309,6 @@ impl ModuleFieldType {
         self.is_module && self.attr.is_none()
     }
 
-    /// Returns true for modules that should be persisted, including constants.
-    pub fn is_persistent_module(&self) -> bool {
-        self.is_module && !matches!(self.attr, Some(ModuleFieldAttribute::Skip))
-    }
-
     /// Returns true for generic fields that are assumed to be modules.
     pub fn maybe_generic_module(&self) -> bool {
         // We assumed it might be a module generic if the field is not marked
@@ -370,17 +322,40 @@ pub(crate) fn parse_module_fields(
     generics: &mut ModuleGenerics,
 ) -> syn::Result<Vec<ModuleField>> {
     let mut fields = Vec::new();
+    let mut module_generics = HashSet::new();
+    let mut skip_generics = HashSet::new();
 
     match &ast.data {
         syn::Data::Struct(struct_data) => {
             for field in struct_data.fields.iter() {
                 let field_type = parse_module_field_type(field, generics)?;
+                if field_type.is_module {
+                    module_generics.extend(field_type.generic_idents.iter().cloned());
+                } else if matches!(field_type.attr, Some(ModuleFieldAttribute::Skip)) {
+                    skip_generics.extend(field_type.generic_idents.iter().cloned());
+                }
                 fields.push(ModuleField::new(field.clone(), field_type));
             }
         }
         syn::Data::Enum(_) => panic!("Only struct can be derived"),
         syn::Data::Union(_) => panic!("Only struct can be derived"),
     };
+
+    for ident in module_generics.intersection(&skip_generics) {
+        if let Some(param) = ast.generics.params.iter().find_map(|p| match p {
+            syn::GenericParam::Type(tp) if tp.ident == *ident => Some(tp),
+            _ => None,
+        }) {
+            return Err(syn::Error::new(
+                param.ident.span(),
+                format!(
+                    "Generic type `{ident}` should not be used on both a module field and a skipped field. \
+                     Consider removing `#[module(skip)]` or using a different type for one of the fields.",
+                ),
+            ));
+        }
+    }
+
     Ok(fields)
 }
 
@@ -391,27 +366,17 @@ pub(crate) fn parse_module_field_type(
     let mut field_type = ModuleFieldType::default();
 
     // Check for generics
-    let mut has_backend = false;
     let mut has_module_bound = false;
     let field_generics = parse_ty_generics(&field.ty, generics)
         .into_iter()
-        .filter_map(|ident| {
-            if ident == "B" {
-                has_backend = true;
-                None
-            } else {
-                has_module_bound = generics.is_bounded_module(&ident);
-                Some(ident)
-            }
+        .inspect(|ident| {
+            has_module_bound |= generics.is_bounded_module(ident);
         })
         .collect::<HashSet<_>>();
 
     // Infer if a field is a module
     let is_primitive = is_primitive_type(&field.ty);
     let is_param = is_param_type(&field.ty);
-    let is_tensor = is_tensor_type(&field.ty);
-
-    let is_module = !is_primitive && (has_module_bound || is_param || is_tensor || has_backend);
 
     for attr in &field.attrs {
         if attr.path().is_ident("module") {
@@ -430,14 +395,18 @@ pub(crate) fn parse_module_field_type(
 
                 if is_param && field_type.attr.is_some() {
                     Err(meta.error("Fields of type 'Param' should not be marked as 'skip'. Use a 'Tensor' instead."))
-                } else {
+                } else if has_module_bound && field_type.attr.is_some() {
+                    Err(meta.error("Fields with module generics should not be marked as 'skip'."))
+                }
+                else {
                     Ok(())
                 }
             })?;
         }
     }
 
-    field_type.is_module = is_module;
+    field_type.is_module =
+        !(is_primitive || matches!(field_type.attr, Some(ModuleFieldAttribute::Skip)));
     field_type.generic_idents = field_generics;
 
     Ok(field_type)
@@ -453,18 +422,75 @@ fn type_matches_ident(ty: &syn::Type, idents: &[&str]) -> bool {
     false
 }
 
-fn is_primitive_type(ty: &syn::Type) -> bool {
-    type_matches_ident(
-        ty,
-        &[
-            "bool", "u8", "u16", "u32", "u64", "usize", "i8", "i16", "i32", "i64", "isize", "f32",
-            "f64", "String",
-        ],
+fn is_primitive_ident(ident: &str) -> bool {
+    matches!(
+        ident,
+        "bool"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "usize"
+            | "i8"
+            | "i16"
+            | "i32"
+            | "i64"
+            | "isize"
+            | "f32"
+            | "f64"
+            | "String"
     )
 }
 
-fn is_tensor_type(ty: &syn::Type) -> bool {
-    type_matches_ident(ty, &["Tensor"])
+fn is_primitive_type(ty: &syn::Type) -> bool {
+    match ty {
+        // e.g. usize, String, or Option<T>
+        syn::Type::Path(type_path) => {
+            let segment = match type_path.path.segments.last() {
+                Some(seg) => seg,
+                None => return false,
+            };
+
+            let ident = segment.ident.to_string();
+
+            // Direct primitive
+            if is_primitive_ident(&ident) {
+                return true;
+            }
+
+            // Generic types like Option<T>, Vec<T>, etc.
+            match &segment.arguments {
+                syn::PathArguments::AngleBracketed(args) => args.args.iter().all(|arg| {
+                    if let syn::GenericArgument::Type(inner_ty) = arg {
+                        is_primitive_type(inner_ty)
+                    } else {
+                        false
+                    }
+                }),
+                _ => false,
+            }
+        }
+
+        // e.g. (T, U, ...)
+        syn::Type::Tuple(tuple) => tuple.elems.iter().all(is_primitive_type),
+
+        // e.g. [T; N]
+        syn::Type::Array(array) => is_primitive_type(&array.elem),
+
+        // e.g. &T or &mut T
+        syn::Type::Reference(reference) => is_primitive_type(&reference.elem),
+
+        // e.g. *const T / *mut T
+        syn::Type::Ptr(ptr) => is_primitive_type(&ptr.elem),
+
+        // e.g. (T)
+        syn::Type::Paren(paren) => is_primitive_type(&paren.elem),
+
+        // slices `[T]`
+        syn::Type::Slice(slice) => is_primitive_type(&slice.elem),
+
+        _ => false,
+    }
 }
 
 fn is_param_type(ty: &syn::Type) -> bool {

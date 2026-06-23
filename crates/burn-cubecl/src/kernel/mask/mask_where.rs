@@ -1,5 +1,10 @@
 use burn_backend::DType;
-use cubecl::{calculate_cube_count_elemwise, prelude::*, std::tensor::layout::linear::LinearView};
+use burn_backend::cubecl::dtype_to_storage_type;
+use cubecl::{
+    calculate_cube_count_elemwise,
+    prelude::*,
+    std::tensor::layout::linear::{LinearView, LinearViewMut},
+};
 
 use crate::{
     CubeRuntime,
@@ -10,10 +15,10 @@ use crate::{
 
 #[cube(launch, address_type = "dynamic")]
 fn mask_where_kernel<T: Numeric, B: Int, N: Size>(
-    input: &LinearView<Vector<T, N>>,
-    value: &LinearView<Vector<T, N>>,
-    mask: &LinearView<Vector<B, N>>,
-    output: &mut LinearView<Vector<T, N>, ReadWrite>,
+    input: LinearView<'_, Vector<T, N>>,
+    value: LinearView<'_, Vector<T, N>>,
+    mask: LinearView<'_, Vector<B, N>>,
+    mut output: LinearViewMut<'_, Vector<T, N>>,
     #[define(T, B)] _dtypes: [StorageType; 2],
 ) {
     let pos = ABSOLUTE_POS;
@@ -21,7 +26,14 @@ fn mask_where_kernel<T: Numeric, B: Int, N: Size>(
         terminate!();
     }
 
-    output[pos] = select_many(Vector::cast_from(mask[pos]), value[pos], input[pos]);
+    output.write(
+        pos,
+        select_many(
+            Vector::cast_from(mask.read(pos)),
+            value.read(pos),
+            input.read(pos),
+        ),
+    );
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -82,7 +94,10 @@ pub fn mask_where<R: CubeRuntime>(
         value.into_linear_view_like(&output),
         mask.into_linear_view_like(&output),
         out,
-        [output.dtype.into(), dtype_bool.into()],
+        [
+            dtype_to_storage_type(output.dtype),
+            dtype_to_storage_type(dtype_bool),
+        ],
     );
 
     output

@@ -1,12 +1,8 @@
 use burn_backend::Shape;
 use cubecl::prelude::SequenceArg;
 use cubecl::{
-    ir::{UIntKind, VectorSize},
     prelude::*,
-    std::{
-        FastDivmod, FastDivmodInt,
-        tensor::layout::linear::{LinearLayoutLaunch, LinearViewLayoutLaunch},
-    },
+    std::{FastDivmod, FastDivmodInt},
 };
 
 use crate::{CubeRuntime, tensor::CubeTensor};
@@ -19,17 +15,16 @@ pub fn shape_divmod<R: CubeRuntime>(tensor: &CubeTensor<R>) -> SequenceArg<R, Fa
     arg
 }
 
-pub fn linear_layout<R: CubeRuntime>(
+pub fn shape_divmod_range<R: CubeRuntime>(
     tensor: &CubeTensor<R>,
-    vector_size: VectorSize,
-) -> LinearLayoutLaunch<R> {
-    LinearLayoutLaunch::from_shape_strides(
-        tensor.meta.shape().clone(),
-        tensor.meta.strides().clone(),
-        // Don't care about type size, only vector size
-        Type::new(UIntKind::U32.into()).with_vector_size(vector_size),
-        LinearViewLayoutLaunch::new(),
-    )
+    range: core::ops::Range<usize>,
+) -> SequenceArg<R, FastDivmod<usize>> {
+    let mut arg = SequenceArg::new();
+    let shape = &tensor.meta.shape;
+    for i in range {
+        arg.push(shape[i]);
+    }
+    arg
 }
 
 pub fn split_dim<R: CubeRuntime>(
@@ -110,7 +105,7 @@ pub(crate) fn decompose_linear<I: FastDivmodInt>(
         offs = rem;
     }
 
-    (offs, out.rev())
+    (offs, out.reversed())
 }
 
 pub(crate) trait RequiredAddrType {

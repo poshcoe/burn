@@ -1,51 +1,70 @@
 use std::path::PathBuf;
 
-use burn_tensor::{Shape, Tensor, TensorData, backend::Backend};
+use burn_core::tensor::{Device, Shape, TensorData};
 use image::{DynamicImage, ImageBuffer, Luma, Rgb};
 
-use burn_tensor::{Bool, Int};
+use burn_core::tensor::{Bool, Int};
+
+#[cfg(all(test, feature = "cuda"))]
+pub type TestDevice = burn_core::backend::CudaDevice;
+
+#[cfg(all(test, feature = "rocm", not(feature = "cuda")))]
+pub type TestDevice = burn_core::backend::RocmDevice;
+
+#[cfg(all(test, feature = "tch", not(any(feature = "cuda", feature = "rocm"))))]
+pub type TestDevice = burn_core::backend::LibTorchDevice;
 
 #[cfg(all(
-    any(feature = "test-cpu", feature = "flex"),
-    not(any(feature = "test-wgpu", feature = "test-cuda"))
+    test,
+    any(
+        feature = "wgpu",
+        feature = "vulkan",
+        feature = "metal",
+        feature = "webgpu"
+    ),
+    not(any(feature = "cuda", feature = "rocm", feature = "tch"))
 ))]
-pub type TestBackend = burn_flex::Flex;
+pub type TestDevice = burn_core::backend::WgpuDevice;
 
-#[cfg(all(test, feature = "test-wgpu"))]
-pub type TestBackend = burn_wgpu::Wgpu;
-
-#[cfg(all(test, feature = "test-cuda"))]
-pub type TestBackend = burn_cuda::Cuda;
-
-#[allow(unused)]
-pub type TestTensor<const D: usize> = burn_tensor::Tensor<TestBackend, D>;
-pub type TestTensorInt<const D: usize> = burn_tensor::Tensor<TestBackend, D, Int>;
-#[allow(unused)]
-pub type TestTensorBool<const D: usize> = burn_tensor::Tensor<TestBackend, D, Bool>;
-
-#[allow(unused)]
-pub type IntType = <TestBackend as burn_tensor::backend::Backend>::IntElem;
-
-#[allow(missing_docs)]
-#[macro_export]
-macro_rules! as_type {
-    ($ty:ident: [$($elem:tt),*]) => {
-        [$($crate::as_type![$ty: $elem]),*]
-    };
-    ($ty:ident: [$($elem:tt,)*]) => {
-        [$($crate::as_type![$ty: $elem]),*]
-    };
-    ($ty:ident: $elem:expr) => {
-        {
-            use cubecl::prelude::*;
-
-            $ty::new($elem)
-        }
-    };
-}
+#[cfg(all(
+    test,
+    feature = "cpu",
+    not(any(
+        feature = "cuda",
+        feature = "rocm",
+        feature = "tch",
+        feature = "wgpu",
+        feature = "vulkan",
+        feature = "metal",
+        feature = "webgpu"
+    ))
+))]
+pub type TestDevice = burn_core::backend::CpuDevice;
 
 #[allow(unused)]
-pub fn test_image<B: Backend>(name: &str, device: &B::Device, luma: bool) -> Tensor<B, 3> {
+#[cfg(all(
+    test,
+    feature = "flex",
+    not(any(
+        feature = "cuda",
+        feature = "rocm",
+        feature = "tch",
+        feature = "wgpu",
+        feature = "vulkan",
+        feature = "metal",
+        feature = "webgpu",
+        feature = "cpu"
+    ))
+))]
+pub type TestDevice = burn_core::backend::FlexDevice;
+
+pub use burn_core::tensor::Tensor;
+pub type TestTensorInt<const D: usize> = Tensor<D, Int>;
+#[allow(unused)]
+pub type TestTensorBool<const D: usize> = Tensor<D, Bool>;
+
+#[allow(unused)]
+pub fn test_image(name: &str, device: &Device, luma: bool) -> Tensor<3> {
     let file = PathBuf::from("tests/images").join(name);
     let image = image::open(file).unwrap();
     if luma {
@@ -64,7 +83,7 @@ pub fn test_image<B: Backend>(name: &str, device: &B::Device, luma: bool) -> Ten
 }
 
 #[allow(unused)]
-pub fn save_test_image<B: Backend>(name: &str, tensor: Tensor<B, 3>, luma: bool) {
+pub fn save_test_image(name: &str, tensor: Tensor<3>, luma: bool) {
     let file = PathBuf::from("tests/images").join(name);
     let [h, w, _] = tensor.shape().dims();
     let data = tensor

@@ -1,5 +1,5 @@
 use super::tensor::GlobalTensor;
-use crate::engine::codegen::{DynElem, DynSize};
+use crate::engine::codegen::{DynElem, DynSize, DynVector};
 use burn_std::{
     BoolStore, DType, Shape, Strides, bf16, f16,
     quantization::{QuantScheme, QuantStore, QuantValue},
@@ -98,14 +98,40 @@ impl CubeType for FuseArg {
     type ExpandType = Self;
 }
 
+impl IntoExpand for FuseArg {
+    type Expand = Self;
+
+    fn into_expand(self, _: &Scope) -> Self::Expand {
+        self
+    }
+}
+
+impl ExpandTypeClone for FuseArg {
+    fn clone_unchecked(&self) -> Self {
+        self.clone()
+    }
+}
+
+impl AsRefExpand for FuseArg {
+    fn __expand_ref_method(&self, _: &Scope) -> &Self {
+        self
+    }
+}
+
+impl AsMutExpand for FuseArg {
+    fn __expand_ref_mut_method(&mut self, _: &Scope) -> &mut Self {
+        self
+    }
+}
+
 impl IntoMut for FuseArg {
-    fn into_mut(self, _context: &mut Scope) -> Self {
+    fn into_mut(self, _context: &Scope) -> Self {
         self
     }
 }
 
 impl IntoRuntime for FuseArg {
-    fn __expand_runtime_method(self, _context: &mut Scope) -> Self::ExpandType {
+    fn __expand_runtime_method(self, _context: &Scope) -> Self::ExpandType {
         self
     }
 }
@@ -138,6 +164,12 @@ pub enum FuseOp {
     LowerEqual(BinaryFuseArgs),
     Rem(BinaryFuseArgs),
     GreaterEqual(BinaryFuseArgs),
+    BitwiseAnd(BinaryFuseArgs),
+    BitwiseOr(BinaryFuseArgs),
+    BitwiseXor(BinaryFuseArgs),
+    BitwiseLeftShift(BinaryFuseArgs),
+    BitwiseRightShift(BinaryFuseArgs),
+    BitwiseNot(UnaryFuseArgs),
     Clamp {
         input: FuseArg,
         min: FuseArg,
@@ -195,6 +227,16 @@ impl Display for FuseOp {
             FuseOp::LowerEqual(args) => write!(f, "{} = {} <= {}", args.out, args.lhs, args.rhs),
             FuseOp::Rem(args) => write!(f, "{} = {} % {}", args.out, args.lhs, args.rhs),
             FuseOp::GreaterEqual(args) => write!(f, "{} = {} >= {}", args.out, args.lhs, args.rhs),
+            FuseOp::BitwiseAnd(args) => write!(f, "{} = {} & {}", args.out, args.lhs, args.rhs),
+            FuseOp::BitwiseOr(args) => write!(f, "{} = {} | {}", args.out, args.lhs, args.rhs),
+            FuseOp::BitwiseXor(args) => write!(f, "{} = {} ^ {}", args.out, args.lhs, args.rhs),
+            FuseOp::BitwiseLeftShift(args) => {
+                write!(f, "{} = {} << {}", args.out, args.lhs, args.rhs)
+            }
+            FuseOp::BitwiseRightShift(args) => {
+                write!(f, "{} = {} >> {}", args.out, args.lhs, args.rhs)
+            }
+            FuseOp::BitwiseNot(args) => write!(f, "{} = !{}", args.out, args.input),
             FuseOp::Clamp {
                 input,
                 min,
@@ -278,6 +320,12 @@ impl FuseOp {
             FuseOp::Greater(op) => op.lhs.precision().into_elem(),
             FuseOp::LowerEqual(op) => op.lhs.precision().into_elem(),
             FuseOp::GreaterEqual(op) => op.lhs.precision().into_elem(),
+            FuseOp::BitwiseAnd(op) => op.lhs.precision().into_elem(),
+            FuseOp::BitwiseOr(op) => op.lhs.precision().into_elem(),
+            FuseOp::BitwiseXor(op) => op.lhs.precision().into_elem(),
+            FuseOp::BitwiseLeftShift(op) => op.lhs.precision().into_elem(),
+            FuseOp::BitwiseRightShift(op) => op.lhs.precision().into_elem(),
+            FuseOp::BitwiseNot(op) => op.out.precision().into_elem(),
             FuseOp::ConditionalAssign { out, .. } => out.precision().into_elem(),
             FuseOp::Gather { output, .. } => output.precision().into_elem(),
             FuseOp::Select { output, .. } => output.precision().into_elem(),
@@ -293,6 +341,7 @@ impl FuseOp {
 }
 
 #[derive(CubeType, CubeLaunch, Default, Clone)]
+#[expand(derive(Clone))]
 /// Global arguments that are used for fusing [element wise operations](ElemTypewiseOp).
 pub struct GlobalArgs {
     /// Tensors that are stored in global memory.
@@ -321,8 +370,9 @@ impl<R: Runtime> GlobalArgsLaunch<R> {
 
 /// Variables shared between blocks.
 #[derive(CubeType, Default, Clone)]
+#[expand(derive(Clone))]
 pub struct MultiBlockVariables {
-    variables: Registry<usize, Registry<usize, RuntimeCell<Vector<DynElem, DynSize>>>>,
+    variables: Registry<usize, Registry<usize, RuntimeCell<DynVector>>>,
 }
 
 #[cube]
@@ -333,10 +383,11 @@ impl MultiBlockVariables {
     ///
     /// The type of [`NumericExpand<DYN_ELEM_ID>`] must be set before calling this function.
     pub fn init(&mut self, #[comptime] key: MultiBlockPos) {
-        let mut registers = Registry::<
-            usize,
-            Registry<usize, RuntimeCell<Vector<DynElem, DynSize>>>,
-        >::find_or_default::<usize>(&mut self.variables, key.block_pos);
+        let mut registers =
+            Registry::<usize, Registry<usize, RuntimeCell<DynVector>>>::find_or_default::<usize>(
+                &mut self.variables,
+                key.block_pos,
+            );
         let cell = RuntimeCell::new(Vector::empty());
         registers.insert(key.block_local_pos, cell);
     }
@@ -346,7 +397,7 @@ impl MultiBlockVariables {
     /// # Notes
     ///
     /// The variable must be initialized.
-    pub fn read(&self, #[comptime] key: MultiBlockPos) -> Vector<DynElem, DynSize> {
+    pub fn read(&self, #[comptime] key: MultiBlockPos) -> DynVector {
         let registers = self.variables.find(key.block_pos);
         let cell = registers.find(key.block_local_pos);
         cell.read()
@@ -357,7 +408,7 @@ impl MultiBlockVariables {
     /// # Notes
     ///
     /// The variable must be initialized.
-    pub fn write(&mut self, #[comptime] key: MultiBlockPos, value: Vector<DynElem, DynSize>) {
+    pub fn write(&mut self, #[comptime] key: MultiBlockPos, value: DynVector) {
         let registers = self.variables.find(key.block_pos);
         // Try find for local(visibility) registers.
         let cell = registers.find(key.block_local_pos);
@@ -504,6 +555,7 @@ impl<R: Runtime> GlobalArgsLaunch<R> {
 }
 
 #[derive(CubeType, Clone)]
+#[expand(derive(Clone))]
 /// Keep track of all local variables that are used as argument in fused
 /// [element wise operations](ElemwiseOp).
 pub struct LocalArgs {
@@ -519,8 +571,8 @@ pub struct LocalArgs {
     pub l_u32: Registry<usize, Vector<u32, DynSize>>,
     pub l_u16: Registry<usize, Vector<u16, DynSize>>,
     pub l_u8: Registry<usize, Vector<u8, DynSize>>,
-    pub ref_shape: Slice<usize>,
-    pub ref_strides: Slice<usize>,
+    pub ref_shape: Box<[usize]>,
+    pub ref_strides: Box<[usize]>,
     #[cube(comptime)]
     pub ref_vector_size: VectorSize,
 }
@@ -529,8 +581,8 @@ pub struct LocalArgs {
 impl LocalArgs {
     /// Creates a new [LocalArgs] container.
     pub fn new(
-        ref_shape: Slice<usize>,
-        ref_strides: Slice<usize>,
+        ref_shape: &[usize],
+        ref_strides: &[usize],
         #[comptime] ref_vector_size: VectorSize,
     ) -> LocalArgs {
         LocalArgs {
@@ -546,8 +598,8 @@ impl LocalArgs {
             l_u32: Registry::<usize, Vector<u32, DynSize>>::new(),
             l_u16: Registry::<usize, Vector<u16, DynSize>>::new(),
             l_u8: Registry::<usize, Vector<u8, DynSize>>::new(),
-            ref_shape,
-            ref_strides,
+            ref_shape: unsafe { ref_shape.as_boxed_unchecked() },
+            ref_strides: unsafe { ref_strides.as_boxed_unchecked() },
             ref_vector_size,
         }
     }
@@ -600,6 +652,12 @@ pub struct FuseBlockConfig {
     pub width: VectorSize,
 }
 
+impl AsRefExpand for FuseBlockConfig {
+    fn __expand_ref_method(&self, _: &Scope) -> &Self {
+        self
+    }
+}
+
 impl FuseBlockConfig {
     pub fn multi_block_variables(&self, registers: &mut Vec<(MultiBlockPos, StorageType)>) {
         for op in self.ops.iter() {
@@ -635,7 +693,12 @@ impl FuseOp {
             | FuseOp::Greater(binary_fuse_args)
             | FuseOp::LowerEqual(binary_fuse_args)
             | FuseOp::Rem(binary_fuse_args)
-            | FuseOp::GreaterEqual(binary_fuse_args) => {
+            | FuseOp::GreaterEqual(binary_fuse_args)
+            | FuseOp::BitwiseAnd(binary_fuse_args)
+            | FuseOp::BitwiseOr(binary_fuse_args)
+            | FuseOp::BitwiseXor(binary_fuse_args)
+            | FuseOp::BitwiseLeftShift(binary_fuse_args)
+            | FuseOp::BitwiseRightShift(binary_fuse_args) => {
                 binary_fuse_args.lhs.multi_block_variable(registers);
                 binary_fuse_args.rhs.multi_block_variable(registers);
                 binary_fuse_args.out.multi_block_variable(registers);
@@ -650,7 +713,8 @@ impl FuseOp {
             | FuseOp::Erf(unary_fuse_args)
             | FuseOp::Sqrt(unary_fuse_args)
             | FuseOp::Recip(unary_fuse_args)
-            | FuseOp::Assign(unary_fuse_args) => {
+            | FuseOp::Assign(unary_fuse_args)
+            | FuseOp::BitwiseNot(unary_fuse_args) => {
                 unary_fuse_args.input.multi_block_variable(registers);
                 unary_fuse_args.out.multi_block_variable(registers);
             }
@@ -783,6 +847,7 @@ impl From<ElemType> for FuseType {
                 FloatKind::F16 => Self::F16,
                 FloatKind::BF16 => Self::BF16,
                 FloatKind::F32 => Self::F32,
+                FloatKind::F64 => Self::F64,
                 FloatKind::Flex32 => Self::Flex32,
                 _ => panic!("Unsupported precision for fusion: {value}"),
             },
@@ -798,7 +863,7 @@ impl From<ElemType> for FuseType {
                 UIntKind::U16 => Self::U16,
                 UIntKind::U8 => Self::U8,
             },
-            ElemType::Bool => panic!("Bool should be encoded as u8 or u32"),
+            ElemType::Bool => Self::U32,
         }
     }
 }
@@ -855,7 +920,7 @@ impl From<DType> for FuseType {
             DType::U32 => Self::U32,
             DType::U16 => Self::U16,
             DType::U8 => Self::U8,
-            DType::Bool(BoolStore::Native) => unimplemented!("Bool should be U8 or U32"),
+            DType::Bool(BoolStore::Native) => Self::U32,
             DType::Bool(BoolStore::U8) => Self::U8,
             DType::Bool(BoolStore::U32) => Self::U32,
             DType::F64 => Self::F64,
@@ -907,5 +972,36 @@ impl Display for MultiBlockPos {
             "block_local({}-{})",
             self.block_pos, self.block_local_pos
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fuse_type_roundtrips_through_elem_type() {
+        let all = [
+            FuseType::F64,
+            FuseType::F32,
+            FuseType::Flex32,
+            FuseType::F16,
+            FuseType::BF16,
+            FuseType::I64,
+            FuseType::I32,
+            FuseType::I16,
+            FuseType::I8,
+            FuseType::U64,
+            FuseType::U32,
+            FuseType::U16,
+            FuseType::U8,
+        ];
+        for ft in all {
+            assert_eq!(
+                FuseType::from(ft.into_elem()),
+                ft,
+                "round-trip failed for {ft:?}",
+            );
+        }
     }
 }

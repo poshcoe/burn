@@ -1,5 +1,10 @@
+use burn_backend::cubecl::dtype_to_storage_type;
 use burn_backend::{DType, TensorMetadata};
-use cubecl::{calculate_cube_count_elemwise, prelude::*, std::tensor::layout::linear::LinearView};
+use cubecl::{
+    calculate_cube_count_elemwise,
+    prelude::*,
+    std::tensor::layout::linear::{LinearView, LinearViewMut},
+};
 
 use crate::{
     CubeRuntime,
@@ -10,9 +15,9 @@ use crate::{
 
 #[cube(launch_unchecked, address_type = "dynamic")]
 fn mask_fill_kernel<T: Numeric, B: Int, N: Size>(
-    input: &LinearView<Vector<T, N>>,
-    mask: &LinearView<Vector<B, N>>,
-    output: &mut LinearView<Vector<T, N>, ReadWrite>,
+    input: LinearView<'_, Vector<T, N>>,
+    mask: LinearView<'_, Vector<B, N>>,
+    mut output: LinearViewMut<'_, Vector<T, N>>,
     value: InputScalar,
     #[define(T, B)] _dtypes: [StorageType; 2],
 ) {
@@ -20,11 +25,11 @@ fn mask_fill_kernel<T: Numeric, B: Int, N: Size>(
         terminate!();
     }
 
-    let mask = Vector::cast_from(mask[ABSOLUTE_POS]);
-    let input = input[ABSOLUTE_POS];
+    let mask = Vector::cast_from(mask.read(ABSOLUTE_POS));
+    let input = input.read(ABSOLUTE_POS);
     let value = Vector::new(value.get::<T>());
 
-    output[ABSOLUTE_POS] = select_many(mask, value, input);
+    output.write(ABSOLUTE_POS, select_many(mask, value, input));
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -83,7 +88,10 @@ pub fn mask_fill<R: CubeRuntime>(
             mask,
             out_arg,
             value,
-            [output.dtype.into(), dtype_bool.into()],
+            [
+                dtype_to_storage_type(output.dtype),
+                dtype_to_storage_type(dtype_bool),
+            ],
         );
     }
 

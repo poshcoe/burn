@@ -32,10 +32,6 @@ impl IntTensorOps<Flex> for Flex {
         Ok(tensor.into_data())
     }
 
-    fn int_device(_tensor: &IntTensor<Flex>) -> Device<Flex> {
-        Default::default()
-    }
-
     fn int_to_device(tensor: IntTensor<Flex>, _device: &Device<Flex>) -> IntTensor<Flex> {
         tensor
     }
@@ -168,6 +164,55 @@ impl IntTensorOps<Flex> for Flex {
             }
             DType::U8 => crate::ops::gather_scatter::scatter_add::<u8>(tensor, dim, indices, value),
             dt => panic!("int_scatter_add: unsupported dtype {:?}", dt),
+        }
+    }
+
+    fn int_scatter_nd(
+        data: IntTensor<Flex>,
+        indices: IntTensor<Flex>,
+        values: IntTensor<Flex>,
+        reduction: burn_backend::tensor::IndexingUpdateOp,
+    ) -> IntTensor<Flex> {
+        match data.dtype() {
+            DType::I64 => {
+                crate::ops::gather_scatter::scatter_nd::<i64>(data, indices, values, reduction)
+            }
+            DType::I32 => {
+                crate::ops::gather_scatter::scatter_nd::<i32>(data, indices, values, reduction)
+            }
+            DType::I16 => {
+                crate::ops::gather_scatter::scatter_nd::<i16>(data, indices, values, reduction)
+            }
+            DType::I8 => {
+                crate::ops::gather_scatter::scatter_nd::<i8>(data, indices, values, reduction)
+            }
+            DType::U64 => {
+                crate::ops::gather_scatter::scatter_nd::<u64>(data, indices, values, reduction)
+            }
+            DType::U32 => {
+                crate::ops::gather_scatter::scatter_nd::<u32>(data, indices, values, reduction)
+            }
+            DType::U16 => {
+                crate::ops::gather_scatter::scatter_nd::<u16>(data, indices, values, reduction)
+            }
+            DType::U8 => {
+                crate::ops::gather_scatter::scatter_nd::<u8>(data, indices, values, reduction)
+            }
+            dt => panic!("int_scatter_nd: unsupported dtype {:?}", dt),
+        }
+    }
+
+    fn int_gather_nd(data: IntTensor<Flex>, indices: IntTensor<Flex>) -> IntTensor<Flex> {
+        match data.dtype() {
+            DType::I64 => crate::ops::gather_scatter::gather_nd::<i64>(data, indices),
+            DType::I32 => crate::ops::gather_scatter::gather_nd::<i32>(data, indices),
+            DType::I16 => crate::ops::gather_scatter::gather_nd::<i16>(data, indices),
+            DType::I8 => crate::ops::gather_scatter::gather_nd::<i8>(data, indices),
+            DType::U64 => crate::ops::gather_scatter::gather_nd::<u64>(data, indices),
+            DType::U32 => crate::ops::gather_scatter::gather_nd::<u32>(data, indices),
+            DType::U16 => crate::ops::gather_scatter::gather_nd::<u16>(data, indices),
+            DType::U8 => crate::ops::gather_scatter::gather_nd::<u8>(data, indices),
+            dt => panic!("int_gather_nd: unsupported dtype {:?}", dt),
         }
     }
 
@@ -560,6 +605,10 @@ impl IntTensorOps<Flex> for Flex {
 
     fn int_argmax(tensor: IntTensor<Flex>, dim: usize) -> IntTensor<Flex> {
         crate::ops::reduce::argmax(tensor, dim)
+    }
+
+    fn int_argtopk(_tensor: IntTensor<Flex>, _dim: usize, _k: usize) -> IntTensor<Flex> {
+        panic!("argtopk not implemented for flex")
     }
 
     fn int_argmin(tensor: IntTensor<Flex>, dim: usize) -> IntTensor<Flex> {

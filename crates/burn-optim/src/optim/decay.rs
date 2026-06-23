@@ -1,9 +1,9 @@
 use burn_core as burn;
 
+use crate::RecordState;
 use burn::config::Config;
-use burn::record::Record;
+use burn::tensor::Device;
 use burn::tensor::Tensor;
-use burn::tensor::backend::Backend;
 
 /// Configuration to create [weight decay](WeightDecay).
 #[derive(Config, Debug)]
@@ -13,9 +13,9 @@ pub struct WeightDecayConfig {
 }
 
 /// State of [weight decay](WeightDecay).
-#[derive(Record, Clone, new)]
-pub struct WeightDecayState<B: Backend, const D: usize> {
-    pub(crate) grad_last_step: Tensor<B, D>,
+#[derive(RecordState, Clone, new)]
+pub struct WeightDecayState<const D: usize> {
+    pub(crate) grad_last_step: Tensor<D>,
 }
 
 /// Weight decay implementation that transforms gradients.
@@ -42,16 +42,12 @@ impl WeightDecay {
     /// # Returns
     ///
     /// * `grad` - Transformed gradient.
-    pub fn transform<B: Backend, const D: usize>(
-        &self,
-        grad: Tensor<B, D>,
-        tensor: Tensor<B, D>,
-    ) -> Tensor<B, D> {
+    pub fn transform<const D: usize>(&self, grad: Tensor<D>, tensor: Tensor<D>) -> Tensor<D> {
         tensor.mul_scalar(self.penalty).add(grad)
     }
 }
 
-impl<B: Backend, const D: usize> WeightDecayState<B, D> {
+impl<const D: usize> WeightDecayState<D> {
     /// Moves the state to a device.
     ///
     /// # Arguments
@@ -61,7 +57,7 @@ impl<B: Backend, const D: usize> WeightDecayState<B, D> {
     /// # Returns
     ///
     /// * `self` - Moved state.
-    pub fn to_device(mut self, device: &B::Device) -> Self {
+    pub fn to_device(mut self, device: &Device) -> Self {
         self.grad_last_step = self.grad_last_step.to_device(device);
         self
     }

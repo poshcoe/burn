@@ -4,7 +4,7 @@ use burn_backend::{
     DType, Distribution, ElementConversion, ExecutionError, FloatDType, Scalar, Shape, Slice,
     TensorData, bf16, f16,
     ops::FloatTensorOps,
-    tensor::{BoolTensor, Device, FloatElem, FloatTensor, IntTensor},
+    tensor::{BoolTensor, Device, FloatTensor, IntTensor},
 };
 use burn_std::{BoolDType, IntDType};
 use candle_core::{Tensor, backend::BackendStorage, shape};
@@ -16,7 +16,7 @@ use crate::{
 
 use super::base::{cpu_random, expand, permute, sign, unfold};
 
-impl<F: FloatCandleElement, I: IntCandleElement> FloatTensorOps<Self> for Candle<F, I> {
+impl FloatTensorOps<Self> for Candle {
     fn float_from_data(data: TensorData, device: &Device<Self>) -> CandleTensor {
         match data.dtype {
             DType::F64 => super::base::from_data::<f64>(data, device),
@@ -42,26 +42,36 @@ impl<F: FloatCandleElement, I: IntCandleElement> FloatTensorOps<Self> for Candle
         let device = &(device.clone()).into();
         match distribution {
             Distribution::Default => CandleTensor::new(
-                candle_core::Tensor::rand(0.elem::<F>(), 1.elem::<F>(), shape, device)
+                candle_core::Tensor::rand(0f32, 1f32, shape, device)
                     .unwrap()
-                    .to_dtype(F::DTYPE)
+                    .to_dtype(dtype.into_dtype())
                     .unwrap(),
             ),
             Distribution::Bernoulli(prob) => CandleTensor::new(
-                candle_core::Tensor::rand(0.elem::<F>(), 1.elem::<F>(), shape.clone(), device)
+                candle_core::Tensor::rand(0f32, 1f32, shape.clone(), device)
                     .unwrap()
-                    .to_dtype(F::DTYPE)
+                    .to_dtype(dtype.into_dtype())
                     .unwrap()
-                    .lt(&super::candle_utils::fill(prob, shape, F::DTYPE, device))
+                    .lt(&super::candle_utils::fill(
+                        prob,
+                        shape,
+                        dtype.into_dtype(),
+                        device,
+                    ))
                     .unwrap()
-                    .to_dtype(F::DTYPE)
+                    .to_dtype(dtype.into_dtype())
                     .unwrap(),
             ),
             Distribution::Uniform(from, to) => CandleTensor::new(
-                candle_core::Tensor::rand(from.elem::<F>(), to.elem::<F>(), shape, device).unwrap(),
+                candle_core::Tensor::rand(from, to, shape, device)
+                    .unwrap()
+                    .to_dtype(dtype.into_dtype())
+                    .unwrap(),
             ),
             Distribution::Normal(mean, std) => CandleTensor::new(
-                candle_core::Tensor::randn(mean.elem::<F>(), std.elem::<F>(), shape, device)
+                candle_core::Tensor::randn(mean, std, shape, device)
+                    .unwrap()
+                    .to_dtype(dtype.into_dtype())
                     .unwrap(),
             ),
         }
@@ -69,10 +79,6 @@ impl<F: FloatCandleElement, I: IntCandleElement> FloatTensorOps<Self> for Candle
 
     async fn float_into_data(tensor: CandleTensor) -> Result<TensorData, ExecutionError> {
         super::base::into_data(tensor)
-    }
-
-    fn float_device(tensor: &CandleTensor) -> Device<Self> {
-        super::base::device(tensor)
     }
 
     fn float_to_device(tensor: CandleTensor, device: &Device<Self>) -> CandleTensor {
@@ -197,6 +203,19 @@ impl<F: FloatCandleElement, I: IntCandleElement> FloatTensorOps<Self> for Candle
         )
     }
 
+    fn float_scatter_nd(
+        data: FloatTensor<Self>,
+        indices: IntTensor<Self>,
+        values: FloatTensor<Self>,
+        reduction: burn_backend::tensor::IndexingUpdateOp,
+    ) -> FloatTensor<Self> {
+        super::base::scatter_nd(data, indices, values, reduction)
+    }
+
+    fn float_gather_nd(data: FloatTensor<Self>, indices: IntTensor<Self>) -> FloatTensor<Self> {
+        super::base::gather_nd(data, indices)
+    }
+
     fn float_select(
         tensor: FloatTensor<Self>,
         dim: usize,
@@ -244,7 +263,7 @@ impl<F: FloatCandleElement, I: IntCandleElement> FloatTensorOps<Self> for Candle
         mask: BoolTensor<Self>,
         value: Scalar,
     ) -> FloatTensor<Self> {
-        let value = super::candle_utils::fill_like::<F>(value.elem(), &tensor.tensor);
+        let value = super::candle_utils::fill_like::<f32>(value.elem(), &tensor.tensor);
         super::base::mask_where_broadcasted(tensor, mask, CandleTensor::new(value))
     }
 
@@ -263,7 +282,7 @@ impl<F: FloatCandleElement, I: IntCandleElement> FloatTensorOps<Self> for Candle
         rhs: Scalar,
         _out_dtype: BoolDType,
     ) -> BoolTensor<Self> {
-        CandleTensor::new(lhs.tensor.eq(rhs.elem::<F>()).unwrap())
+        CandleTensor::new(lhs.tensor.eq(rhs.elem::<f32>()).unwrap())
     }
 
     fn float_greater(
@@ -283,7 +302,7 @@ impl<F: FloatCandleElement, I: IntCandleElement> FloatTensorOps<Self> for Candle
     ) -> BoolTensor<Self> {
         CandleTensor::new(
             lhs.tensor
-                .gt(&super::candle_utils::fill_like::<F>(
+                .gt(&super::candle_utils::fill_like::<f32>(
                     rhs.elem(),
                     &lhs.tensor,
                 ))
@@ -308,7 +327,7 @@ impl<F: FloatCandleElement, I: IntCandleElement> FloatTensorOps<Self> for Candle
     ) -> BoolTensor<Self> {
         CandleTensor::new(
             lhs.tensor
-                .ge(&super::candle_utils::fill_like::<F>(
+                .ge(&super::candle_utils::fill_like::<f32>(
                     rhs.elem(),
                     &lhs.tensor,
                 ))
@@ -333,7 +352,7 @@ impl<F: FloatCandleElement, I: IntCandleElement> FloatTensorOps<Self> for Candle
     ) -> BoolTensor<Self> {
         CandleTensor::new(
             lhs.tensor
-                .lt(&super::candle_utils::fill_like::<F>(
+                .lt(&super::candle_utils::fill_like::<f32>(
                     rhs.elem(),
                     &lhs.tensor,
                 ))
@@ -358,7 +377,7 @@ impl<F: FloatCandleElement, I: IntCandleElement> FloatTensorOps<Self> for Candle
     ) -> BoolTensor<Self> {
         CandleTensor::new(
             lhs.tensor
-                .le(&super::candle_utils::fill_like::<F>(
+                .le(&super::candle_utils::fill_like::<f32>(
                     rhs.elem(),
                     &lhs.tensor,
                 ))
@@ -367,11 +386,8 @@ impl<F: FloatCandleElement, I: IntCandleElement> FloatTensorOps<Self> for Candle
     }
 
     fn float_sum(tensor: FloatTensor<Self>) -> FloatTensor<Self> {
-        let sum = tensor.tensor.sum_all().unwrap().to_scalar::<F>().unwrap();
-        CandleTensor::from_data::<F>(
-            TensorData::new([sum].into(), [1]),
-            Self::float_device(&tensor),
-        )
+        let sum = tensor.tensor.sum_all().unwrap().reshape((1,)).unwrap();
+        CandleTensor::new(sum)
     }
 
     fn float_sum_dim(tensor: FloatTensor<Self>, dim: usize) -> FloatTensor<Self> {
@@ -420,7 +436,7 @@ impl<F: FloatCandleElement, I: IntCandleElement> FloatTensorOps<Self> for Candle
     }
 
     fn float_powf_scalar_impl(tensor: FloatTensor<Self>, value: Scalar) -> FloatTensor<Self> {
-        CandleTensor::new(tensor.tensor.powf(value.elem::<f64>()).unwrap())
+        CandleTensor::new(tensor.tensor.powf(value.elem()).unwrap())
     }
 
     fn float_sqrt(tensor: FloatTensor<Self>) -> FloatTensor<Self> {
@@ -571,6 +587,15 @@ impl<F: FloatCandleElement, I: IntCandleElement> FloatTensorOps<Self> for Candle
         )
     }
 
+    fn float_argtopk(
+        tensor: FloatTensor<Self>,
+        dim: usize,
+        k: usize,
+        out_dtype: IntDType,
+    ) -> IntTensor<Self> {
+        panic!("argtopk not implemented for candle backend")
+    }
+
     fn float_argmin(tensor: FloatTensor<Self>, dim: usize, out_dtype: IntDType) -> IntTensor<Self> {
         CandleTensor::new(
             tensor
@@ -583,18 +608,18 @@ impl<F: FloatCandleElement, I: IntCandleElement> FloatTensorOps<Self> for Candle
     }
 
     fn float_clamp_max(tensor: FloatTensor<Self>, max: Scalar) -> FloatTensor<Self> {
-        CandleTensor::new(tensor.tensor.minimum(max.elem::<F>()).unwrap())
+        CandleTensor::new(tensor.tensor.minimum(max.elem::<f32>()).unwrap())
     }
 
     fn float_clamp_min(tensor: FloatTensor<Self>, min: Scalar) -> FloatTensor<Self> {
-        CandleTensor::new(tensor.tensor.maximum(min.elem::<F>()).unwrap())
+        CandleTensor::new(tensor.tensor.maximum(min.elem::<f32>()).unwrap())
     }
 
     fn float_clamp(tensor: FloatTensor<Self>, min: Scalar, max: Scalar) -> FloatTensor<Self> {
         CandleTensor::new(
             tensor
                 .tensor
-                .clamp(min.elem::<F>(), max.elem::<F>())
+                .clamp(min.elem::<f32>(), max.elem::<f32>())
                 .unwrap(),
         )
     }

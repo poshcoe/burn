@@ -1,6 +1,6 @@
 use burn_communication::{
-    CommunicationChannel, Message, Protocol, ProtocolServer,
-    data_service::{TensorDataServer, TensorDataService},
+    Protocol, ProtocolServer,
+    external_comm::{ExternalCommServer, ExternalCommService},
     util::os_shutdown_signal,
     websocket::{WebSocket, WsServer},
 };
@@ -10,17 +10,27 @@ use tokio_util::sync::CancellationToken;
 use burn_backend::tensor::Device;
 use burn_ir::BackendIr;
 
-use crate::shared::{ComputeTask, Task};
-
+use super::service::{FetchHandler, SubmitHandler};
 use super::session::SessionManager;
 
+/// HTTP-style server for the burn-remote protocol.
+///
+/// Each connection is a thin IO loop: [`FetchHandler`] answers the `/fetch` stream's init
+/// handshake and drains the session's result queue, while [`SubmitHandler`] decodes the
+/// `/submit` stream's message batches and forwards each task to the session's worker. The
+/// tasks actually run on that per-session worker thread (see
+/// [`SessionWorker`](super::worker::SessionWorker)), which holds the session's runner and
+/// processes its tasks in FIFO order — so a blocking op (e.g. an all-reduce barrier) parks
+/// only that session's worker rather than a shared runtime thread. The [`SessionManager`] owns
+/// the per-session state behind the [`SubmitService`](super::service::SubmitService) /
+/// [`FetchService`](super::service::FetchService) traits the handlers depend on.
 pub struct RemoteServer<B, P>
 where
     B: BackendIr,
     P: Protocol,
 {
     _b: PhantomData<B>,
-    _n: PhantomData<P>,
+    _p: PhantomData<P>,
 }
 
 impl<B, P> RemoteServer<B, P>
@@ -28,153 +38,40 @@ where
     B: BackendIr,
     P: Protocol,
 {
-    /// Start the server on the given address.
-    pub async fn start(device: Device<B>, server: P::Server) {
+    /// Start the server hosting the given devices.
+    ///
+    /// `devices` is indexed by the device index the client selects at session init;
+    /// `devices[0]` is the default device. Must be non-empty.
+    pub async fn start(devices: Vec<Device<B>>, server: P::Server) {
         let cancel_token = CancellationToken::new();
-        let data_service = Arc::new(TensorDataService::<B, P>::new(cancel_token));
-        let session_manager = Arc::new(SessionManager::<B, P>::new(device, data_service.clone()));
+        let external_comm = Arc::new(ExternalCommService::<B, P>::new(cancel_token));
+        let session_manager = Arc::new(SessionManager::<B, P>::new(devices, external_comm.clone()));
 
         let _server = server
-            .route("/response", {
+            .route("/fetch", {
                 let session_manager = session_manager.clone();
-                move |stream| Self::handle_socket_response(session_manager, stream)
+                move |stream| FetchHandler::new(session_manager, stream).run()
             })
-            .route("/request", {
+            .route("/submit", {
                 let session_manager = session_manager.clone();
-                move |stream| Self::handle_socket_request(session_manager, stream)
+                move |stream| SubmitHandler::new(session_manager, stream).run()
             })
-            .route_tensor_data_service(data_service)
+            .route_external_comm(external_comm)
             .serve(os_shutdown_signal())
             .await;
     }
-
-    async fn handle_socket_response(
-        session_manager: Arc<SessionManager<B, P>>,
-        mut socket: <P::Server as ProtocolServer>::Channel,
-    ) {
-        log::info!("[Response Handler] On new connection.");
-
-        let packet = socket.recv().await;
-        let msg = match packet {
-            Ok(Some(msg)) => msg,
-            Ok(None) => {
-                log::info!("Response stream closed");
-                return;
-            }
-            Err(e) => {
-                log::info!("Response stream error on init: {e:?}");
-                return;
-            }
-        };
-
-        let id = match rmp_serde::from_slice::<Task>(&msg.data) {
-            Ok(Task::Init(session_id)) => session_id,
-            msg => {
-                log::error!("Message is not a valid initialization task {msg:?}");
-                return;
-            }
-        };
-
-        let mut receiver = session_manager.register_responder(id).await;
-
-        log::info!("Response handler connection active");
-
-        while let Some(mut callback) = receiver.recv().await {
-            let response = callback.recv().await.unwrap();
-            let bytes = rmp_serde::to_vec(&response).unwrap();
-
-            socket.send(Message::new(bytes.into())).await.unwrap();
-        }
-    }
-
-    async fn handle_socket_request(
-        session_manager: Arc<SessionManager<B, P>>,
-        mut socket: <P::Server as ProtocolServer>::Channel,
-    ) {
-        log::info!("[Request Handler] On new connection.");
-        let mut session_id = None;
-
-        loop {
-            let packet = socket.recv().await;
-            let msg = match packet {
-                Ok(Some(msg)) => msg,
-                Ok(None) => {
-                    log::info!("Request stream closed");
-                    break;
-                }
-                Err(e) => {
-                    log::info!("Request stream error: {e:?}, Closing.");
-                    break;
-                }
-            };
-
-            let task = match rmp_serde::from_slice::<Task>(&msg.data) {
-                Ok(val) => val,
-                Err(err) => {
-                    log::info!("Only bytes message in the json format are supported {err:?}");
-                    break;
-                }
-            };
-
-            if let Task::Close(id) = task {
-                session_id = Some(id);
-                break;
-            }
-
-            let (stream, connection_id, task) =
-                match session_manager.stream(&mut session_id, task).await {
-                    Some(val) => val,
-                    None => {
-                        log::info!("Ops session activated {session_id:?}");
-                        continue;
-                    }
-                };
-
-            match task {
-                ComputeTask::RegisterOperation(op) => {
-                    stream.register_operation(op).await;
-                }
-                ComputeTask::RegisterTensor(id, data) => {
-                    stream.register_tensor(id, data).await;
-                }
-                ComputeTask::ReadTensor(tensor) => {
-                    stream.read_tensor(connection_id, tensor).await;
-                }
-                ComputeTask::SyncBackend => {
-                    stream.sync(connection_id).await;
-                }
-                ComputeTask::RegisterTensorRemote(tensor, new_id) => {
-                    stream.register_tensor_remote(tensor, new_id).await;
-                }
-                ComputeTask::ExposeTensorRemote {
-                    tensor,
-                    count,
-                    transfer_id,
-                } => {
-                    stream
-                        .expose_tensor_remote(tensor, count, transfer_id)
-                        .await;
-                }
-                ComputeTask::Seed(seed) => {
-                    stream.seed(seed).await;
-                }
-                ComputeTask::DTypeUsage(dtype) => stream.dtype_usage(connection_id, dtype).await,
-            }
-        }
-
-        log::info!("Closing session {session_id:?}");
-        session_manager.close(session_id).await;
-    }
 }
 
-/// Start the server on the given port and [device](Device).
-pub async fn start_websocket_async<B: BackendIr>(device: Device<B>, port: u16) {
+/// Start the server on the given port, hosting the given [devices](Device).
+///
+/// `devices` is indexed by the device index the client selects; `devices[0]` is the default.
+pub async fn start_websocket_async<B: BackendIr>(devices: Vec<Device<B>>, port: u16) {
     let server = WsServer::new(port);
-    RemoteServer::<B, WebSocket>::start(device, server).await;
+    RemoteServer::<B, WebSocket>::start(devices, server).await;
 }
 
 #[tokio::main]
-/// Start the server on the given port and [device](Device).
-pub async fn start_websocket<B: BackendIr>(device: Device<B>, port: u16) {
-    start_websocket_async::<B>(device, port).await;
+/// Start the server on the given port, hosting the given [devices](Device).
+pub async fn start_websocket<B: BackendIr>(devices: Vec<Device<B>>, port: u16) {
+    start_websocket_async::<B>(devices, port).await;
 }

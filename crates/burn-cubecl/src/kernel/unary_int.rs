@@ -5,7 +5,12 @@ use crate::{
     tensor::CubeTensor,
 };
 use burn_backend::TensorMetadata;
-use cubecl::{calculate_cube_count_elemwise, prelude::*, std::tensor::layout::linear::LinearView};
+use burn_backend::cubecl::dtype_to_storage_type;
+use cubecl::{
+    calculate_cube_count_elemwise,
+    prelude::*,
+    std::tensor::layout::linear::{LinearView, LinearViewMut},
+};
 
 pub(crate) trait IntUnaryOpFamily: 'static + Send + Sync {
     type Options: LaunchArg;
@@ -21,8 +26,8 @@ pub(crate) trait IntUnaryOp<I: Scalar, N: Size>: 'static + Send + Sync {
 
 #[cube(launch_unchecked, address_type = "dynamic")]
 pub(crate) fn unary_int<I: Int, N: Size, O: IntUnaryOpFamily>(
-    input: &LinearView<Vector<I, N>>,
-    output: &mut LinearView<Vector<I, N>, ReadWrite>,
+    input: LinearView<'_, Vector<I, N>>,
+    mut output: LinearViewMut<'_, Vector<I, N>>,
     options: &O::Options,
     #[define(I)] _dtype: StorageType,
 ) {
@@ -30,7 +35,10 @@ pub(crate) fn unary_int<I: Int, N: Size, O: IntUnaryOpFamily>(
         terminate!();
     }
 
-    output[ABSOLUTE_POS] = O::Unary::<I, N>::execute(input[ABSOLUTE_POS], options);
+    output.write(
+        ABSOLUTE_POS,
+        O::Unary::<I, N>::execute(input.read(ABSOLUTE_POS), options),
+    );
 }
 
 pub(crate) fn launch_unary_int<R, O, Args>(tensor: CubeTensor<R>, args: Args) -> CubeTensor<R>
@@ -59,7 +67,7 @@ where
                 tensor.clone().into_linear_view(),
                 tensor.as_linear_view_alias(0),
                 args(&()),
-                dtype.into(),
+                dtype_to_storage_type(dtype),
             );
 
             tensor
@@ -80,7 +88,7 @@ where
                 tensor.into_linear_view(),
                 output.clone().into_linear_view(),
                 args(&()),
-                dtype.into(),
+                dtype_to_storage_type(dtype),
             );
 
             output
@@ -129,8 +137,8 @@ pub(crate) mod unary_basic_int {
                     let one = Vector::one();
                     let minus_one = Vector::new(I::new(-1));
 
-                    let is_positive = input.greater_than(zero);
-                    let is_negative = input.less_than(zero);
+                    let is_positive = input.greater_than(&zero);
+                    let is_negative = input.less_than(&zero);
                     let sign = select_many(is_negative, minus_one, zero);
 
                     select_many(is_positive, one, sign)

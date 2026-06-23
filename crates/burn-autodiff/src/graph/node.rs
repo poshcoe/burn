@@ -1,12 +1,17 @@
-use alloc::{sync::Arc, vec::Vec};
+use alloc::vec::Vec;
 
-#[cfg(feature = "distributed")]
 use burn_backend::distributed::DistributedParams;
 
 #[cfg(target_has_atomic = "64")]
 use core::sync::atomic::{AtomicU64, Ordering};
 #[cfg(not(target_has_atomic = "64"))]
 use portable_atomic::{AtomicU64, Ordering};
+
+#[cfg(target_has_atomic = "ptr")]
+use alloc::sync::Arc;
+
+#[cfg(not(target_has_atomic = "ptr"))]
+use portable_atomic_util::Arc;
 
 use crate::checkpoint::retro_forward::RetroForward;
 use crate::runtime::AutodiffClientImpl;
@@ -41,7 +46,6 @@ pub struct Node {
     pub requirement: Requirement,
     pub properties: ComputingProperty,
     pub client: AutodiffClientImpl,
-    #[cfg(feature = "distributed")]
     pub distributed_params: Option<DistributedParams>,
 }
 pub type NodeRef = Arc<Node>;
@@ -62,7 +66,7 @@ impl Node {
 }
 
 /// Unique identifier generated for each node.
-#[derive(Clone, Hash, PartialEq, Eq, Debug, Copy)]
+#[derive(Clone, Hash, PartialEq, Eq, Debug, Copy, Ord, PartialOrd)]
 pub struct NodeId {
     /// The integer representation of the id
     pub value: u64,

@@ -2,37 +2,32 @@ use crate::LearningComponentsMarker;
 use crate::checkpoint::{
     AsyncCheckpointer, Checkpointer, CheckpointingAction, CheckpointingStrategy,
 };
-use crate::components::{LearningComponentsTypes, TrainingBackend};
+use crate::components::LearningComponentsTypes;
 use crate::metric::store::EventStoreClient;
 use crate::{
     CloneEarlyStoppingStrategy, InferenceStep, TrainOutput, TrainStep, TrainingModelInput,
     TrainingModelOutput,
 };
 use burn_core::module::{AutodiffModule, Module};
-use burn_core::prelude::Backend;
+use burn_core::store::ModuleRecord;
 use burn_core::tensor::Device;
-use burn_core::tensor::backend::AutodiffBackend;
-use burn_optim::lr_scheduler::LrScheduler;
-use burn_optim::{GradientsParams, MultiGradientsParams, Optimizer};
+use burn_optim::lr_scheduler::{LrScheduler, LrSchedulerRecord};
+use burn_optim::{GradientsParams, ModuleOptimizer, MultiGradientsParams, OptimizerRecord};
+use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// The record of the learner's model.
-pub type LearnerModelRecord<LC> =
-    <<LC as LearningComponentsTypes>::TrainingModel as Module<TrainingBackend<LC>>>::Record;
+pub type LearnerModelRecord = ModuleRecord;
 /// The record of the optimizer.
-pub type LearnerOptimizerRecord<LC> = <<LC as LearningComponentsTypes>::Optimizer as Optimizer<
-    <LC as LearningComponentsTypes>::TrainingModel,
-    TrainingBackend<LC>,
->>::Record;
+pub type LearnerOptimizerRecord = OptimizerRecord;
 /// The record of the LR scheduler.
-pub type LearnerSchedulerRecord<LC> =
-    <<LC as LearningComponentsTypes>::LrScheduler as LrScheduler>::Record<TrainingBackend<LC>>;
+pub type LearnerSchedulerRecord = LrSchedulerRecord;
 
 /// Learner struct encapsulating all components necessary to train a Neural Network model.
 pub struct Learner<LC: LearningComponentsTypes> {
-    pub(crate) model: LC::TrainingModel,
-    optim: LC::Optimizer,
+    pub(crate) model: LC::Model,
+    optim: ModuleOptimizer,
     lr_scheduler: LC::LrScheduler,
     lr: f64,
 }
@@ -48,16 +43,13 @@ impl<LC: LearningComponentsTypes> Clone for Learner<LC> {
     }
 }
 
-impl<B, LR, M, O> Learner<LearningComponentsMarker<B, LR, M, O>>
+impl<LR, M> Learner<LearningComponentsMarker<LR, M>>
 where
-    B: AutodiffBackend,
     LR: LrScheduler + 'static,
-    M: TrainStep + AutodiffModule<B> + core::fmt::Display + 'static,
-    M::InnerModule: InferenceStep,
-    O: Optimizer<M, B> + 'static,
+    M: TrainStep + InferenceStep + AutodiffModule + core::fmt::Display + 'static,
 {
     /// Create a learner.
-    pub fn new(model: M, optim: O, lr_scheduler: LR) -> Self {
+    pub fn new(model: M, optim: ModuleOptimizer, lr_scheduler: LR) -> Self {
         Self {
             model,
             optim,
@@ -69,12 +61,12 @@ where
 
 impl<LC: LearningComponentsTypes> Learner<LC> {
     /// Fork the learner's model to the given device.
-    pub fn fork(&mut self, device: &<TrainingBackend<LC> as Backend>::Device) {
+    pub fn fork(&mut self, device: &Device) {
         self.model = self.model().fork(device);
     }
 
     /// Returns the current model.
-    pub fn model(&self) -> LC::TrainingModel {
+    pub fn model(&self) -> LC::Model {
         self.model.clone()
     }
 
@@ -98,7 +90,7 @@ impl<LC: LearningComponentsTypes> Learner<LC> {
     ///
     /// The output containing the model output and the gradients.
     pub fn train_step(&self, item: TrainingModelInput<LC>) -> TrainOutput<TrainingModelOutput<LC>> {
-        self.model.step(item)
+        TrainStep::step(&self.model, item)
     }
 
     /// Optimize the current module with the provided gradients and learning rate.
@@ -123,32 +115,51 @@ impl<LC: LearningComponentsTypes> Learner<LC> {
         self.model = self.model().optimize_multi(&mut self.optim, self.lr, grads);
     }
 
-    /// Load the module state from a [record](LearnerModelRecord<LC>).
-    pub fn load_model(&mut self, record: LearnerModelRecord<LC>) {
+    /// Load the module state from a [record](LearnerModelRecord).
+    pub fn load_model(&mut self, record: LearnerModelRecord) {
         self.model = self.model.clone().load_record(record);
     }
 
-    /// Load the state of the learner's optimizer as a [record](LearnerOptimizerRecord<LC>).
-    pub fn load_optim(&mut self, record: LearnerOptimizerRecord<LC>) {
+    /// Load the state of the learner's optimizer from a [record](LearnerOptimizerRecord).
+    ///
+    /// No device is needed: the optimizer state is migrated to each parameter's device on the next
+    /// step (see [`ModuleOptimizer::load_record`](burn_optim::ModuleOptimizer::load_record)).
+    pub fn load_optim(&mut self, record: LearnerOptimizerRecord) {
         self.optim = self.optim.clone().load_record(record);
     }
 
-    /// Load the state of the learner's scheduler as a [record](LearnerSchedulerRecord<LC>).
-    pub fn load_scheduler(&mut self, record: LearnerSchedulerRecord<LC>) {
+    /// Load the state of the learner's scheduler from a [record](LearnerSchedulerRecord).
+    pub fn load_scheduler(&mut self, record: LearnerSchedulerRecord) {
         self.lr_scheduler = self.lr_scheduler.clone().load_record(record);
     }
 }
 
-#[derive(new)]
 /// Used to create, delete, or load checkpoints of the training process.
 pub struct LearningCheckpointer<LC: LearningComponentsTypes> {
-    model: AsyncCheckpointer<LearnerModelRecord<LC>, LC::Backend>,
-    optim: AsyncCheckpointer<LearnerOptimizerRecord<LC>, LC::Backend>,
-    lr_scheduler: AsyncCheckpointer<LearnerSchedulerRecord<LC>, LC::Backend>,
+    model: AsyncCheckpointer<LearnerModelRecord>,
+    optim: AsyncCheckpointer<LearnerOptimizerRecord>,
+    lr_scheduler: AsyncCheckpointer<LearnerSchedulerRecord>,
     strategy: Box<dyn CheckpointingStrategy>,
+    _phantom: PhantomData<LC>,
 }
 
 impl<LC: LearningComponentsTypes> LearningCheckpointer<LC> {
+    /// Create a new learning checkpointer.
+    pub fn new(
+        model: AsyncCheckpointer<LearnerModelRecord>,
+        optim: AsyncCheckpointer<LearnerOptimizerRecord>,
+        lr_scheduler: AsyncCheckpointer<LearnerSchedulerRecord>,
+        strategy: Box<dyn CheckpointingStrategy>,
+    ) -> Self {
+        Self {
+            model,
+            optim,
+            lr_scheduler,
+            strategy,
+            _phantom: PhantomData,
+        }
+    }
+
     /// Create checkpoint for the training process.
     pub fn checkpoint(&mut self, learner: &Learner<LC>, epoch: usize, store: &EventStoreClient) {
         let actions = self.strategy.checkpointing(epoch, store);
@@ -182,27 +193,27 @@ impl<LC: LearningComponentsTypes> LearningCheckpointer<LC> {
     }
 
     /// Load a training checkpoint.
-    pub fn load_checkpoint(
-        &self,
-        mut learner: Learner<LC>,
-        device: &Device<LC::Backend>,
-        epoch: usize,
-    ) -> Learner<LC> {
+    ///
+    /// No device is taken: checkpoints are device-free burnpack records (file-backed bytes). On
+    /// load, the model keeps the device of the learner's existing parameters, and the optimizer
+    /// state is migrated to each parameter's device on the next step. The training device is fixed
+    /// earlier, when the learner's model is created/forked.
+    pub fn load_checkpoint(&self, mut learner: Learner<LC>, epoch: usize) -> Learner<LC> {
         let record = self
             .model
-            .restore(epoch, device)
+            .restore(epoch)
             .expect("Can load model checkpoint.");
         learner.load_model(record);
 
         let record = self
             .optim
-            .restore(epoch, device)
+            .restore(epoch)
             .expect("Can load optimizer checkpoint.");
         learner.load_optim(record);
 
         let record = self
             .lr_scheduler
-            .restore(epoch, device)
+            .restore(epoch)
             .expect("Can load learning rate scheduler checkpoint.");
         learner.load_scheduler(record);
 

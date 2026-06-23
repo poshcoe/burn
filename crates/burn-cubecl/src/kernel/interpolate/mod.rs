@@ -1,8 +1,5 @@
 mod base;
-mod bicubic;
-mod bilinear;
-mod lanczos3;
-mod nearest;
-mod nearest_backward;
+mod tune;
 
 pub use base::*;
+pub use tune::*;

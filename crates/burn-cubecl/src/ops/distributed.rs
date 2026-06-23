@@ -1,21 +1,19 @@
+use burn_backend::distributed::DistributedOps;
+
+use crate::{CubeBackend, CubeRuntime};
+
+#[cfg(feature = "std")]
+use crate::ops::numeric::{self, zeros_client};
+#[cfg(feature = "std")]
 use burn_backend::{
     DeviceId, TensorMetadata,
-    distributed::{CollectiveTensor, DistributedBackend, ReduceOperation},
+    cubecl::dtype_to_elem_type,
+    distributed::{CollectiveTensor, ReduceOperation},
     tensor::{Device, FloatTensor},
 };
 
-use crate::{
-    BoolElement, CubeBackend, CubeRuntime, FloatElement, IntElement,
-    ops::numeric::{self, zeros_client},
-};
-
-impl<R, F, I, BT> DistributedBackend for CubeBackend<R, F, I, BT>
-where
-    R: CubeRuntime,
-    F: FloatElement,
-    I: IntElement,
-    BT: BoolElement,
-{
+impl<R: CubeRuntime> DistributedOps<Self> for CubeBackend<R> {
+    #[cfg(feature = "std")]
     fn all_reduce(
         tensor: FloatTensor<Self>,
         op: ReduceOperation,
@@ -43,13 +41,14 @@ where
         client.all_reduce(
             out_tensor.handle.clone(),
             out_tensor.handle.clone(),
-            out_tensor.dtype.into(),
+            dtype_to_elem_type(out_tensor.dtype),
             device_ids.clone(),
             op,
         );
         CollectiveTensor::new(out_tensor)
     }
 
+    #[cfg(feature = "std")]
     fn sync_collective(device: &Device<Self>) {
         let client = R::client(device);
         client.sync_collective();

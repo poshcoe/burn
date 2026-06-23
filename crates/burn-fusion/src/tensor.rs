@@ -1,11 +1,8 @@
 use crate::{
     Client, FusionBackend, FusionRuntime,
-    stream::{Operation, OperationStreams, StreamId},
+    stream::{Operation, StreamId},
 };
-use burn_backend::{
-    DType, ExecutionError, QTensorPrimitive, Shape, TensorData, TensorMetadata,
-    quantization::QuantScheme,
-};
+use burn_backend::{DType, ExecutionError, Shape, TensorData, TensorMetadata};
 use burn_ir::{OperationIr, TensorId, TensorIr, TensorStatus};
 use std::sync::{
     Arc,
@@ -29,6 +26,11 @@ pub struct FusionTensor<R: FusionRuntime> {
 
 impl<R: FusionRuntime> Clone for FusionTensor<R> {
     fn clone(&self) -> Self {
+        let current = StreamId::current();
+        if self.stream != current {
+            return self.shared_view(current);
+        }
+
         self.count.fetch_add(1, Ordering::Acquire);
 
         Self {
@@ -49,7 +51,7 @@ impl<R: FusionRuntime> core::fmt::Debug for FusionTensor<R> {
                 "{{ id: {:?}, shape: {:?}, device: {:?} }}",
                 self.id,
                 self.shape,
-                self.client.device().clone(),
+                self.client.device(),
             )
             .as_str(),
         )
@@ -57,6 +59,7 @@ impl<R: FusionRuntime> core::fmt::Debug for FusionTensor<R> {
 }
 
 impl<R: FusionRuntime> TensorMetadata for FusionTensor<R> {
+    type Device = R::FusionDevice;
     fn dtype(&self) -> DType {
         self.dtype
     }
@@ -67,6 +70,10 @@ impl<R: FusionRuntime> TensorMetadata for FusionTensor<R> {
 
     fn rank(&self) -> usize {
         self.shape.num_dims()
+    }
+
+    fn device(&self) -> Self::Device {
+        self.client.device().clone()
     }
 }
 
@@ -108,6 +115,11 @@ impl<R: FusionRuntime> FusionTensor<R> {
 
     /// Intermediate representation to be used when using an initialized tensor used as input.
     pub fn into_ir(mut self) -> TensorIr {
+        let current = StreamId::current();
+        if self.stream != current {
+            self = self.shared_view(current);
+        }
+
         let count = self.count.load(Ordering::Acquire);
         let status = self.status(count);
 
@@ -128,6 +140,31 @@ impl<R: FusionRuntime> FusionTensor<R> {
             id: self.id,
             dtype: self.dtype,
         }
+    }
+
+    /// Create a fresh `FusionTensor` on `current` that aliases the same backing
+    /// handle as `self`. Used by [`Clone`] and [`Self::into_ir`] when the tensor is
+    /// crossing stream boundaries — the rest of the pipeline only ever sees ids
+    /// whose home stream is the calling stream.
+    ///
+    /// The cross-stream coordination (draining the source stream so the handle
+    /// exists, then aliasing it under a fresh id) is done by
+    /// [`MultiStream::tag_shared_view`](crate::stream::MultiStream::tag_shared_view).
+    /// See that type's docs for the full strategy — how shares are tagged, how the
+    /// buffer's lifetime is managed across the two sides, and why a single drain
+    /// per source is enough.
+    fn shared_view(&self, current: StreamId) -> Self {
+        let new_id = self.client.create_empty_handle();
+
+        self.client.tag_shared_view(self.stream, self.id, new_id);
+
+        Self::new(
+            new_id,
+            self.shape.clone(),
+            self.dtype,
+            self.client.clone(),
+            current,
+        )
     }
 
     pub(crate) async fn into_data<B>(self) -> Result<TensorData, ExecutionError>
@@ -206,27 +243,14 @@ impl<R: FusionRuntime> Drop for FusionTensor<R> {
                     status: TensorStatus::ReadWrite,
                     dtype: self.dtype,
                 };
-                let mut streams = OperationStreams::default();
-                streams.tensor(self);
 
+                // Drop is targeted at the tensor's home stream so it runs after any pending ops
+                // on this id, regardless of the thread we happen to be dropping from.
                 self.client
-                    .register(streams, OperationIr::Drop(ir), DropOp { id: self.id });
+                    .register(self.stream, OperationIr::Drop(ir), DropOp { id: self.id });
             }
             TensorStatus::ReadOnly => {}
             TensorStatus::NotInit => {}
-        }
-    }
-}
-
-impl<R: FusionRuntime> QTensorPrimitive for FusionTensor<R> {
-    fn scheme(&self) -> &QuantScheme {
-        if let DType::QFloat(scheme) = &self.dtype {
-            scheme
-        } else {
-            panic!(
-                "Quantization scheme is not valid for dtype {:?}",
-                self.dtype,
-            )
         }
     }
 }

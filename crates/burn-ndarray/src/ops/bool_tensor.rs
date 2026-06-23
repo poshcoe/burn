@@ -12,23 +12,17 @@ use burn_std::{BoolDType, FloatDType, IntDType};
 use ndarray::IntoDimension;
 
 // Current crate
-use crate::element::{FloatNdArrayElement, IntNdArrayElement, QuantElement};
 use crate::{NdArray, execute_with_int_dtype, tensor::NdArrayTensor};
 use crate::{
     NdArrayDevice, SharedArray, execute_with_float_out_dtype, execute_with_int_out_dtype, slice,
 };
 
 // Workspace crates
-use burn_backend::{Shape, TensorData, backend::Backend};
+use burn_backend::{Shape, TensorData};
 
 use super::{NdArrayBoolOps, NdArrayOps};
 
-impl<E: FloatNdArrayElement, I: IntNdArrayElement, Q: QuantElement> BoolTensorOps<Self>
-    for NdArray<E, I, Q>
-where
-    NdArrayTensor: From<SharedArray<E>>,
-    NdArrayTensor: From<SharedArray<I>>,
-{
+impl BoolTensorOps<Self> for NdArray {
     fn bool_from_data(data: TensorData, _device: &NdArrayDevice) -> NdArrayTensor {
         if !data.dtype.is_bool() {
             unimplemented!("Unsupported dtype for `bool_from_data`")
@@ -61,32 +55,16 @@ where
         )
     }
 
-    fn bool_device(_tensor: &NdArrayTensor) -> <NdArray<E> as Backend>::Device {
-        NdArrayDevice::Cpu
-    }
-
-    fn bool_empty(
-        shape: Shape,
-        _device: &<NdArray<E> as Backend>::Device,
-        dtype: BoolDType,
-    ) -> NdArrayTensor {
+    fn bool_empty(shape: Shape, _device: &NdArrayDevice, dtype: BoolDType) -> NdArrayTensor {
         Self::bool_zeros(shape, _device, dtype)
     }
 
-    fn bool_zeros(
-        shape: Shape,
-        _device: &<NdArray<E> as Backend>::Device,
-        _dtype: BoolDType,
-    ) -> NdArrayTensor {
+    fn bool_zeros(shape: Shape, _device: &NdArrayDevice, _dtype: BoolDType) -> NdArrayTensor {
         let values = vec![false; shape.num_elements()];
         NdArrayTensor::from_data(TensorData::new(values, shape))
     }
 
-    fn bool_ones(
-        shape: Shape,
-        _device: &<NdArray<E> as Backend>::Device,
-        _dtype: BoolDType,
-    ) -> NdArrayTensor {
+    fn bool_ones(shape: Shape, _device: &NdArrayDevice, _dtype: BoolDType) -> NdArrayTensor {
         let values = vec![true; shape.num_elements()];
         NdArrayTensor::from_data(TensorData::new(values, shape))
     }

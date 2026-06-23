@@ -1,7 +1,8 @@
 use crate::CubeRuntime;
 use crate::kernel::{NumericUnaryOp, NumericUnaryOpFamily, launch_unary_numeric};
+use burn_backend::cubecl::{dtype_to_elem_type, dtype_to_storage_type};
 use burn_backend::quantization::QuantScheme;
-use burn_backend::{DType, QTensorPrimitive, Shape, TensorMetadata};
+use burn_backend::{DType, Shape, TensorMetadata};
 use burn_std::{Metadata, strides, tensor::is_contiguous};
 use cubecl::server::Handle;
 use cubecl::std::tensor::TensorHandle;
@@ -37,7 +38,7 @@ impl<R: CubeRuntime> From<CubeTensor<R>> for TensorHandle<R> {
             val.handle.clone(),
             val.meta.shape().clone(),
             val.meta.strides().clone(),
-            val.dtype,
+            dtype_to_storage_type(val.dtype),
         )
     }
 }
@@ -98,6 +99,7 @@ where
 }
 
 impl<R: CubeRuntime> TensorMetadata for CubeTensor<R> {
+    type Device = R::CubeDevice;
     fn dtype(&self) -> DType {
         self.dtype
     }
@@ -109,18 +111,9 @@ impl<R: CubeRuntime> TensorMetadata for CubeTensor<R> {
     fn rank(&self) -> usize {
         self.meta.rank()
     }
-}
 
-impl<R: CubeRuntime> QTensorPrimitive for CubeTensor<R> {
-    fn scheme(&self) -> &QuantScheme {
-        if let DType::QFloat(scheme) = &self.dtype {
-            scheme
-        } else {
-            panic!(
-                "Quantization scheme is not valid for dtype {:?}",
-                self.dtype,
-            )
-        }
+    fn device(&self) -> Self::Device {
+        self.device.clone()
     }
 }
 
@@ -174,13 +167,15 @@ where
     }
 
     /// Change the context of the current tensor and return the newly transferred tensor.
-    pub fn to_client(&self, client: ComputeClient<R>, device: R::Device) -> Self {
+    pub fn to_client(&mut self, client: ComputeClient<R>, device: R::Device) -> Self {
         let desc = self.handle.clone().copy_descriptor(
             self.meta.shape().clone(),
             self.meta.strides().clone(),
             self.elem_size(),
         );
-        let handle = self.client.to_client_tensor(desc, &client);
+        let handle = self
+            .client
+            .to_client_tensor(desc, &client, dtype_to_elem_type(self.dtype));
 
         Self {
             client,
@@ -212,9 +207,9 @@ where
         self.binding().into_tensor_arg()
     }
 
-    /// Return the reference to an array argument.
-    pub fn into_array_arg(self) -> ArrayArg<R> {
-        self.into_tensor_arg().into_array_arg()
+    /// Return the reference to a buffer argument.
+    pub fn into_buffer_arg(self) -> BufferArg<R> {
+        self.into_tensor_arg().into_buffer_arg()
     }
 
     /// Returns a reference to the aliased tensor argument.

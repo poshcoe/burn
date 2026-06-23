@@ -1,34 +1,32 @@
-use burn_backend::{
-    Backend, Element, get_device_settings,
-    tensor::{BasicOps, Device},
-};
 use burn_std::DType;
+
+use crate::{Device, bridge::BasicOps, ops::Kind};
 
 /// Options for tensor creation.
 ///
 /// This struct allows specifying the `device` and overriding the data type when creating a tensor.
-/// When the `dtype` is not specified, the [device's default policy](crate::set_default_dtypes) is used.
+/// When the `dtype` is not specified, the [device's default settings](crate::DeviceSettings) is used.
 #[derive(Debug, Clone)]
-pub struct TensorCreationOptions<B: Backend> {
+pub struct TensorCreationOptions {
     /// Device where the tensor will be created.
-    pub device: Device<B>,
+    pub device: Device,
     /// Optional data type.
-    /// If `None`, the dtype will be inferred on creation from the [device policy](crate::set_default_dtypes).
+    /// If `None`, the dtype will be inferred on creation from the [device settings](crate::DeviceSettings).
     pub dtype: Option<DType>,
 }
 
-impl<B: Backend> Default for TensorCreationOptions<B> {
+impl Default for TensorCreationOptions {
     /// Returns new options with the backend's default device.
     fn default() -> Self {
         Self::new(Default::default())
     }
 }
 
-impl<B: Backend> TensorCreationOptions<B> {
+impl TensorCreationOptions {
     /// Create new options with a specific device.
     ///
-    /// Data type will follow the [device policy](crate::set_default_dtypes) on tensor creation.
-    pub fn new(device: Device<B>) -> Self {
+    /// Data type will follow the [device settings](crate::DeviceSettings) on tensor creation.
+    pub fn new(device: Device) -> Self {
         Self {
             device,
             dtype: None,
@@ -43,25 +41,10 @@ impl<B: Backend> TensorCreationOptions<B> {
     }
 
     /// Set the tensor creation device.
-    pub fn with_device(mut self, device: Device<B>) -> Self {
+    pub fn with_device(mut self, device: Device) -> Self {
         self.device = device;
 
         self
-    }
-
-    /// Create options with backend's default device and float dtype.
-    pub fn float() -> Self {
-        Self::default().with_dtype(<B::FloatElem as Element>::dtype())
-    }
-
-    /// Create options with backend's default device and int dtype.
-    pub fn int() -> Self {
-        Self::default().with_dtype(<B::IntElem as Element>::dtype())
-    }
-
-    /// Create options with backend's default device and bool dtype.
-    pub fn bool() -> Self {
-        Self::default().with_dtype(<B::BoolElem as Element>::dtype())
     }
 
     /// Returns the tensor data type, or a provided default if not set.
@@ -71,44 +54,45 @@ impl<B: Backend> TensorCreationOptions<B> {
         self.dtype.unwrap_or(dtype)
     }
 
-    /// Returns the tensor data type, or the default from the [device settings](crate::set_default_dtypes).
-    pub(crate) fn resolve_dtype<K: BasicOps<B>>(&self) -> DType {
-        let dtype = K::Elem::dtype();
-        let kind_name = K::name();
-        // TODO: tensor kind enum?
-        self.dtype.unwrap_or_else(|| {
-            let settings = get_device_settings::<B>(&self.device);
-            if dtype.is_float() && kind_name == "Float" {
-                settings.float_dtype.into()
-            } else if (dtype.is_int() || dtype.is_uint()) && kind_name == "Int" {
-                settings.int_dtype.into()
-            } else {
-                settings.bool_dtype.into()
-            }
-        })
+    /// Returns the tensor data type, or the default from the [device settings](crate::DeviceSettings).
+    pub(crate) fn resolve_dtype<K: BasicOps>(&self) -> DType {
+        let settings = self.device.settings();
+        let default = match K::KIND {
+            Kind::Float => settings.float_dtype.into(),
+            Kind::Int => settings.int_dtype.into(),
+            Kind::Bool => settings.bool_dtype.into(),
+        };
+        match K::KIND {
+            // `BoolStore` variants are backend-specific storage layouts rather than
+            // semantic types, and a requested variant (e.g. forced from a serialized
+            // snapshot by `burn-store`) may be unsupported on the target device, so
+            // always resolve bool tensors to the device's default bool storage.
+            Kind::Bool => default,
+            _ => self.dtype.unwrap_or(default),
+        }
     }
 }
 
-impl<B: Backend> From<&Device<B>> for TensorCreationOptions<B> {
+impl From<&Device> for TensorCreationOptions {
     /// Convenience conversion from a reference to a device.
     ///
     /// Example:
     /// ```rust
-    /// use burn_tensor::backend::Backend;
     /// use burn_tensor::TensorCreationOptions;
+    /// use burn_tensor::Device;
     ///
-    /// fn example<B: Backend>(device: B::Device) {
-    ///     let options: TensorCreationOptions<B> = (&device).into();
+    /// fn example(device: Device) {
+    ///     let options: TensorCreationOptions = (&device).into();
     /// }
     /// ```
-    fn from(device: &Device<B>) -> Self {
+    fn from(device: &Device) -> Self {
         TensorCreationOptions::new(device.clone())
     }
 }
 
-impl<B: Backend> From<(&Device<B>, DType)> for TensorCreationOptions<B> {
+impl From<(&crate::Device, DType)> for TensorCreationOptions {
     /// Convenience conversion for a specified `(&device, dtype)` tuple.
-    fn from(args: (&Device<B>, DType)) -> Self {
+    fn from(args: (&crate::Device, DType)) -> Self {
         TensorCreationOptions::new(args.0.clone()).with_dtype(args.1)
     }
 }

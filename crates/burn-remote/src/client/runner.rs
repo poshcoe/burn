@@ -1,76 +1,50 @@
-use super::{RemoteChannel, RemoteClient};
-use crate::shared::{ComputeTask, TaskResponseContent, TensorRemote};
-use burn_backend::{DeviceId, DeviceOps, ExecutionError, TensorData};
-use burn_communication::{Address, ProtocolClient, data_service::TensorTransferId};
+use super::{RemoteChannel, RemoteClient, service};
+use crate::shared::{TaskResponseContent, TensorRemote};
+use burn_backend::{DeviceId, DeviceOps, ExecutionError, StreamId, TensorData};
+use burn_communication::{Address, ProtocolClient, external_comm::TensorTransferId};
 use burn_ir::TensorIr;
-use burn_router::{MultiBackendBridge, RouterTensor, RunnerClient, get_client};
+use burn_router::{MultiBackendBridge, RouterClient, RouterTensor, get_client};
+use burn_std::DeviceSettings;
 use burn_std::{backtrace::BackTrace, future::DynFut};
-use std::sync::OnceLock;
-use std::{collections::HashMap, marker::PhantomData, str::FromStr, sync::Mutex};
+use std::sync::Mutex;
+use std::{marker::PhantomData, str::FromStr};
 
-// TODO: we should work with the parsed structure of Address, not the string.
-static ADDRESS_REGISTRY: OnceLock<Mutex<HashMap<String, u32>>> = OnceLock::new();
+pub use service::{endpoint_to_id, id_to_endpoint};
 
-fn get_address_registry() -> &'static Mutex<HashMap<String, u32>> {
-    ADDRESS_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// Map a string network address to a (local runtime) global unique u32.
-///
-/// Globally stable over the lifetime of the process, shared between threads,
-/// If the address has never been seen, a new id will be created.
-/// If the address has been seen, the previous id will be returned.
-pub fn address_to_id<S: AsRef<str>>(address: S) -> u32 {
-    let registry = get_address_registry();
-    let mut registry = registry.lock().unwrap();
-    let next_id = registry.len() as u32;
-    *registry
-        .entry(address.as_ref().to_string())
-        .or_insert_with(|| next_id)
-}
-
-/// Look up an address by id.
-///
-/// Returns the same address given ids by [`address_to_id`].
-pub fn id_to_address(id: u32) -> Option<String> {
-    let registry = get_address_registry();
-    let registry = registry.lock().unwrap();
-    for entry in registry.iter() {
-        if entry.1 == &id {
-            return Some(entry.0.clone());
-        }
-    }
-    None
-}
-
-// It is very important to block on any request made with the sender, since ordering is crucial
-// when registering operation or creating tensors.
-//
-// The overhead is minimal, since we only wait for the task to be sent to the async
-// channel, but not sent to the server and even less processed by the server.
-impl RunnerClient for RemoteClient {
+// It is very important to block on any request made via the service, since ordering is
+// crucial when registering operations or creating tensors. The `DeviceHandle` queue
+// preserves submission order, so `submit` is sufficient for cheap fire-and-forget ops; we
+// only `submit_blocking` for paths that need to read the service's response.
+impl<C: ProtocolClient> RouterClient for RemoteClient<C> {
     type Device = RemoteDevice;
 
     fn register_op(&self, op: burn_ir::OperationIr) {
-        self.sender
-            .send(ComputeTask::RegisterOperation(Box::new(op)));
+        let stream_id = StreamId::current();
+        // Device ids in the op's payload are *client* remote device ids; rewrite them to
+        // server-local device indices the server can resolve to its own backend devices. Applies
+        // to every op — only ops that actually carry device ids are rewritten.
+        let op = self.resolve_devices(op);
+        self.handle.submit(move |s| s.register_op(stream_id, op));
     }
 
     fn read_tensor_async(
         &self,
         tensor: burn_ir::TensorIr,
     ) -> DynFut<Result<TensorData, ExecutionError>> {
-        // Important for ordering to call the creation of the future sync.
-        let fut = self.sender.send_async(ComputeTask::ReadTensor(tensor));
+        // Issue the request synchronously so ordering is preserved relative to subsequent
+        // submissions; the returned future just awaits the server's response.
+        let stream_id = StreamId::current();
+        let rx = self
+            .handle
+            .submit_blocking(move |s| s.read_tensor(stream_id, tensor))
+            .expect("Service call failed");
 
         Box::pin(async move {
-            match fut.await {
-                Ok(response) => match response {
-                    TaskResponseContent::ReadTensor(res) => res,
-                    _ => panic!("Invalid message type"),
-                },
+            match rx.await {
+                Ok(TaskResponseContent::ReadTensor(res)) => res,
+                Ok(_) => panic!("Invalid response type for ReadTensor"),
                 Err(e) => Err(ExecutionError::Generic {
-                    reason: format!("Failed to read tensor: {:?}", e),
+                    reason: format!("Failed to read tensor: {e:?}"),
                     backtrace: BackTrace::capture(),
                 }),
             }
@@ -78,11 +52,15 @@ impl RunnerClient for RemoteClient {
     }
 
     fn register_tensor_data(&self, data: TensorData) -> RouterTensor<Self> {
-        let id = self.sender.new_tensor_id();
         let shape = data.shape.clone();
         let dtype = data.dtype;
+        let id = service::new_tensor_id();
 
-        self.sender.send(ComputeTask::RegisterTensor(id, data));
+        // Fire-and-forget: the outgoing batch flushes itself once buffered data bytes (or the task
+        // count) cross their threshold — see `OutgoingBatch` — so no explicit flush is needed here.
+        let stream_id = StreamId::current();
+        self.handle
+            .submit(move |s| s.register_tensor(stream_id, id, data));
 
         RouterTensor::new(id, shape, dtype, self.clone())
     }
@@ -92,58 +70,179 @@ impl RunnerClient for RemoteClient {
     }
 
     fn sync(&self) -> Result<(), ExecutionError> {
-        // Important for ordering to call the creation of the future sync.
-        let fut = self.sender.send_async(ComputeTask::SyncBackend);
-
-        match self.runtime.block_on(fut) {
-            Ok(response) => match response {
-                TaskResponseContent::SyncBackend(res) => res,
-                _ => panic!("Invalid message type"),
-            },
-            Err(e) => Err(ExecutionError::Generic {
-                reason: format!("Failed to sync: {:?}", e),
-                backtrace: BackTrace::capture(),
-            }),
-        }
+        let stream_id = StreamId::current();
+        self.handle
+            .submit_blocking(|s| s.sync(stream_id))
+            .expect("Service call failed")
     }
 
     fn seed(&self, seed: u64) {
-        self.sender.send(ComputeTask::Seed(seed));
+        self.handle.submit(move |s| s.seed(seed));
     }
 
     fn create_empty_handle(&self) -> burn_ir::TensorId {
-        self.sender.new_tensor_id()
+        service::new_tensor_id()
+    }
+
+    fn register_alias(&self, new_id: burn_ir::TensorId, src_id: burn_ir::TensorId) {
+        let stream_id = StreamId::current();
+        self.handle
+            .submit(move |s| s.register_alias(stream_id, new_id, src_id));
     }
 
     fn dtype_usage(&self, dtype: burn_std::DType) -> burn_backend::DTypeUsageSet {
-        let fut = self.sender.send_async(ComputeTask::DTypeUsage(dtype));
+        self.handle
+            .submit_blocking(move |s| s.dtype_usage(dtype))
+            .expect("Service call failed")
+    }
 
-        match self.runtime.block_on(fut) {
-            Ok(response) => match response {
-                TaskResponseContent::DTypeUsage(res) => res,
-                other => panic!("Invalid message type {other:?}"),
-            },
-            Err(e) => panic!("Failed to check dtype support: {:?}", e),
+    fn flush(&self) {
+        self.handle.submit_blocking(|s| s.flush()).unwrap();
+    }
+
+    fn register_and_execute_graph(
+        &self,
+        graph_id: burn_ir::GraphId,
+        relative_graph: Vec<burn_ir::OperationIr>,
+        bindings: burn_ir::GraphBindings,
+    ) {
+        let stream_id = StreamId::current();
+        self.handle.submit(move |s| {
+            s.register_and_execute_graph(stream_id, graph_id, relative_graph, bindings)
+        });
+    }
+
+    fn execute_graph(&self, graph_id: burn_ir::GraphId, bindings: burn_ir::GraphBindings) {
+        let stream_id = StreamId::current();
+        self.handle
+            .submit(move |s| s.execute_graph(stream_id, graph_id, bindings));
+    }
+}
+
+impl<C: ProtocolClient> RemoteClient<C> {
+    /// Rewrite the device ids carried by an op so the server can resolve them.
+    ///
+    /// This runs for every op, but only ops that carry device ids (currently the collective ops)
+    /// are affected On the client, the participating devices are identified by their *remote*
+    /// device ids (`type_id = 0`, `index_id = ` the local-registry index that encodes
+    /// `address`+device index). The server can't reverse that registry hash, so we translate each
+    /// id to the plain server-local device index (kept in `index_id`, `type_id` left 0). The
+    /// server then maps each index to its own backend device id before executing — see
+    /// `RemoteServer::resolve_devices`.
+    ///
+    /// Only same-server collectives are supported for now: every participating device must live
+    /// on the same address as the tensor's device. A cross-server group panics with a clear
+    /// message rather than silently reducing the wrong devices.
+    fn resolve_devices(&self, mut op: burn_ir::OperationIr) -> burn_ir::OperationIr {
+        use burn_ir::{DistributedOperationIr, OperationIr};
+
+        if let OperationIr::Distributed(DistributedOperationIr::AllReduce(desc)) = &mut op {
+            let local_address = self.device.address();
+            for id in desc.device_ids.iter_mut() {
+                let (address, device_index) = id_to_endpoint(id.index_id as u32).expect(
+                    "an all_reduce device must be a registered remote device on this process",
+                );
+                assert_eq!(
+                    address, local_address,
+                    "cross-server all_reduce is not supported yet: the tensor is on `{local_address}` \
+                     but the collective includes a device on `{address}`",
+                );
+                id.type_id = 0;
+                id.index_id = device_index as u16;
+            }
+            log::trace!(
+                "All-reduce on {:?} ({local_address}): {desc:?}",
+                self.device
+            );
         }
+
+        op
     }
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
-/// The device contains the connection information of the server.
+/// The device contains the connection information of the server plus the index of the device
+/// to select on it.
+///
+/// Two `RemoteDevice`s that share an `address` but differ in `device_index` point at distinct
+/// devices on the same server; they get distinct registry ids (and thus distinct service
+/// threads/connections), and a transfer between them is detected as same-host.
 pub struct RemoteDevice {
     pub(crate) address: Address,
-    /// The id of the device in the local registry, see [`address_to_id`].
+    /// The index of the device to select on the server (see [`endpoint_to_id`]).
+    pub(crate) device_index: u32,
+    /// The id of the device in the local registry, see [`endpoint_to_id`].
     pub(crate) id: u32,
 }
 
 impl RemoteDevice {
-    /// Create a device from an url.
-    pub fn new(address: &str) -> Self {
-        let id = address_to_id(address);
+    /// Create a device from a url and the index of the device to select on the server.
+    pub fn new(address: &str, device_index: usize) -> Self {
+        let address = Address::from_str(address).expect("Could not parse remote address");
+        let device_index = device_index as u32;
+        // Key the registry on the canonical address so equivalent spellings share one id.
+        let id = endpoint_to_id(address.to_string(), device_index);
         Self {
-            address: Address::from_str(address).unwrap(),
+            address,
+            device_index,
             id,
         }
+    }
+
+    /// Forces the client connection to be established immediately using the default protocol.
+    /// This is a no-op if the connection is already up for this device.
+    pub fn connect(&self) {
+        use burn_communication::Protocol;
+        type DefaultChannel = RemoteChannel<<crate::shared::RemoteProtocol as Protocol>::Client>;
+
+        // `get_client` initializes the (lazy) service if needed; `ensure_connected` then opens
+        // the sockets and runs the handshake on the runner thread, so the settings/device-count
+        // cells are populated by the time we return.
+        get_client::<DefaultChannel>(self).ensure_connected();
+    }
+
+    /// Initializes the client for this device using the specified protocol channel.
+    /// This is a no-op if the client already exists for this address.
+    ///
+    /// Note this only creates the (lazy) service — the actual socket connection and handshake
+    /// open on first use. Use [`connect`](Self::connect) when you need the connection (and the
+    /// device's settings) established right away.
+    pub fn connect_with_channel<R: burn_router::RouterChannel<Device = Self>>(&self) {
+        // `get_client` forces service initialization if the client doesn't exist yet;
+        // `RemoteService::init` records the endpoint but defers the connect to first use.
+        get_client::<R>(self);
+    }
+
+    /// The canonical network address of the server this device lives on.
+    pub fn address(&self) -> String {
+        self.address.to_string()
+    }
+
+    /// The index of this device on its server.
+    pub fn device_index(&self) -> usize {
+        self.device_index as usize
+    }
+
+    /// List every device hosted by the server at `address`, one [`RemoteDevice`] per device
+    /// index the server exposes.
+    ///
+    /// Connecting is required to learn how many devices the server hosts (the count rides on
+    /// the init handshake), so this establishes the connection to the server's default device
+    /// (index 0). The returned devices for the remaining indices connect lazily on first use,
+    /// matching [`Device::enumerate`](burn_backend::tensor::Device)'s behavior for local
+    /// backends.
+    pub fn enumerate(address: &str) -> Vec<Self> {
+        // Device 0 always exists (a server must host at least one device); connecting to it
+        // populates the device-count cell for its registry id.
+        let device = Self::new(address, 0);
+        device.connect();
+
+        let count = service::device_count_for(device.id)
+            .expect("Device count populated by the init handshake during connect");
+
+        (0..count as usize)
+            .map(|index| Self::new(address, index))
+            .collect()
     }
 }
 
@@ -154,7 +253,7 @@ impl Default for RemoteDevice {
             Err(_) => String::from("ws://127.0.0.1:3000"),
         };
 
-        Self::new(&address)
+        Self::new(&address, 0)
     }
 }
 
@@ -163,9 +262,9 @@ impl burn_std::device::Device for RemoteDevice {
         if device_id.type_id != 0 {
             panic!("Invalid device id: {device_id} (expected type 0)");
         }
-        let address = id_to_address(device_id.index_id as u32)
+        let (address, device_index) = id_to_endpoint(device_id.index_id as u32)
             .unwrap_or_else(|| panic!("Invalid device id: {device_id}"));
-        Self::new(&address)
+        Self::new(&address, device_index as usize)
     }
 
     fn to_id(&self) -> DeviceId {
@@ -176,59 +275,138 @@ impl burn_std::device::Device for RemoteDevice {
     }
 }
 
-impl DeviceOps for RemoteDevice {}
+impl DeviceOps for RemoteDevice {
+    fn defaults(&self) -> DeviceSettings {
+        // Lazy-connect on first access. Callers like `Device::configure` or
+        // `Device::default()`-driven dispatch can hit `defaults` before the user has
+        // triggered any op, so we need to establish the session here. `connect` is
+        // idempotent — a no-op once the client has been initialized for this device.
+        if !service::has_settings(self.id) {
+            self.connect();
+        }
+        service::settings_for(self.id)
+    }
+}
 
 pub struct RemoteBridge<C: ProtocolClient> {
     _p: PhantomData<C>,
 }
 
 pub struct RemoteTensorHandle<C: ProtocolClient> {
-    pub(crate) client: RemoteClient,
+    pub(crate) client: RemoteClient<C>,
     pub(crate) tensor: TensorIr,
     pub(crate) _p: PhantomData<C>,
 }
 
 static TRANSFER_COUNTER: Mutex<Option<TensorTransferId>> = Mutex::new(None);
 
+/// Allocate the next globally-unique [`TensorTransferId`] for a same-host / cross-server transfer.
+///
+/// The id keys the server's transfer rendezvous (`local_comm` / `external_comm`), so two
+/// transfers that are ever in flight at the same time MUST get distinct ids — otherwise a `take`
+/// can pick up the wrong (or an overwritten) exposed primitive and its peer hangs forever. The
+/// counter is incremented **in place** in the static; `TensorTransferId` is `Copy`, so the
+/// earlier `transfer_counter.unwrap()` copied the value out and incremented a throwaway local,
+/// leaving every transfer after the first sharing id 1 — harmless sequentially, a deadlock under
+/// concurrency.
 fn get_next_transfer_id() -> TensorTransferId {
     let mut transfer_counter = TRANSFER_COUNTER.lock().unwrap();
-    if transfer_counter.is_none() {
-        *transfer_counter = Some(0.into());
-
-        transfer_counter.unwrap()
-    } else {
-        let mut transfer_counter = transfer_counter.unwrap();
-        transfer_counter.next();
-
-        transfer_counter
+    match transfer_counter.as_mut() {
+        Some(id) => {
+            id.next();
+            *id
+        }
+        None => {
+            let id = TensorTransferId::from(0);
+            *transfer_counter = Some(id);
+            id
+        }
     }
 }
 
 impl<C: ProtocolClient> RemoteTensorHandle<C> {
+    /// Move the tensor to `target_device`, picking the cheapest path.
+    ///
+    /// When the source and target live on the **same** server (same address, different device
+    /// index), the data never leaves the process — see [`change_backend_local`]. Otherwise we
+    /// fall back to the cross-server path that streams the data server-to-server without the
+    /// client ever seeing it.
+    pub(crate) fn change_backend(self, target_device: &RemoteDevice) -> Self {
+        if self.client.device.address == target_device.address {
+            self.change_backend_local(target_device)
+        } else {
+            self.change_backend_remote(target_device)
+        }
+    }
+
+    /// Same-host transfer: hand the device-resident primitive from the source session to the
+    /// target session on the same server, which moves it with the inner backend's `to_device`.
+    /// No host round-trip.
+    fn change_backend_local(mut self, target_device: &RemoteDevice) -> Self {
+        // The stream of the calling user thread: the source reads the tensor back on the
+        // stream that produced it, and the target registers the result on the stream that
+        // will consume it — same contract as the regular op/tensor registration paths.
+        let stream_id = StreamId::current();
+        let transfer_id = get_next_transfer_id();
+        let tensor = self.tensor.clone();
+        self.client.handle.submit(move |s| {
+            s.expose_tensor_local(stream_id, tensor, transfer_id);
+        });
+        // Force the expose (and the ops producing the tensor) onto the wire now — same reason
+        // as the cross-server path below.
+        self.client.handle.flush_queue();
+
+        let target_client = get_client::<RemoteChannel<C>>(target_device);
+        let new_id = service::new_tensor_id();
+        target_client.handle.submit(move |s| {
+            s.register_tensor_local(stream_id, transfer_id, new_id);
+        });
+        target_client.handle.flush_queue();
+
+        self.tensor.id = new_id;
+        self.client = target_client;
+
+        self
+    }
+
     /// Changes the backend of the tensor via a dWebSocket.
     /// We ask the original server to expose the tensor, then ask the target server to fetch
     /// the tensor. The target server will open a new network connection to the original server
     /// to download the data.
     /// This way the client never sees the tensor's data, and we avoid a bottleneck.
-    pub(crate) fn change_backend(mut self, target_device: &RemoteDevice) -> Self {
+    fn change_backend_remote(mut self, target_device: &RemoteDevice) -> Self {
+        // See `change_backend_local`: carry the calling thread's stream so the source readback
+        // and the target registration land on the client streams, not arbitrary server threads.
+        let stream_id = StreamId::current();
         let transfer_id = get_next_transfer_id();
-        self.client.sender.send(ComputeTask::ExposeTensorRemote {
-            tensor: self.tensor.clone(),
-            count: 1,
-            transfer_id,
+        let tensor = self.tensor.clone();
+        self.client.handle.submit(move |s| {
+            s.expose_tensor_remote(stream_id, tensor, 1, transfer_id);
         });
+        // `submit` only enqueues the closure on the device-runner queue; the runner
+        // wouldn't drain it until 32 ops accumulated. `flush_queue` forces the runner
+        // thread to run the closure now, and `expose_tensor_remote` itself flushes the
+        // service batch onto the wire — so the source server receives the expose before
+        // the target server starts trying to download.
+        self.client.handle.flush_queue();
 
         let target_client = get_client::<RemoteChannel<C>>(target_device);
 
-        let new_id = target_client.sender.new_tensor_id();
-
-        let remote_tensor = TensorRemote {
-            transfer_id,
-            address: self.client.device.address.clone(),
-        };
-        target_client
-            .sender
-            .send(ComputeTask::RegisterTensorRemote(remote_tensor, new_id));
+        let address = self.client.device.address.clone();
+        let new_id = service::new_tensor_id();
+        target_client.handle.submit(move |s| {
+            s.register_tensor_remote(
+                stream_id,
+                TensorRemote {
+                    transfer_id,
+                    address,
+                },
+                new_id,
+            );
+        });
+        // Same as the source side: drain the closure queue so it runs now and
+        // `register_tensor_remote` flushes the registration onto the target's wire.
+        target_client.handle.flush_queue();
 
         self.tensor.id = new_id;
         self.client = target_client;
@@ -263,31 +441,5 @@ impl<C: ProtocolClient> MultiBackendBridge for RemoteBridge<C> {
         target_device: &Self::Device,
     ) -> Self::TensorHandle {
         tensor.change_backend(target_device)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_address_to_id() {
-        let address1 = "ws://127.0.0.1:3000";
-        let address2 = "ws://127.0.0.1:3001";
-
-        let id1 = address_to_id(address1);
-        let id2 = address_to_id(address2);
-
-        assert_ne!(id1, id2);
-
-        assert_eq!(address_to_id(address1), id1);
-        assert_eq!(id_to_address(id1), Some(address1.to_string()));
-
-        assert_eq!(address_to_id(address2), id2);
-        assert_eq!(id_to_address(id2), Some(address2.to_string()));
-
-        let unused_id = u32::MAX;
-
-        assert_eq!(id_to_address(unused_id), None);
     }
 }

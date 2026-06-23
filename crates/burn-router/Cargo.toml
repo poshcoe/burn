@@ -20,26 +20,30 @@ workspace = true
 [features]
 default = ["std"]
 std = ["burn-backend/std", "burn-std/std", "burn-ir/std"]
+# Client-side operation fusion / caching for router backends (e.g. the remote backend). Requires
+# std (the fusion engine uses threads).
+fusion = ["std", "dep:burn-fusion", "dep:serde"]
 doc = ["default"]
 tracing = [
     "burn-backend/tracing",
     "burn-ir/tracing",
     "burn-std/tracing",
 ]
-distributed = ["burn-ir/distributed"]
 
 [dependencies]
-burn-ir = { path = "../burn-ir", version = "=0.21.0-pre.3", default-features = false }
-burn-backend = { path = "../burn-backend", version = "=0.21.0-pre.3", default-features = false }
-burn-std = { path = "../burn-std", version = "=0.21.0-pre.3", default-features = false }
+burn-ir = { workspace = true }
+burn-backend = { workspace = true }
+burn-fusion = { workspace = true, optional = true }
+burn-std = { workspace = true }
 hashbrown = { workspace = true }
 spin = { workspace = true }
 log = { workspace = true }
+serde = { workspace = true, optional = true }
 
 [dev-dependencies]
-burn-tensor = { path = "../burn-tensor", version = "=0.21.0-pre.3", default-features = false }
-burn-flex = { path = "../burn-flex", version = "=0.21.0-pre.3" }
-burn-wgpu = { path = "../burn-wgpu", version = "=0.21.0-pre.3", default-features = false, features = [
+burn-tensor = { workspace = true }
+burn-flex = { workspace = true, features = ["default"] }
+burn-wgpu = { workspace = true, features = [
     "std",
 ] }
 

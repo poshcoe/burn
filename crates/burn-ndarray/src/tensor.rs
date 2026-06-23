@@ -1,11 +1,11 @@
 use burn_backend::{
-    AllocationProperty, DType, Element, QTensorPrimitive, Shape, TensorData, TensorMetadata,
+    AllocationProperty, DType, Element, Shape, TensorData, TensorMetadata,
     quantization::{QParams, QuantLevel, QuantMode, QuantScheme, QuantValue},
 };
 use burn_std::BoolStore;
 
-use crate::NdArrayStorage;
 use crate::ops::quantization::{QuantizationStrategy, SymmetricQuantization};
+use crate::{NdArrayDevice, NdArrayStorage};
 use alloc::vec::Vec;
 use ndarray::{ArcArray, ArrayD, IxDyn};
 
@@ -377,6 +377,7 @@ macro_rules! execute_with_int_out_dtype {
 }
 
 impl TensorMetadata for NdArrayTensor {
+    type Device = NdArrayDevice;
     fn dtype(&self) -> DType {
         match self {
             NdArrayTensor::F64(_) => DType::F64,
@@ -407,6 +408,10 @@ impl TensorMetadata for NdArrayTensor {
 
     fn rank(&self) -> usize {
         self.shape().num_dims()
+    }
+
+    fn device(&self) -> NdArrayDevice {
+        NdArrayDevice::Cpu
     }
 }
 
@@ -537,9 +542,14 @@ macro_rules! reshape {
     ) => {{
         let dim = $crate::to_typed_dims!($n, $shape, justdim);
         let array = match $array.is_standard_layout() {
+            // Move the array into the new shape rather than going through
+            // `to_shape`: the latter returns a borrowed view here, which
+            // `into_shared` then clones, copying the buffer on every reshape.
+            // Moving rewrites the dimensions in place, and the buffer stays
+            // shared for copy-on-write like in any other operation.
             true => {
-                match $array.to_shape(dim) {
-                    Ok(val) => val.into_shared(),
+                match $array.into_shape_with_order(dim) {
+                    Ok(val) => val,
                     Err(err) => {
                         core::panic!("Shape should be compatible shape={dim:?}: {err:?}");
                     }
@@ -738,17 +748,8 @@ impl NdArrayQTensor {
     }
 }
 
-impl QTensorPrimitive for NdArrayQTensor {
-    fn scheme(&self) -> &QuantScheme {
-        &self.scheme
-    }
-
-    fn default_scheme() -> QuantScheme {
-        QuantScheme::default().with_store(burn_backend::quantization::QuantStore::Native)
-    }
-}
-
 impl TensorMetadata for NdArrayQTensor {
+    type Device = NdArrayDevice;
     fn dtype(&self) -> DType {
         DType::QFloat(self.scheme)
     }
@@ -759,6 +760,10 @@ impl TensorMetadata for NdArrayQTensor {
 
     fn rank(&self) -> usize {
         self.shape().num_dims()
+    }
+
+    fn device(&self) -> Self::Device {
+        NdArrayDevice::Cpu
     }
 }
 
@@ -833,7 +838,7 @@ mod tests {
 
     #[test]
     fn should_support_qtensor_strategy() {
-        type B = NdArray<f32, i64, i8>;
+        type B = NdArray;
         let scale: f32 = 0.009_019_608;
         let device = Default::default();
 
@@ -846,7 +851,7 @@ mod tests {
         };
         let qtensor: NdArrayQTensor = B::quantize(tensor, &scheme, qparams);
 
-        assert_eq!(qtensor.scheme(), &scheme);
+        assert_eq!(qtensor.scheme(), scheme);
         assert_eq!(
             qtensor.strategy(),
             QuantizationStrategy::PerTensorSymmetric(SymmetricQuantization::init(

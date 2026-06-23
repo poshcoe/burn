@@ -3,29 +3,70 @@ use core::cmp::Ordering;
 use crate::{
     Backend, DType, TensorData,
     element::{ElementConversion, ElementOrdered},
-    tensor::{BasicOps, IntElem, IntTensor},
+    tensor::{Device, IntTensor},
 };
 use alloc::{vec, vec::Vec};
-use burn_std::{IntDType, reader::try_read_sync};
+use burn_std::{Element, IntDType};
 use burn_std::{bf16, f16};
 
 /// Macro used to dispatch sort operations based on dtype.
 macro_rules! sort_dispatch_dtype {
+    // Dispatch both element dtype and index dtype.
+    ($fn:ident, |$index_dtype:ident|, $data:ident, $($args:expr),*) => {{
+        macro_rules! dispatch_index {
+            ($index_ty:ty) => {
+                match $data.dtype {
+                    DType::F64 => $fn::<f64, $index_ty>($data, $($args),*),
+                    DType::F32 | DType::Flex32 => {
+                        $fn::<f32, $index_ty>($data, $($args),*)
+                    }
+                    DType::F16 => $fn::<f16, $index_ty>($data, $($args),*),
+                    DType::BF16 => $fn::<bf16, $index_ty>($data, $($args),*),
+                    DType::I64 => $fn::<i64, $index_ty>($data, $($args),*),
+                    DType::I32 => $fn::<i32, $index_ty>($data, $($args),*),
+                    DType::I16 => $fn::<i16, $index_ty>($data, $($args),*),
+                    DType::I8 => $fn::<i8, $index_ty>($data, $($args),*),
+                    DType::U64 => $fn::<u64, $index_ty>($data, $($args),*),
+                    DType::U32 => $fn::<u32, $index_ty>($data, $($args),*),
+                    DType::U16 => $fn::<u16, $index_ty>($data, $($args),*),
+                    DType::U8 => $fn::<u8, $index_ty>($data, $($args),*),
+                    DType::Bool(_) | DType::QFloat(_) => {
+                        unimplemented!("not supported for sorting operations")
+                    }
+                }
+            };
+        }
+
+        match $index_dtype {
+            IntDType::I64 => dispatch_index!(i64),
+            IntDType::I32 => dispatch_index!(i32),
+            IntDType::I16 => dispatch_index!(i16),
+            IntDType::I8 => dispatch_index!(i8),
+            IntDType::U64 => dispatch_index!(u64),
+            IntDType::U32 => dispatch_index!(u32),
+            IntDType::U16 => dispatch_index!(u16),
+            IntDType::U8 => dispatch_index!(u8),
+        }
+    }};
+
+    // Dispatch only element dtype.
     ($fn:ident, $data:ident, $($args:expr),*) => {
         match $data.dtype {
-            DType::F64 => $fn::<B, f64>($data, $($args),*),
-            DType::F32 | DType::Flex32 => $fn::<B, f32>($data, $($args),*),
-            DType::F16 => $fn::<B, f16>($data, $($args),*),
-            DType::BF16 => $fn::<B, bf16>($data, $($args),*),
-            DType::I64 => $fn::<B, i64>($data, $($args),*),
-            DType::I32 => $fn::<B, i32>($data, $($args),*),
-            DType::I16 => $fn::<B, i16>($data, $($args),*),
-            DType::I8 => $fn::<B, i8>($data, $($args),*),
-            DType::U64 => $fn::<B, u64>($data, $($args),*),
-            DType::U32 => $fn::<B, u32>($data, $($args),*),
-            DType::U16 => $fn::<B, u16>($data, $($args),*),
-            DType::U8 => $fn::<B, u8>($data, $($args),*),
-            DType::Bool(_) | DType::QFloat(_) => unimplemented!("not supported for sorting operations"),
+            DType::F64 => $fn::<f64>($data, $($args),*),
+            DType::F32 | DType::Flex32 => $fn::<f32>($data, $($args),*),
+            DType::F16 => $fn::<f16>($data, $($args),*),
+            DType::BF16 => $fn::<bf16>($data, $($args),*),
+            DType::I64 => $fn::<i64>($data, $($args),*),
+            DType::I32 => $fn::<i32>($data, $($args),*),
+            DType::I16 => $fn::<i16>($data, $($args),*),
+            DType::I8 => $fn::<i8>($data, $($args),*),
+            DType::U64 => $fn::<u64>($data, $($args),*),
+            DType::U32 => $fn::<u32>($data, $($args),*),
+            DType::U16 => $fn::<u16>($data, $($args),*),
+            DType::U8 => $fn::<u8>($data, $($args),*),
+            DType::Bool(_) | DType::QFloat(_) => {
+                unimplemented!("not supported for sorting operations")
+            }
         }
     };
 }
@@ -50,23 +91,26 @@ macro_rules! sort_dispatch_dtype {
 /// Ideally, it is supposed to be implemented by the backend and the backend implementation will be resolved
 /// by static dispatch. It is not designed for direct usage by users, and not recommended to import
 /// or use this function directly.
-pub fn sort<B: Backend, K: BasicOps<B>>(
-    tensor: K::Primitive,
+pub fn sort<B, T, ID, FD>(
+    tensor: T,
     dim: usize,
     descending: bool,
-) -> K::Primitive {
-    let device = K::device(&tensor);
-    let msg = "Failed to synchronously read tensor data. This operation is not supported until this backend has a GPU sorting implementation.";
-    let data = try_read_sync(K::into_data_async(tensor))
-        .expect(msg)
-        .expect(msg);
-
+    device: Device<B>,
+    into_data: ID,
+    from_data: FD,
+) -> T
+where
+    B: Backend,
+    ID: Fn(T) -> TensorData,
+    FD: Fn(TensorData, &Device<B>, DType) -> T,
+{
+    let data = into_data(tensor);
     let dtype = data.dtype;
     let data = sort_dispatch_dtype!(sort_data, data, dim, descending);
-    K::from_data(data, &device, dtype)
+    from_data(data, &device, dtype)
 }
 
-pub fn sort_data<B: Backend, E: ElementOrdered>(
+pub fn sort_data<E: ElementOrdered>(
     mut data: TensorData,
     dim: usize,
     descending: bool,
@@ -77,7 +121,7 @@ pub fn sort_data<B: Backend, E: ElementOrdered>(
         // 1D sort
         data_slice.sort_unstable_by(|&a, &b| compare(&a, &b, descending));
     } else {
-        sort_slice::<B, E>(data_slice, &dims, dim, None, false, descending);
+        sort_slice::<E, i64>(data_slice, &dims, dim, None, false, descending);
     }
 
     data
@@ -105,34 +149,38 @@ pub fn sort_data<B: Backend, E: ElementOrdered>(
 /// Ideally, it is supposed to be implemented by the backend and the backend implementation will be resolved
 /// by static dispatch. It is not designed for direct usage by users, and not recommended to import
 /// or use this function directly.
-pub fn sort_with_indices<B: Backend, K: BasicOps<B>>(
-    tensor: K::Primitive,
+pub fn sort_with_indices<B, T, ID, FD>(
+    tensor: T,
     dim: usize,
     descending: bool,
     indices_dtype: IntDType,
-) -> (K::Primitive, IntTensor<B>) {
-    let device = K::device(&tensor);
-    let msg = "Failed to synchronously read tensor data. This operation is not supported until this backend has a GPU sorting implementation.";
-    let data = try_read_sync(K::into_data_async(tensor))
-        .expect(msg)
-        .expect(msg);
-
+    device: Device<B>,
+    into_data: ID,
+    from_data: FD,
+) -> (T, IntTensor<B>)
+where
+    B: Backend,
+    ID: Fn(T) -> TensorData,
+    FD: Fn(TensorData, &Device<B>, DType) -> T,
+{
+    let data = into_data(tensor);
     let dtype = data.dtype;
-    let (values, indices) = sort_dispatch_dtype!(sort_data_with_indices, data, dim, descending);
+    let (values, indices) =
+        sort_dispatch_dtype!(sort_data_with_indices, |indices_dtype|, data, dim, descending);
 
     (
-        K::from_data(values, &device, dtype),
+        from_data(values, &device, dtype),
         B::int_from_data(indices.convert_dtype(indices_dtype.into()), &device),
     )
 }
 
-fn sort_data_with_indices<B: Backend, E: ElementOrdered>(
+fn sort_data_with_indices<E: ElementOrdered, I: Element>(
     mut data: TensorData,
     dim: usize,
     descending: bool,
 ) -> (TensorData, TensorData) {
     let dims = data.shape.clone();
-    let mut indices_data = dim_indices::<B>(&dims, dim);
+    let mut indices_data = dim_indices::<I>(&dims, dim);
     let data_slice = data.as_mut_slice().unwrap();
     if dims.len() == 1 {
         // 1D sort
@@ -168,7 +216,7 @@ fn sort_data_with_indices<B: Backend, E: ElementOrdered>(
             }
         }
     } else {
-        sort_slice::<B, E>(
+        sort_slice::<E, I>(
             data_slice,
             &dims,
             dim,
@@ -202,29 +250,31 @@ fn sort_data_with_indices<B: Backend, E: ElementOrdered>(
 /// Ideally, it is supposed to be implemented by the backend and the backend implementation will be resolved
 /// by static dispatch. It is not designed for direct usage by users, and not recommended to import
 /// or use this function directly.
-pub fn argsort<B: Backend, K: BasicOps<B>>(
-    tensor: K::Primitive,
+pub fn argsort<B, T, ID>(
+    tensor: T,
     dim: usize,
     descending: bool,
     out_dtype: IntDType,
-) -> IntTensor<B> {
-    let device = K::device(&tensor);
-    let msg = "Failed to synchronously read tensor data. This operation is not supported until this backend has a GPU sorting implementation.";
-    let data = try_read_sync(K::into_data_async(tensor))
-        .expect(msg)
-        .expect(msg);
+    device: Device<B>,
+    into_data: ID,
+) -> IntTensor<B>
+where
+    B: Backend,
+    ID: Fn(T) -> TensorData,
+{
+    let data = into_data(tensor);
+    let data = sort_dispatch_dtype!(argsort_data, |out_dtype|, data, dim, descending);
 
-    let data = sort_dispatch_dtype!(argsort_data, data, dim, descending);
-    B::int_from_data(data.convert_dtype(out_dtype.into()), &device)
+    B::int_from_data(data, &device)
 }
 
-fn argsort_data<B: Backend, E: ElementOrdered>(
+fn argsort_data<E: ElementOrdered, I: Element>(
     mut data: TensorData,
     dim: usize,
     descending: bool,
 ) -> TensorData {
     let dims = data.shape.clone();
-    let mut indices_data = dim_indices::<B>(&dims, dim);
+    let mut indices_data = dim_indices::<I>(&dims, dim);
     if dims.len() == 1 {
         // 1D sort
         let slice = data.as_slice::<E>().unwrap();
@@ -236,7 +286,7 @@ fn argsort_data<B: Backend, E: ElementOrdered>(
             )
         });
     } else {
-        sort_slice::<B, E>(
+        sort_slice::<E, I>(
             data.as_mut_slice().unwrap(),
             &dims,
             dim,
@@ -256,11 +306,11 @@ fn argsort_data<B: Backend, E: ElementOrdered>(
 /// and if `permute_both` is enabled then the data is also sorted.
 ///
 /// This sort is unstable (i.e., may reorder equal elements).
-fn sort_slice<B: Backend, E: ElementOrdered>(
+fn sort_slice<E: ElementOrdered, I: Element>(
     data: &mut [E],
     dims: &[usize],
     dim: usize,
-    mut indices: Option<&mut [IntElem<B>]>,
+    mut indices: Option<&mut [I]>,
     permute_both: bool,
     descending: bool,
 ) {
@@ -360,17 +410,17 @@ fn compute_strides(dims: &[usize]) -> Vec<usize> {
 }
 
 /// Generates the indices for each element along the specified dimension.
-fn dim_indices<B: Backend>(dims: &[usize], dim: usize) -> Vec<IntElem<B>> {
+fn dim_indices<I: Element>(dims: &[usize], dim: usize) -> Vec<I> {
     if dims.len() == 1 {
         (0..dims[dim])
-            .map(|i| (i as i64).elem::<IntElem<B>>())
+            .map(|i| (i as i64).elem::<I>())
             .collect::<Vec<_>>()
     } else {
         // Dimension indices tensor
         let numel_leading_dims: usize = dims[..dim].iter().product();
         let numel_trailing_dims: usize = dims[dim + 1..].iter().product();
         (0..dims[dim])
-            .map(|i| [(i as i64).elem::<IntElem<B>>()].repeat(numel_trailing_dims))
+            .map(|i| [(i as i64).elem::<I>()].repeat(numel_trailing_dims))
             .collect::<Vec<_>>()
             .concat()
             .repeat(numel_leading_dims)

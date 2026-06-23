@@ -17,22 +17,24 @@ workspace = true
 [features]
 default = ["std"]
 doc = ["default"]
-distributed = ["std", "oneshot"]
-std = ["rand/std", "num-traits/std", "burn-std/std", "cubecl?/std"]
+std = ["rand/std", "num-traits/std", "burn-std/std", "cubecl?/std", "dep:oneshot"]
 
 tracing = ["burn-std/tracing", "cubecl/tracing"]
 
 # For DTypeUsage de/serialization
 serde = ["enumset/serde"]
 
-cubecl = ["dep:cubecl", "burn-std/cubecl"]
+cubecl = ["dep:cubecl"]
 cubecl-cuda = ["cubecl", "cubecl/cuda"]
 cubecl-hip = ["cubecl", "cubecl/hip"]
 cubecl-wgpu = ["cubecl", "cubecl/wgpu"]
+cubecl-metal = ["cubecl", "cubecl/metal"]
+cubecl-vulkan = ["cubecl", "cubecl/vulkan"]
+cubecl-webgpu = ["cubecl", "cubecl/webgpu"]
 cubecl-cpu = ["cubecl", "cubecl/cpu"]
 
 [dependencies]
-burn-std = { path = "../burn-std", version = "=0.21.0-pre.3", default-features = false }
+burn-std = { workspace = true }
 cubecl = { workspace = true, optional = true, default-features = false }
 
 bytemuck = { workspace = true, features = ["extern_crate_alloc"] }
@@ -43,7 +45,6 @@ num-traits = { workspace = true }
 rand = { workspace = true, default-features = false }
 rand_distr = { workspace = true }
 serde = { workspace = true }
-thiserror = { workspace = true }
 oneshot = { version = "0.2.1", optional = true }
 spin = { workspace = true }
 
@@ -53,5 +54,5 @@ portable-atomic-util = { workspace = true }
 [dev-dependencies]
 rand = { workspace = true, features = ["thread_rng"] }
 paste = { workspace = true }
-serde_json = { workspace = true, features = ["alloc"]}
+serde_json = { workspace = true, features = ["alloc"] }
 serial_test = { workspace = true }

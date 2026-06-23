@@ -1,23 +1,26 @@
-use burn_core::tensor::Device;
 use burn_rl::{Policy, PolicyLearner, PolicyState};
 
 use crate::RLAgentRecord;
 use crate::{
     RLComponentsTypes, RLPolicyRecord,
     checkpoint::Checkpointer,
-    checkpoint::{AsyncCheckpointer, CheckpointingAction, CheckpointingStrategy},
+    checkpoint::{AsyncCheckpointer, Checkpoint, CheckpointingAction, CheckpointingStrategy},
     metric::store::EventStoreClient,
 };
 
 #[derive(new)]
 /// Used to create, delete, or load checkpoints of the training process.
 pub struct RLCheckpointer<RLC: RLComponentsTypes> {
-    policy: AsyncCheckpointer<RLPolicyRecord<RLC>, RLC::Backend>,
-    learning_agent: AsyncCheckpointer<RLAgentRecord<RLC>, RLC::Backend>,
+    policy: AsyncCheckpointer<RLPolicyRecord<RLC>>,
+    learning_agent: AsyncCheckpointer<RLAgentRecord<RLC>>,
     strategy: Box<dyn CheckpointingStrategy>,
 }
 
-impl<RLC: RLComponentsTypes> RLCheckpointer<RLC> {
+impl<RLC: RLComponentsTypes> RLCheckpointer<RLC>
+where
+    RLPolicyRecord<RLC>: Checkpoint,
+    RLAgentRecord<RLC>: Checkpoint,
+{
     /// Create checkpoint for the training process.
     pub fn checkpoint(
         &mut self,
@@ -54,18 +57,17 @@ impl<RLC: RLComponentsTypes> RLCheckpointer<RLC> {
     pub fn load_checkpoint(
         &self,
         learning_agent: RLC::LearningAgent,
-        device: &Device<RLC::Backend>,
         epoch: usize,
     ) -> RLC::LearningAgent {
         let record = self
             .policy
-            .restore(epoch, device)
+            .restore(epoch)
             .expect("Can load model checkpoint.");
         let policy = learning_agent.policy().load_record(record);
 
         let record = self
             .learning_agent
-            .restore(epoch, device)
+            .restore(epoch)
             .expect("Can load learning agent checkpoint.");
         let mut learning_agent = learning_agent.load_record(record);
         learning_agent.update_policy(policy);

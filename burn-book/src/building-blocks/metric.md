@@ -11,6 +11,7 @@ throughout the training process. We currently offer a restricted range of metric
 | Recall              | Calculate recall in percentage                                                              |
 | FBetaScore          | Calculate F<sub>β </sub>score in percentage                                                 |
 | AUROC               | Calculate the area under curve of ROC in percentage                                         |
+| AUC-PR              | Calculate the area under the precision-recall curve (average precision) in percentage       |
 | Loss                | Output the loss used for the backward pass                                                  |
 | CharErrorRate (CER) | Calculate Character Error Rate in percentage                                                |
 | WordErrorRate (WER) | Calculate Word Error Rate in percentage                                                     |
@@ -25,6 +26,7 @@ throughout the training process. We currently offer a restricted range of metric
 
 | Vision Metric | Description                                                                                          |
 | ------------- | ---------------------------------------------------------------------------------------------------- |
+| A-FINE        | Computes the Adaptive Fidelity-Naturalness Evaluator (A-FINE) full-reference perceptual quality metric built on CLIP ViT-B/32 features |
 | Dice          | Computes the Dice-Sorenson coefficient (DSC) for evaluating overlap between binary masks             |
 | DISTS         | Computes the Deep Image Structure and Texture Similarity (DISTS) metric for image quality assessment |
 | FID           | Computes the Frechet Inception Distance (FID) for evaluating generative model quality                |
@@ -46,11 +48,11 @@ adaptor code yourself.
 - `ClassificationOutput<B>`:
     - Use case: Single-label classification
     - Fields: `loss: Tensor<B, 1>`, `output: Tensor<B, 2>`, `targets: Tensor<B, 1, Int>`
-    - Adapted metrics: Accuracy, TopKAccuracy, Perplexity, Precision\*, Recall\*, FBetaScore\*, AUROC\*, Loss
+    - Adapted metrics: Accuracy, TopKAccuracy, Perplexity, Precision\*, Recall\*, FBetaScore\*, AUROC\*, AUC-PR\*, Loss
 - `MultiLabelClassificationOutput<B>`:
     - Use case: Multi-label classification
     - Fields: `loss: Tensor<B, 1>`, `output: Tensor<B, 2>`, `targets: Tensor<B, 2, Int>`
-    - Adapted metrics: HammingScore, Precision\*, Recall\*, FBetaScore\*, Loss
+    - Adapted metrics: HammingScore, Precision\*, Recall\*, FBetaScore\*, AUROC\*, AUC-PR\*, Loss
 - `RegressionOutput<B>`:
     - Use case: Regression tasks
     - Fields: `loss: Tensor<B, 1>`, `output: Tensor<B, 2>`, `targets: Tensor<B, 2>`
@@ -60,7 +62,7 @@ adaptor code yourself.
     - Fields: `loss: Tensor<B, 1>`, `logits: Tensor<B, 3>`, `predictions: Option<Tensor<B, 2, Int>>`, `targets: Tensor<B, 2, Int>`
     - Adapted metrics: Accuracy, TopKAccuracy, Perplexity, CER, WER, Loss
 
-\* Precision, Recall, and FBetaScore all use `ConfusionStatsInput` as its input type so these three 
+\* Precision, Recall, FBetaScore, AUROC, and AUC-PR all use `ConfusionStatsInput` as their input type so these 
 metrics are automatically (implicitly) adapted since `ConfusionStatsInput` is adapted.
 
 If your metric isn't already adapted for the appropriate output struct, you can implement `Adaptor` yourself. 

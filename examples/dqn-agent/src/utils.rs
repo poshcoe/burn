@@ -1,11 +1,7 @@
-use std::marker::PhantomData;
-
 use burn::{
     Tensor,
     module::{Param, ParamId},
     nn::{self, Linear},
-    prelude::Backend,
-    record::Record,
     rl::{Policy, PolicyState},
     tensor::Device,
     train::{
@@ -18,13 +14,13 @@ use rand::{random, random_range};
 
 use crate::agent::{DiscreteActionTensor, DiscreteLogitsTensor};
 
-pub fn create_lin_layers<B: Backend>(
+pub fn create_lin_layers(
     num_layers: usize,
     d_input: usize,
     d_hidden: usize,
     d_output: usize,
-    device: &Device<B>,
-) -> Vec<Linear<B>> {
+    device: &Device,
+) -> Vec<Linear> {
     let mut linears = Vec::with_capacity(num_layers);
 
     if num_layers == 1 {
@@ -43,21 +39,21 @@ pub fn create_lin_layers<B: Backend>(
     linears
 }
 
-pub fn soft_update_linear<B: Backend>(this: Linear<B>, that: &Linear<B>, tau: f64) -> Linear<B> {
+pub fn soft_update_linear(this: Linear, that: &Linear, tau: f64) -> Linear {
     let weight = soft_update_tensor(&this.weight, &that.weight, tau);
     let bias = match (&this.bias, &that.bias) {
         (Some(this_bias), Some(that_bias)) => Some(soft_update_tensor(this_bias, that_bias, tau)),
         _ => None,
     };
 
-    Linear::<B> { weight, bias }
+    Linear { weight, bias }
 }
 
-fn soft_update_tensor<const N: usize, B: Backend>(
-    this: &Param<Tensor<B, N>>,
-    that: &Param<Tensor<B, N>>,
+fn soft_update_tensor<const N: usize>(
+    this: &Param<Tensor<N>>,
+    that: &Param<Tensor<N>>,
     tau: f64,
-) -> Param<Tensor<B, N>> {
+) -> Param<Tensor<N>> {
     let that_weight = that.val();
     let this_weight = this.val();
     let new_weight = this_weight * (1.0 - tau) + that_weight * tau;
@@ -71,9 +67,7 @@ pub struct EpsilonGreedyPolicyOutput {
 }
 
 impl ItemLazy for EpsilonGreedyPolicyOutput {
-    type ItemSync = EpsilonGreedyPolicyOutput;
-
-    fn sync(self) -> Self::ItemSync {
+    fn sync(self) -> Self {
         self
     }
 }
@@ -84,48 +78,39 @@ impl Adaptor<ExplorationRateInput> for EpsilonGreedyPolicyOutput {
     }
 }
 
-#[derive(Record)]
-pub struct EpsilonGreedyPolicyRecord<B: Backend, P: Policy<B>> {
-    pub inner_state: <P::PolicyState as PolicyState<B>>::Record,
-    pub step: usize,
-}
-
 #[derive(Clone, new)]
-pub struct EpsilonGreedyPolicyState<B: Backend, P: Policy<B>> {
+pub struct EpsilonGreedyPolicyState<P: Policy> {
     pub inner_state: P::PolicyState,
     pub step: usize,
 }
 
-impl<B: Backend, P: Policy<B>> PolicyState<B> for EpsilonGreedyPolicyState<B, P> {
-    type Record = EpsilonGreedyPolicyRecord<B, P>;
+impl<P: Policy> PolicyState for EpsilonGreedyPolicyState<P> {
+    // Only the inner policy's parameters are persisted; the exploration `step` counter resets on
+    // load (it is part of the exploration schedule, not the learned parameters).
+    type Record = <P::PolicyState as PolicyState>::Record;
 
     fn into_record(self) -> Self::Record {
-        EpsilonGreedyPolicyRecord {
-            inner_state: self.inner_state.into_record(),
-            step: self.step,
-        }
+        self.inner_state.into_record()
     }
 
     fn load_record(&self, record: Self::Record) -> Self {
-        let inner_state = self.inner_state.load_record(record.inner_state);
         Self {
-            inner_state,
-            step: record.step,
+            inner_state: self.inner_state.load_record(record),
+            step: self.step,
         }
     }
 }
 
 #[derive(Clone, Debug)]
-pub struct EpsilonGreedyPolicy<B: Backend, P: Policy<B>> {
+pub struct EpsilonGreedyPolicy<P: Policy> {
     inner_policy: P,
     eps_start: f64,
     eps_end: f64,
     eps_decay: f64,
     step: usize,
-    _backend: PhantomData<B>,
 }
 
-impl<B: Backend, P: Policy<B>> EpsilonGreedyPolicy<B, P> {
+impl<P: Policy> EpsilonGreedyPolicy<P> {
     pub fn new(inner_policy: P, eps_start: f64, eps_end: f64, eps_decay: f64) -> Self {
         Self {
             inner_policy,
@@ -133,8 +118,15 @@ impl<B: Backend, P: Policy<B>> EpsilonGreedyPolicy<B, P> {
             eps_end,
             eps_decay,
             step: 0,
-            _backend: PhantomData,
         }
+    }
+
+    pub fn inner_policy(&self) -> P {
+        self.inner_policy.clone()
+    }
+
+    pub fn set_inner_policy(&mut self, policy: P) {
+        self.inner_policy = policy;
     }
 
     fn get_threshold(&self) -> f64 {
@@ -149,21 +141,16 @@ impl<B: Backend, P: Policy<B>> EpsilonGreedyPolicy<B, P> {
     }
 }
 
-impl<B, P> Policy<B> for EpsilonGreedyPolicy<B, P>
+impl<P> Policy for EpsilonGreedyPolicy<P>
 where
-    B: Backend,
-    P: Policy<
-            B,
-            ActionDistribution = DiscreteLogitsTensor<B, 2>,
-            Action = DiscreteActionTensor<B, 2>,
-        >,
+    P: Policy<ActionDistribution = DiscreteLogitsTensor<2>, Action = DiscreteActionTensor<2>>,
 {
     type ActionContext = EpsilonGreedyPolicyOutput;
-    type PolicyState = EpsilonGreedyPolicyState<B, P>;
+    type PolicyState = EpsilonGreedyPolicyState<P>;
 
     type Observation = P::Observation;
-    type ActionDistribution = DiscreteLogitsTensor<B, 2>;
-    type Action = DiscreteActionTensor<B, 2>;
+    type ActionDistribution = DiscreteLogitsTensor<2>;
+    type Action = DiscreteActionTensor<2>;
 
     fn forward(&mut self, states: Self::Observation) -> Self::ActionDistribution {
         self.inner_policy.forward(states)
@@ -185,11 +172,10 @@ where
             let threshold = if deterministic { 0.0 } else { threshold };
             contexts.push(EpsilonGreedyPolicyOutput { epsilon: threshold });
             if random::<f64>() > threshold {
-                actions.push(a.clone().float());
+                actions.push(a.clone().float().inner());
             } else {
-                actions.push(
-                    Tensor::<B, 1>::from_floats([random_range(0..2)], &a.device()).unsqueeze(),
-                );
+                actions
+                    .push(Tensor::<1>::from_floats([random_range(0..2)], &a.device()).unsqueeze());
             }
         }
 
@@ -209,7 +195,14 @@ where
         }
     }
 
-    fn load_record(self, record: <Self::PolicyState as PolicyState<B>>::Record) -> Self {
+    fn to_device(self, device: &Device) -> Self {
+        let mut policy = self.clone();
+        let inner = policy.inner_policy().to_device(device);
+        policy.set_inner_policy(inner);
+        policy
+    }
+
+    fn load_record(self, record: <Self::PolicyState as PolicyState>::Record) -> Self {
         let state = self.state().load_record(record);
         let inner_policy = self
             .inner_policy
@@ -220,7 +213,6 @@ where
             eps_end: self.eps_end,
             eps_decay: self.eps_decay,
             step: state.step,
-            _backend: PhantomData,
         }
     }
 }

@@ -1,8 +1,9 @@
-use alloc::boxed::Box;
-
-use burn_backend::{DeviceId, DeviceOps};
+use burn_backend::{DeviceId, DeviceOps, DeviceSettings};
 
 use crate::backends::*;
+
+#[cfg(feature = "autodiff")]
+use alloc::boxed::Box;
 
 /// Represents a device for the [`Dispatch`](crate::Dispatch).
 ///
@@ -30,7 +31,7 @@ pub enum DispatchDevice {
     Cuda(CudaDevice),
 
     /// The [Metal backend](Metal) device (via WGPU runtime).
-    #[cfg(wgpu_metal)]
+    #[cfg(feature = "metal")]
     Metal(WgpuDevice),
 
     /// The [ROCm backend](Rocm) device.
@@ -38,15 +39,19 @@ pub enum DispatchDevice {
     Rocm(RocmDevice),
 
     /// The [Vulkan backend](Vulkan) device.
-    #[cfg(wgpu_vulkan)]
+    #[cfg(feature = "vulkan")]
     Vulkan(WgpuDevice),
 
-    /// The [WebGPU backend](Wgpu) device (via WGPU runtime).
-    #[cfg(wgpu_webgpu)]
+    /// The [Wgpu backend](Wgpu) device (via WGPU runtime with auto-selected compiler).
+    #[cfg(feature = "wgpu")]
     Wgpu(WgpuDevice),
 
+    /// The [WebGPU backend](WebGpu) device (via WGPU runtime).
+    #[cfg(feature = "webgpu")]
+    WebGpu(WgpuDevice),
+
     /// The [Flex backend](Flex) device (CPU-only).
-    #[cfg(feature = "flex")]
+    #[cfg(any(feature = "flex", default_backend))]
     Flex(FlexDevice),
 
     /// The [NdArray backend](NdArray) device (CPU-only).
@@ -56,6 +61,10 @@ pub enum DispatchDevice {
     /// The [LibTorch backend](LibTorch) device.
     #[cfg(feature = "tch")]
     LibTorch(LibTorchDevice),
+
+    /// The [remote backend](Remote) device, identified by a network address.
+    #[cfg(feature = "remote")]
+    Remote(RemoteDevice),
 
     /// The [autodiff enabled backend](Autodiff) device.
     #[cfg(feature = "autodiff")]
@@ -81,6 +90,11 @@ impl AutodiffDevice {
             checkpointing,
         }
     }
+
+    /// Returns the underlying device, removing the autodiff capability.
+    pub fn inner(self) -> DispatchDevice {
+        *self.inner
+    }
 }
 
 #[cfg(feature = "autodiff")]
@@ -93,7 +107,6 @@ impl core::ops::Deref for AutodiffDevice {
     }
 }
 
-#[cfg(feature = "autodiff")]
 #[allow(missing_docs)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 /// Checkpointing strategy for autodiff.
@@ -106,14 +119,24 @@ pub enum CheckpointingStrategy {
 
 #[cfg(feature = "autodiff")]
 pub(crate) fn validate_checkpointing(
-    lhs: crate::CheckpointingStrategy,
-    rhs: crate::CheckpointingStrategy,
-) -> crate::CheckpointingStrategy {
-    assert_eq!(
-        lhs, rhs,
-        "Autodiff strategy mismatch: {lhs:?} vs {rhs:?}. Tensors in the same operation must share a strategy."
-    );
-    lhs
+    lhs: Option<crate::CheckpointingStrategy>,
+    rhs: Option<crate::CheckpointingStrategy>,
+) -> Option<crate::CheckpointingStrategy> {
+    match (lhs, rhs) {
+        (Some(lhs), Some(rhs)) => {
+            assert_eq!(
+                lhs, rhs,
+                "Autodiff strategy mismatch: {lhs:?} vs {rhs:?}. Tensors in the same operation must share a strategy."
+            );
+            Some(lhs)
+        }
+        (None, None) => None,
+        // When tensors are created on non-autodiff device there is no checkpointing, but
+        // tensor created with autodiff which moved out (`tensor.inner()`) will still carry the state.
+        // In such cases, we can "promote" the checkpointing.
+        (None, rhs) => rhs,
+        (lhs, None) => lhs,
+    }
 }
 
 impl core::fmt::Debug for DispatchDevice {
@@ -123,20 +146,24 @@ impl core::fmt::Debug for DispatchDevice {
             Self::Cpu(device) => f.debug_tuple("Cpu").field(device).finish(),
             #[cfg(feature = "cuda")]
             Self::Cuda(device) => f.debug_tuple("Cuda").field(device).finish(),
-            #[cfg(wgpu_metal)]
+            #[cfg(feature = "metal")]
             Self::Metal(device) => f.debug_tuple("Metal").field(device).finish(),
             #[cfg(feature = "rocm")]
             Self::Rocm(device) => f.debug_tuple("Rocm").field(device).finish(),
-            #[cfg(wgpu_vulkan)]
+            #[cfg(feature = "vulkan")]
             Self::Vulkan(device) => f.debug_tuple("Vulkan").field(device).finish(),
-            #[cfg(wgpu_webgpu)]
+            #[cfg(feature = "wgpu")]
             Self::Wgpu(device) => f.debug_tuple("Wgpu").field(device).finish(),
-            #[cfg(feature = "flex")]
+            #[cfg(feature = "webgpu")]
+            Self::WebGpu(device) => f.debug_tuple("WebGpu").field(device).finish(),
+            #[cfg(any(feature = "flex", default_backend))]
             Self::Flex(device) => f.debug_tuple("Flex").field(device).finish(),
             #[cfg(feature = "ndarray")]
             Self::NdArray(device) => f.debug_tuple("NdArray").field(device).finish(),
             #[cfg(feature = "tch")]
             Self::LibTorch(device) => f.debug_tuple("LibTorch").field(device).finish(),
+            #[cfg(feature = "remote")]
+            Self::Remote(device) => f.debug_tuple("Remote").field(device).finish(),
             #[cfg(feature = "autodiff")]
             // Format without `AutodiffDevice` wrapper
             Self::Autodiff(device) => f.debug_tuple("Autodiff").field(&device.inner).finish(),
@@ -148,20 +175,109 @@ impl Default for DispatchDevice {
     #[allow(unreachable_code)]
     fn default() -> Self {
         // TODO: which priority?
+        // Single override e.g. `BURN_DEVICE=vulkan` forces Vulkan or panics if not available.
+        // Priority list e.g. `BURN_DEVICE_PRIORITY=cuda,vulkan,cpu` sets the order.
+        // Both could be tied into `burn.toml` config
+        // For now we just use `BURN_DEVICE` on CI to force a single device
+
+        #[cfg(feature = "std")]
+        {
+            if let Ok(device_str) = std::env::var("BURN_DEVICE") {
+                match device_str.to_lowercase().as_str() {
+                    "cuda" => {
+                        #[cfg(feature = "cuda")]
+                        return Self::Cuda(CudaDevice::default());
+                        panic!(
+                            "BURN_DEVICE=cuda requested, but the 'cuda' feature is not enabled."
+                        );
+                    }
+                    "metal" => {
+                        #[cfg(feature = "metal")]
+                        return Self::Metal(burn_wgpu::WgpuDevice::default());
+                        panic!(
+                            "BURN_DEVICE=metal requested, but the 'metal' feature is not enabled."
+                        );
+                    }
+                    "rocm" => {
+                        #[cfg(feature = "rocm")]
+                        return Self::Rocm(RocmDevice::default());
+                        panic!(
+                            "BURN_DEVICE=rocm requested, but the 'rocm' feature is not enabled."
+                        );
+                    }
+                    "vulkan" => {
+                        #[cfg(feature = "vulkan")]
+                        return Self::Vulkan(burn_wgpu::WgpuDevice::default());
+                        panic!(
+                            "BURN_DEVICE=vulkan requested, but the 'vulkan' feature is not enabled."
+                        );
+                    }
+                    "webgpu" => {
+                        #[cfg(feature = "webgpu")]
+                        return Self::WebGpu(burn_wgpu::WgpuDevice::default());
+                        panic!(
+                            "BURN_DEVICE=webgpu requested, but the 'webgpu' feature is not enabled."
+                        );
+                    }
+                    "wgpu" => {
+                        #[cfg(feature = "wgpu")]
+                        return Self::Wgpu(burn_wgpu::WgpuDevice::default());
+                        panic!(
+                            "BURN_DEVICE=wgpu requested, but the 'wgpu' feature is not enabled."
+                        );
+                    }
+                    "cpu" => {
+                        #[cfg(feature = "cpu")]
+                        return Self::Cpu(CpuDevice);
+                        panic!("BURN_DEVICE=cpu requested, but the 'cpu' feature is not enabled.");
+                    }
+                    "tch" => {
+                        #[cfg(feature = "tch")]
+                        return Self::LibTorch(LibTorchDevice::default());
+                        panic!("BURN_DEVICE=tch requested, but the 'tch' feature is not enabled.");
+                    }
+                    "remote" => {
+                        #[cfg(feature = "remote")]
+                        return Self::Remote(RemoteDevice::default());
+                        panic!(
+                            "BURN_DEVICE=remote requested, but the 'remote' feature is not enabled."
+                        );
+                    }
+                    "flex" => {
+                        #[cfg(any(feature = "flex", default_backend))]
+                        return Self::Flex(FlexDevice);
+                        panic!(
+                            "BURN_DEVICE=flex requested, but the 'flex' feature is not enabled."
+                        );
+                    }
+                    "ndarray" => {
+                        #[cfg(feature = "ndarray")]
+                        return Self::NdArray(NdArrayDevice::default());
+                        panic!(
+                            "BURN_DEVICE=ndarray requested, but the 'ndarray' feature is not enabled."
+                        );
+                    }
+                    _ => panic!("Unknown BURN_DEVICE override: '{}'.", device_str),
+                }
+            }
+        }
 
         #[cfg(feature = "cuda")]
         return Self::Cuda(CudaDevice::default());
 
-        #[cfg(wgpu_metal)]
+        #[cfg(feature = "metal")]
         return Self::Metal(burn_wgpu::WgpuDevice::default());
 
         #[cfg(feature = "rocm")]
         return Self::Rocm(RocmDevice::default());
 
-        #[cfg(wgpu_vulkan)]
+        #[cfg(feature = "vulkan")]
         return Self::Vulkan(burn_wgpu::WgpuDevice::default());
 
-        #[cfg(wgpu_webgpu)]
+        #[cfg(feature = "webgpu")]
+        return Self::WebGpu(burn_wgpu::WgpuDevice::default());
+
+        #[cfg(feature = "wgpu")]
         return Self::Wgpu(burn_wgpu::WgpuDevice::default());
 
         #[cfg(feature = "cpu")]
@@ -172,8 +288,11 @@ impl Default for DispatchDevice {
 
         // Prefer Flex over NdArray when both are enabled: Flex is the long-term
         // CPU backend replacement and should win the default tie.
-        #[cfg(feature = "flex")]
+        #[cfg(any(feature = "flex", default_backend))]
         return Self::Flex(FlexDevice);
+
+        #[cfg(feature = "remote")]
+        return Self::Remote(RemoteDevice::default());
 
         #[cfg(feature = "ndarray")]
         return Self::NdArray(NdArrayDevice::default());
@@ -181,6 +300,10 @@ impl Default for DispatchDevice {
 }
 
 impl PartialEq for DispatchDevice {
+    /// Compares devices based on hardware identity.
+    ///
+    /// Returns `true` if both devices represent the same compute resource.
+    /// Note that this comparison ignores autodiff and checkpointing settings.
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             // If both are Autodiff, compare the inner devices
@@ -195,29 +318,32 @@ impl PartialEq for DispatchDevice {
             (Self::Cpu(a), Self::Cpu(b)) => a == b,
             #[cfg(feature = "cuda")]
             (Self::Cuda(a), Self::Cuda(b)) => a == b,
-            #[cfg(wgpu_metal)]
+            #[cfg(feature = "metal")]
             (Self::Metal(a), Self::Metal(b)) => a == b,
             #[cfg(feature = "rocm")]
             (Self::Rocm(a), Self::Rocm(b)) => a == b,
-            #[cfg(wgpu_vulkan)]
+            #[cfg(feature = "vulkan")]
             (Self::Vulkan(a), Self::Vulkan(b)) => a == b,
-            #[cfg(wgpu_webgpu)]
+            #[cfg(feature = "wgpu")]
             (Self::Wgpu(a), Self::Wgpu(b)) => a == b,
-            #[cfg(feature = "flex")]
+            #[cfg(feature = "webgpu")]
+            (Self::WebGpu(a), Self::WebGpu(b)) => a == b,
+            #[cfg(any(feature = "flex", default_backend))]
             (Self::Flex(a), Self::Flex(b)) => a == b,
             #[cfg(feature = "ndarray")]
             (Self::NdArray(a), Self::NdArray(b)) => a == b,
             #[cfg(feature = "tch")]
             (Self::LibTorch(a), Self::LibTorch(b)) => a == b,
+            #[cfg(feature = "remote")]
+            (Self::Remote(a), Self::Remote(b)) => a == b,
             #[allow(unreachable_patterns)]
             (_, _) => false,
         }
     }
 }
 
-/// Base multiplier to avoid type_id clashes between backends.
-/// Limits the number of device types per backend, but this is a sensible limit.
-const TYPE_ID_BASE: u16 = 10;
+const INTERNAL_ID_MASK: u16 = 0x00FF;
+const BACKEND_SHIFT: u32 = 8;
 
 impl DispatchDevice {
     #[cfg(feature = "autodiff")]
@@ -235,27 +361,41 @@ impl DispatchDevice {
         DispatchDevice::Autodiff(AutodiffDevice::new(device, checkpointing))
     }
 
+    /// Returns the inner device, without autodiff (when enabled).
+    pub fn inner(self) -> Self {
+        #[cfg(feature = "autodiff")]
+        if let DispatchDevice::Autodiff(device) = self {
+            return *device.inner;
+        }
+
+        self
+    }
+
     /// Returns a unique number per variant to encode into type_id.
-    fn backend_id(&self) -> BackendId {
+    fn backend_id(&self) -> DispatchDeviceId {
         match self {
             #[cfg(feature = "cpu")]
-            Self::Cpu(_) => BackendId::Cpu,
+            Self::Cpu(_) => DispatchDeviceId::Cpu,
             #[cfg(feature = "cuda")]
-            Self::Cuda(_) => BackendId::Cuda,
-            #[cfg(wgpu_metal)]
-            Self::Metal(_) => BackendId::Metal,
+            Self::Cuda(_) => DispatchDeviceId::Cuda,
+            #[cfg(feature = "metal")]
+            Self::Metal(_) => DispatchDeviceId::Metal,
             #[cfg(feature = "rocm")]
-            Self::Rocm(_) => BackendId::Rocm,
-            #[cfg(wgpu_vulkan)]
-            Self::Vulkan(_) => BackendId::Vulkan,
-            #[cfg(wgpu_webgpu)]
-            Self::Wgpu(_) => BackendId::Wgpu,
-            #[cfg(feature = "flex")]
-            Self::Flex(_) => BackendId::Flex,
+            Self::Rocm(_) => DispatchDeviceId::Rocm,
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(_) => DispatchDeviceId::Vulkan,
+            #[cfg(feature = "wgpu")]
+            Self::Wgpu(_) => DispatchDeviceId::Wgpu,
+            #[cfg(feature = "webgpu")]
+            Self::WebGpu(_) => DispatchDeviceId::WebGpu,
+            #[cfg(any(feature = "flex", default_backend))]
+            Self::Flex(_) => DispatchDeviceId::Flex,
             #[cfg(feature = "ndarray")]
-            Self::NdArray(_) => BackendId::NdArray,
+            Self::NdArray(_) => DispatchDeviceId::NdArray,
             #[cfg(feature = "tch")]
-            Self::LibTorch(_) => BackendId::LibTorch,
+            Self::LibTorch(_) => DispatchDeviceId::LibTorch,
+            #[cfg(feature = "remote")]
+            Self::Remote(_) => DispatchDeviceId::Remote,
             #[cfg(feature = "autodiff")]
             Self::Autodiff(device) => device.inner.backend_id(),
         }
@@ -263,50 +403,48 @@ impl DispatchDevice {
 
     /// Encode variant ID and backend type ID into a unique `type_id`.
     fn encode_type_id(&self, backend_type_id: u16) -> u16 {
-        u16::from(self.backend_id()) * TYPE_ID_BASE + backend_type_id
+        // Use the lower 8 bits for the backend's internal type ID
+        let internal_type_id = backend_type_id & INTERNAL_ID_MASK;
+        // Use the upper 8 bits for the DispatchDevice/DispatchDeviceId
+        let backend = u16::from(self.backend_id()) << BACKEND_SHIFT;
+        backend | internal_type_id
     }
 
     /// Decode an encoded `type_id` into variant ID and backend type ID.
-    pub(crate) fn decode_type_id(type_id: u16) -> (BackendId, u16) {
-        let variant = type_id / TYPE_ID_BASE;
-        let backend_type_id = type_id % TYPE_ID_BASE;
-        (
-            BackendId::try_from(variant).expect("Unknown DispatchDevice variant"),
-            backend_type_id,
-        )
+    pub(crate) fn decode_type_id(type_id: u16) -> (DispatchDeviceId, u16) {
+        let backend_raw = type_id >> BACKEND_SHIFT;
+        let internal_type_id = type_id & INTERNAL_ID_MASK;
+
+        let backend = DispatchDeviceId::try_from(backend_raw).expect("Unknown DispatchDevice ID");
+
+        (backend, internal_type_id)
     }
 }
 
+#[allow(missing_docs)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
-pub(crate) enum BackendId {
-    #[cfg(feature = "cpu")]
+pub enum DispatchDeviceId {
     Cpu = 0,
-    #[cfg(feature = "cuda")]
     Cuda = 1,
-    #[cfg(wgpu_metal)]
-    Metal = 2,
-    #[cfg(feature = "rocm")]
+    Wgpu = 2,
     Rocm = 3,
-    #[cfg(wgpu_vulkan)]
-    Vulkan = 4,
-    #[cfg(wgpu_webgpu)]
-    Wgpu = 5,
-    #[cfg(feature = "ndarray")]
+    Flex = 4,
+    LibTorch = 5,
     NdArray = 6,
-    #[cfg(feature = "tch")]
-    LibTorch = 7,
-    #[cfg(feature = "flex")]
-    Flex = 8,
+    Metal = 7,
+    Vulkan = 8,
+    WebGpu = 9,
+    Remote = 10,
 }
 
-impl From<BackendId> for u16 {
-    fn from(variant: BackendId) -> Self {
+impl From<DispatchDeviceId> for u16 {
+    fn from(variant: DispatchDeviceId) -> Self {
         variant as u16
     }
 }
 
-impl TryFrom<u16> for BackendId {
+impl TryFrom<u16> for DispatchDeviceId {
     type Error = ();
 
     fn try_from(value: u16) -> Result<Self, Self::Error> {
@@ -315,31 +453,56 @@ impl TryFrom<u16> for BackendId {
             0 => Ok(Self::Cpu),
             #[cfg(feature = "cuda")]
             1 => Ok(Self::Cuda),
-            #[cfg(wgpu_metal)]
-            2 => Ok(Self::Metal),
+            #[cfg(feature = "wgpu")]
+            2 => Ok(Self::Wgpu),
             #[cfg(feature = "rocm")]
             3 => Ok(Self::Rocm),
-            #[cfg(wgpu_vulkan)]
-            4 => Ok(Self::Vulkan),
-            #[cfg(wgpu_webgpu)]
-            5 => Ok(Self::Wgpu),
+            #[cfg(any(feature = "flex", default_backend))]
+            4 => Ok(Self::Flex),
+            #[cfg(feature = "tch")]
+            5 => Ok(Self::LibTorch),
             #[cfg(feature = "ndarray")]
             6 => Ok(Self::NdArray),
-            #[cfg(feature = "tch")]
-            7 => Ok(Self::LibTorch),
-            #[cfg(feature = "flex")]
-            8 => Ok(Self::Flex),
+            #[cfg(feature = "metal")]
+            7 => Ok(Self::Metal),
+            #[cfg(feature = "vulkan")]
+            8 => Ok(Self::Vulkan),
+            #[cfg(feature = "webgpu")]
+            9 => Ok(Self::WebGpu),
+            #[cfg(feature = "remote")]
+            10 => Ok(Self::Remote),
             _ => Err(()),
         }
     }
 }
 
 impl DeviceOps for DispatchDevice {
-    fn inner(&self) -> &Self {
+    fn defaults(&self) -> DeviceSettings {
         match self {
+            #[cfg(feature = "cpu")]
+            Self::Cpu(device) => device.defaults(),
+            #[cfg(feature = "cuda")]
+            Self::Cuda(device) => device.defaults(),
+            #[cfg(feature = "metal")]
+            Self::Metal(device) => device.defaults(),
+            #[cfg(feature = "rocm")]
+            Self::Rocm(device) => device.defaults(),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(device) => device.defaults(),
+            #[cfg(feature = "wgpu")]
+            Self::Wgpu(device) => device.defaults(),
+            #[cfg(feature = "webgpu")]
+            Self::WebGpu(device) => device.defaults(),
+            #[cfg(any(feature = "flex", default_backend))]
+            Self::Flex(device) => device.defaults(),
+            #[cfg(feature = "ndarray")]
+            Self::NdArray(device) => device.defaults(),
+            #[cfg(feature = "tch")]
+            Self::LibTorch(device) => device.defaults(),
+            #[cfg(feature = "remote")]
+            Self::Remote(device) => device.defaults(),
             #[cfg(feature = "autodiff")]
-            DispatchDevice::Autodiff(device) => &device.inner,
-            device => device,
+            Self::Autodiff(device) => device.inner.defaults(),
         }
     }
 }
@@ -351,23 +514,28 @@ impl burn_backend::Device for DispatchDevice {
 
         match dispatch_id {
             #[cfg(feature = "cpu")]
-            BackendId::Cpu => Self::Cpu(CpuDevice::from_id(device_id)),
+            DispatchDeviceId::Cpu => Self::Cpu(CpuDevice::from_id(device_id)),
             #[cfg(feature = "cuda")]
-            BackendId::Cuda => Self::Cuda(CudaDevice::from_id(device_id)),
-            #[cfg(wgpu_metal)]
-            BackendId::Metal => Self::Metal(WgpuDevice::from_id(device_id)),
+            DispatchDeviceId::Cuda => Self::Cuda(CudaDevice::from_id(device_id)),
+            #[cfg(feature = "metal")]
+            DispatchDeviceId::Metal => Self::Metal(WgpuDevice::from_id(device_id)),
             #[cfg(feature = "rocm")]
-            BackendId::Rocm => Self::Rocm(RocmDevice::from_id(device_id)),
-            #[cfg(wgpu_vulkan)]
-            BackendId::Vulkan => Self::Vulkan(WgpuDevice::from_id(device_id)),
-            #[cfg(wgpu_webgpu)]
-            BackendId::Wgpu => Self::Wgpu(WgpuDevice::from_id(device_id)),
-            #[cfg(feature = "flex")]
-            BackendId::Flex => Self::Flex(FlexDevice::from_id(device_id)),
+            DispatchDeviceId::Rocm => Self::Rocm(RocmDevice::from_id(device_id)),
+            #[cfg(feature = "vulkan")]
+            DispatchDeviceId::Vulkan => Self::Vulkan(WgpuDevice::from_id(device_id)),
+            #[cfg(feature = "wgpu")]
+            DispatchDeviceId::Wgpu => Self::Wgpu(WgpuDevice::from_id(device_id)),
+            #[cfg(feature = "webgpu")]
+            DispatchDeviceId::WebGpu => Self::WebGpu(WgpuDevice::from_id(device_id)),
+            #[cfg(any(feature = "flex", default_backend))]
+            DispatchDeviceId::Flex => Self::Flex(FlexDevice::from_id(device_id)),
             #[cfg(feature = "ndarray")]
-            BackendId::NdArray => Self::NdArray(NdArrayDevice::from_id(device_id)),
+            DispatchDeviceId::NdArray => Self::NdArray(NdArrayDevice::from_id(device_id)),
             #[cfg(feature = "tch")]
-            BackendId::LibTorch => Self::LibTorch(LibTorchDevice::from_id(device_id)),
+            DispatchDeviceId::LibTorch => Self::LibTorch(LibTorchDevice::from_id(device_id)),
+            #[cfg(feature = "remote")]
+            DispatchDeviceId::Remote => Self::Remote(RemoteDevice::from_id(device_id)),
+            _ => unreachable!("No backend feature enabled."),
         }
     }
 
@@ -377,20 +545,24 @@ impl burn_backend::Device for DispatchDevice {
             Self::Cpu(device) => device.to_id(),
             #[cfg(feature = "cuda")]
             Self::Cuda(device) => device.to_id(),
-            #[cfg(wgpu_metal)]
+            #[cfg(feature = "metal")]
             Self::Metal(device) => device.to_id(),
             #[cfg(feature = "rocm")]
             Self::Rocm(device) => device.to_id(),
-            #[cfg(wgpu_vulkan)]
+            #[cfg(feature = "vulkan")]
             Self::Vulkan(device) => device.to_id(),
-            #[cfg(wgpu_webgpu)]
+            #[cfg(feature = "wgpu")]
             Self::Wgpu(device) => device.to_id(),
-            #[cfg(feature = "flex")]
+            #[cfg(feature = "webgpu")]
+            Self::WebGpu(device) => device.to_id(),
+            #[cfg(any(feature = "flex", default_backend))]
             Self::Flex(device) => device.to_id(),
             #[cfg(feature = "ndarray")]
             Self::NdArray(device) => device.to_id(),
             #[cfg(feature = "tch")]
             Self::LibTorch(device) => device.to_id(),
+            #[cfg(feature = "remote")]
+            Self::Remote(device) => device.to_id(),
             #[cfg(feature = "autodiff")]
             Self::Autodiff(device) => device.inner.to_id(),
         };
@@ -413,13 +585,6 @@ impl From<CudaDevice> for DispatchDevice {
     }
 }
 
-#[cfg(wgpu_metal)]
-impl From<WgpuDevice> for DispatchDevice {
-    fn from(device: WgpuDevice) -> Self {
-        DispatchDevice::Metal(device)
-    }
-}
-
 #[cfg(feature = "rocm")]
 impl From<RocmDevice> for DispatchDevice {
     fn from(device: RocmDevice) -> Self {
@@ -427,21 +592,40 @@ impl From<RocmDevice> for DispatchDevice {
     }
 }
 
-#[cfg(wgpu_vulkan)]
-impl From<WgpuDevice> for DispatchDevice {
-    fn from(device: WgpuDevice) -> Self {
-        DispatchDevice::Vulkan(device)
-    }
-}
-
-#[cfg(wgpu_webgpu)]
+// A bare `WgpuDevice` maps to the auto-compiler [`DispatchDevice::Wgpu`] variant. To target a
+// specific wgpu specialization (Metal, Vulkan, WebGpu) construct the variant explicitly.
+#[cfg(all(
+    feature = "wgpu",
+    not(any(feature = "metal", feature = "vulkan", feature = "webgpu"))
+))]
 impl From<WgpuDevice> for DispatchDevice {
     fn from(device: WgpuDevice) -> Self {
         DispatchDevice::Wgpu(device)
     }
 }
 
-#[cfg(feature = "flex")]
+#[cfg(all(feature = "metal", not(any(feature = "vulkan", feature = "webgpu"))))]
+impl From<WgpuDevice> for DispatchDevice {
+    fn from(device: WgpuDevice) -> Self {
+        DispatchDevice::Metal(device)
+    }
+}
+
+#[cfg(all(feature = "vulkan", not(any(feature = "metal", feature = "webgpu"))))]
+impl From<WgpuDevice> for DispatchDevice {
+    fn from(device: WgpuDevice) -> Self {
+        DispatchDevice::Vulkan(device)
+    }
+}
+
+#[cfg(all(feature = "webgpu", not(any(feature = "metal", feature = "vulkan"))))]
+impl From<WgpuDevice> for DispatchDevice {
+    fn from(device: WgpuDevice) -> Self {
+        DispatchDevice::WebGpu(device)
+    }
+}
+
+#[cfg(any(feature = "flex", default_backend))]
 impl From<FlexDevice> for DispatchDevice {
     fn from(device: FlexDevice) -> Self {
         DispatchDevice::Flex(device)
@@ -459,5 +643,12 @@ impl From<NdArrayDevice> for DispatchDevice {
 impl From<LibTorchDevice> for DispatchDevice {
     fn from(device: LibTorchDevice) -> Self {
         DispatchDevice::LibTorch(device)
+    }
+}
+
+#[cfg(feature = "remote")]
+impl From<RemoteDevice> for DispatchDevice {
+    fn from(device: RemoteDevice) -> Self {
+        DispatchDevice::Remote(device)
     }
 }

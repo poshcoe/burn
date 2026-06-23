@@ -5,12 +5,13 @@ use crate::{
     tensor::CubeTensor,
 };
 use crate::{kernel::utils::decompose_linear, ops::numeric::empty_device_dtype};
+use burn_backend::cubecl::dtype_to_storage_type;
 use burn_backend::{
     TensorMetadata,
     ops::{ConvOptions, conv::calculate_conv_output_sizes},
 };
 use cubecl::{
-    calculate_cube_count_elemwise, prelude::*, std::tensor::layout::linear::LinearView,
+    calculate_cube_count_elemwise, prelude::*, std::tensor::layout::linear::LinearViewMut,
     tensor_vector_size_parallel,
 };
 use cubecl::{num_traits::Zero, std::FastDivmod};
@@ -34,8 +35,8 @@ struct Conv2dArgs {
 fn direct_conv2d_kernel<E: Numeric, NIn: Size, NOut: Size>(
     input: &Tensor<Vector<E, NIn>>,
     weight: &Tensor<Vector<E, NIn>>,
-    bias: ComptimeOption<Tensor<Vector<E, NOut>>>,
-    output: &mut LinearView<Vector<E, NOut>, ReadWrite>,
+    bias: ComptimeOption<&[Vector<E, NOut>]>,
+    mut output: LinearViewMut<'_, Vector<E, NOut>>,
     args: Conv2dArgs,
     shape_out: Sequence<FastDivmod<u32>>,
     shape_out_c: FastDivmod<u32>,
@@ -105,7 +106,7 @@ fn direct_conv2d_kernel<E: Numeric, NIn: Size, NOut: Size>(
         has_padding,
     );
 
-    output[ABSOLUTE_POS] = sum;
+    output.write(ABSOLUTE_POS, sum);
 }
 
 #[derive(CubeType, Clone)]
@@ -204,7 +205,7 @@ fn kernel_loop_inner<E: Numeric, NIn: Size, NOut: Size>(
 
                 #[unroll]
                 for i in 0..vector_size_in {
-                    sum[v] += val[i];
+                    sum.insert(v, sum.extract(v) + val.extract(i));
                 }
                 weight_pos += stride_oc;
             }
@@ -306,13 +307,13 @@ pub fn conv_direct<R: CubeRuntime, const N: usize>(
             vector_size_out,
             input.into_tensor_arg(),
             weight.into_tensor_arg(),
-            bias.map(|b| b.into_tensor_arg()).into(),
+            bias.map(|b| b.into_buffer_arg()).into(),
             output.clone().into_linear_view(),
             Conv2dArgsLaunch::new(conv_params, channels_per_group as u32),
             shape_out,
             shape_out_c,
             options.padding.iter().any(|it| *it != 0),
-            out_dtype.into(),
+            dtype_to_storage_type(out_dtype),
         )
     };
 

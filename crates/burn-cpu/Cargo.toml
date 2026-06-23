@@ -17,8 +17,8 @@ workspace = true
 [features]
 default = ["std", "fusion", "autotune", "burn-cubecl/default", "cubecl/default"]
 doc = ["burn-cubecl/doc"]
-fusion = ["burn-fusion", "burn-cubecl/fusion"]
 std = ["burn-cubecl/std", "cubecl/std"]
+
 tracing = [
     "burn-backend/tracing",
     "burn-cubecl/tracing",
@@ -26,13 +26,15 @@ tracing = [
     "cubecl/tracing",
 ]
 
+fusion = ["burn-fusion", "burn-cubecl/fusion"]
 autotune = ["burn-cubecl/autotune"]
 autotune-checks = ["burn-cubecl/autotune-checks"]
 
 [dependencies]
-burn-fusion = { path = "../burn-fusion", version = "=0.21.0-pre.3", optional = true }
-burn-cubecl = { path = "../burn-cubecl", version = "=0.21.0-pre.3", default-features = false }
-burn-backend = { path = "../burn-backend", version = "=0.21.0-pre.3", features = [
+burn-fusion = { workspace = true, optional = true, features = ["default"] }
+burn-cubecl = { workspace = true }
+burn-backend = { workspace = true, features = [
+    "default",
     "cubecl-cpu",
 ] }
 cubecl = { workspace = true, features = ["cpu"] }

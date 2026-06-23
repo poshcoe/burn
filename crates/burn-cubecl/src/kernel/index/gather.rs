@@ -5,16 +5,20 @@ use crate::{
     tensor::CubeTensor,
 };
 use burn_backend::TensorMetadata;
-use cubecl::frontend::{ABSOLUTE_POS, Numeric, Tensor};
+use burn_backend::cubecl::dtype_to_storage_type;
 use cubecl::std::{FastDivmod, tensor::index_offset_contiguous_fastdivmod};
 use cubecl::{CubeDim, std::tensor::layout::linear::LinearView};
 use cubecl::{calculate_cube_count_elemwise, prelude::*};
+use cubecl::{
+    frontend::{ABSOLUTE_POS, Numeric, Tensor},
+    std::tensor::layout::linear::LinearViewMut,
+};
 
 #[cube(launch_unchecked, address_type = "dynamic")]
 fn gather_kernel<T: Numeric, I: Numeric>(
     input: &Tensor<T>,
-    indices: &LinearView<I>,
-    output: &mut LinearView<T, ReadWrite>,
+    indices: LinearView<'_, I>,
+    mut output: LinearViewMut<'_, T>,
     in_strides: Sequence<usize>, // zeroed out for broadcast dims and `dim`
     out_shape: Sequence<FastDivmod<usize>>,
     dim: usize,
@@ -31,9 +35,9 @@ fn gather_kernel<T: Numeric, I: Numeric>(
         input.vector_size(),
     );
 
-    offset += usize::cast_from(indices[ABSOLUTE_POS]) * input.stride(dim);
+    offset += usize::cast_from(indices.read(ABSOLUTE_POS)) * input.stride(dim);
 
-    output[ABSOLUTE_POS] = input[offset];
+    output.write(ABSOLUTE_POS, input[offset]);
 }
 
 pub(crate) fn gather<R: CubeRuntime>(
@@ -69,7 +73,10 @@ pub(crate) fn gather<R: CubeRuntime>(
             in_strides,
             shape_divmod(&output),
             dim,
-            [dtype.into(), indices_dtype.into()],
+            [
+                dtype_to_storage_type(dtype),
+                dtype_to_storage_type(indices_dtype),
+            ],
         )
     }
 

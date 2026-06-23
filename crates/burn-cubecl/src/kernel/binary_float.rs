@@ -4,7 +4,12 @@ use crate::{
     ops::{max_vector_size, numeric::empty_device_dtype},
     tensor::CubeTensor,
 };
-use cubecl::{calculate_cube_count_elemwise, prelude::*, std::tensor::layout::linear::LinearView};
+use burn_backend::cubecl::dtype_to_storage_type;
+use cubecl::{
+    calculate_cube_count_elemwise,
+    prelude::*,
+    std::tensor::layout::linear::{LinearView, LinearViewMut},
+};
 
 pub(crate) trait BinaryOpFloatFamily: Send + Sync + 'static {
     type BinaryOp<C: Float, N: Size>: BinaryOpFloat<C, N>;
@@ -31,16 +36,18 @@ impl<T: Float, N: Size> BinaryOpFloat<T, N> for ArcTan2Op {
 
 #[cube(launch_unchecked, address_type = "dynamic")]
 pub(crate) fn kernel_binop<C: Float, N: Size, O: BinaryOpFloatFamily>(
-    lhs: &LinearView<Vector<C, N>>,
-    rhs: &LinearView<Vector<C, N>>,
-    out: &mut LinearView<Vector<C, N>, ReadWrite>,
+    lhs: LinearView<'_, Vector<C, N>>,
+    rhs: LinearView<'_, Vector<C, N>>,
+    mut out: LinearViewMut<'_, Vector<C, N>>,
     #[define(C)] _dtype: StorageType,
 ) {
     if !out.is_in_bounds(ABSOLUTE_POS) {
         terminate!();
     }
 
-    out[ABSOLUTE_POS] = O::BinaryOp::<C, N>::execute(lhs[ABSOLUTE_POS], rhs[ABSOLUTE_POS]);
+    let res = O::BinaryOp::<C, N>::execute(lhs.read(ABSOLUTE_POS), rhs.read(ABSOLUTE_POS));
+
+    out.write(ABSOLUTE_POS, res)
 }
 
 pub(crate) fn launch_binop_float<R: CubeRuntime, O: BinaryOpFloatFamily>(
@@ -72,7 +79,7 @@ pub(crate) fn launch_binop_float<R: CubeRuntime, O: BinaryOpFloatFamily>(
                 lhs.clone().into_linear_view(),
                 rhs.clone().into_linear_view_like(&lhs),
                 lhs.as_linear_view_alias(0),
-                dtype.into(),
+                dtype_to_storage_type(dtype),
             );
 
             lhs
@@ -86,7 +93,7 @@ pub(crate) fn launch_binop_float<R: CubeRuntime, O: BinaryOpFloatFamily>(
                 lhs.into_linear_view_like(&rhs),
                 rhs.clone().into_linear_view(),
                 rhs.as_linear_view_alias(1),
-                dtype.into(),
+                dtype_to_storage_type(dtype),
             );
 
             rhs
@@ -103,7 +110,7 @@ pub(crate) fn launch_binop_float<R: CubeRuntime, O: BinaryOpFloatFamily>(
                 lhs.into_linear_view_like(&output),
                 rhs.into_linear_view_like(&output),
                 output.clone().into_linear_view(),
-                dtype.into(),
+                dtype_to_storage_type(dtype),
             );
 
             output

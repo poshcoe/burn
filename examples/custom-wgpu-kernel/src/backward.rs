@@ -1,23 +1,18 @@
 use crate::FloatTensor;
 
-use super::{AutodiffBackend, Backend};
+use super::Backend;
 use burn::{
     backend::{
+        TensorMetadata,
         autodiff::{
             Autodiff, NodeId,
             checkpoint::{base::Checkpointer, strategy::CheckpointStrategy},
             grads::Gradients,
             ops::{Backward, Ops, OpsKind, broadcast_shape},
         },
-        wgpu::{BoolElement, CubeBackend, FloatElement, IntElement, WgpuRuntime},
     },
-    tensor::{Shape, TensorMetadata},
+    tensor::Shape,
 };
-
-impl<F: FloatElement, I: IntElement, BT: BoolElement> AutodiffBackend
-    for Autodiff<CubeBackend<WgpuRuntime, F, I, BT>>
-{
-}
 
 // Implement our custom backend trait for any backend that also implements our custom backend trait.
 //

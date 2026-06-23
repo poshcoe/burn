@@ -26,6 +26,9 @@ tracing = [
 ]
 
 client = ["tokio-tungstenite", "async-channel", "tokio/sync"]
+# Client-side fusion: cache recurring op-groups on the server and invoke them by id, reducing
+# network traffic. When enabled, `RemoteBackend` is wrapped in `Fusion` (like the CubeCL backends).
+fusion = ["client", "dep:burn-fusion", "burn-router/fusion"]
 server = [
     "tokio-tungstenite",
     "async-channel",
@@ -37,13 +40,15 @@ server = [
 
 
 [dependencies]
-burn-ir = { path = "../burn-ir", version = "=0.21.0-pre.3", default-features = true }
-burn-backend = { path = "../burn-backend", version = "=0.21.0-pre.3", default-features = true, features = [
+burn-ir = { workspace = true, features = ["default"] }
+burn-backend = { workspace = true, features = [
+    "default",
     "serde", # For DTypeUsageSet to be de/serialized
 ] }
-burn-std = { path = "../burn-std", version = "=0.21.0-pre.3", default-features = true }
-burn-router = { path = "../burn-router", version = "=0.21.0-pre.3", default-features = true }
-burn-communication = { path = "../burn-communication", version = "=0.21.0-pre.3", features = [
+burn-std = { workspace = true, features = ["default"] }
+burn-router = { workspace = true, features = ["default"] }
+burn-fusion = { workspace = true, optional = true }
+burn-communication = { workspace = true, features = [
     "data-service",
     "websocket",
 ] }
@@ -51,7 +56,6 @@ burn-communication = { path = "../burn-communication", version = "=0.21.0-pre.3"
 bytes = { workspace = true }
 
 # Basic dependencies
-derive-new = { workspace = true }
 log = { workspace = true }
 
 # Shared dependencies
@@ -72,8 +76,8 @@ tracing-subscriber = { workspace = true, optional = true }
 tokio-util = { workspace = true }
 
 [dev-dependencies]
-burn-flex = { path = "../burn-flex", version = "=0.21.0-pre.3" }
-burn-tensor = { path = "../burn-tensor", version = "=0.21.0-pre.3", default-features = true }
+burn-flex = { workspace = true, features = ["default"] }
+burn-tensor = { workspace = true, features = ["default", "remote"] }
 
 [package.metadata.docs.rs]
 features = ["doc"]

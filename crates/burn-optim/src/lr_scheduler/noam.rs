@@ -1,10 +1,10 @@
 use burn_core as burn;
 
 use burn::config::Config;
-use burn::tensor::backend::Backend;
 
-use super::{LrScheduler, String};
+use super::{LrScheduler, LrSchedulerRecord, String};
 use crate::LearningRate;
+use crate::RecordState;
 
 /// Configuration to create a [noam](NoamLrScheduler) learning rate scheduler.
 #[derive(Config, Debug)]
@@ -57,8 +57,6 @@ impl NoamLrSchedulerConfig {
 }
 
 impl LrScheduler for NoamLrScheduler {
-    type Record<B: Backend> = usize;
-
     fn step(&mut self) -> LearningRate {
         self.step += 1.0;
 
@@ -68,14 +66,22 @@ impl LrScheduler for NoamLrScheduler {
         self.factor * self.embedding_size.powf(-0.5) * f64::min(arg1, arg2)
     }
 
-    fn to_record<B: Backend>(&self) -> Self::Record<B> {
-        self.step as usize
+    fn to_record(&self) -> LrSchedulerRecord {
+        LrSchedulerRecord::from_state(&NoamLrSchedulerState { step: self.step })
     }
 
-    fn load_record<B: Backend>(mut self, record: Self::Record<B>) -> Self {
-        self.step = record as f64;
+    fn load_record(mut self, record: LrSchedulerRecord) -> Self {
+        if let Some(state) = record.into_state::<NoamLrSchedulerState>() {
+            self.step = state.step;
+        }
         self
     }
+}
+
+/// The serializable state of a [noam scheduler](NoamLrScheduler).
+#[derive(RecordState, Clone, Debug)]
+pub struct NoamLrSchedulerState {
+    step: f64,
 }
 
 #[cfg(test)]

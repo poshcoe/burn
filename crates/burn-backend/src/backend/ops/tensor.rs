@@ -3,10 +3,11 @@ use super::grid_sample::float_grid_sample_2d_ref;
 use super::repeat_dim::repeat_with_slice_assign;
 use super::sort::{argsort, sort, sort_with_indices};
 use crate::ops::GridSampleOptions;
-use crate::tensor::{BoolTensor, Device, Float, FloatTensor, IntTensor};
+use crate::tensor::{BoolTensor, Device, FloatTensor, IntTensor};
 use crate::{Backend, Distribution, TensorData, get_device_settings};
-use crate::{ExecutionError, Scalar, TensorMetadata, TensorPrimitive};
+use crate::{ExecutionError, Scalar, TensorMetadata};
 use alloc::vec::Vec;
+use burn_std::reader::try_read_sync;
 use burn_std::{BoolDType, FloatDType, IntDType, Shape, Slice};
 
 /// Operations on float tensors.
@@ -109,17 +110,6 @@ pub trait FloatTensorOps<B: Backend> {
         tensor: FloatTensor<B>,
     ) -> impl Future<Output = Result<TensorData, ExecutionError>> + Send;
 
-    /// Gets the device of the tensor.
-    ///
-    /// # Arguments
-    ///
-    /// * `tensor` - The tensor.
-    ///
-    /// # Returns
-    ///
-    /// The device of the tensor.
-    fn float_device(tensor: &FloatTensor<B>) -> Device<B>;
-
     /// Moves the tensor to the given device.
     ///
     /// # Arguments
@@ -169,7 +159,15 @@ pub trait FloatTensorOps<B: Backend> {
     ///
     /// The tensor with the given dimension repeated.
     fn float_repeat_dim(tensor: FloatTensor<B>, dim: usize, times: usize) -> FloatTensor<B> {
-        repeat_with_slice_assign::<B, Float>(TensorPrimitive::Float(tensor), dim, times).tensor()
+        let device = tensor.device();
+        repeat_with_slice_assign::<B, _, _, _>(
+            tensor,
+            dim,
+            times,
+            device,
+            |shape, device, dtype| B::float_empty(shape, device, dtype.into()),
+            B::float_slice_assign,
+        )
     }
 
     /// Adds two tensors together.
@@ -207,7 +205,7 @@ pub trait FloatTensorOps<B: Backend> {
     ///
     /// The clamped tensor.
     fn float_clamp_min(tensor: FloatTensor<B>, min: Scalar) -> FloatTensor<B> {
-        let dtype = get_device_settings::<B>(&B::float_device(&tensor)).bool_dtype;
+        let dtype = get_device_settings::<B>(&tensor.device()).bool_dtype;
         let mask = Self::float_lower_elem(tensor.clone(), min, dtype);
         B::float_mask_fill(tensor, mask, min)
     }
@@ -223,7 +221,7 @@ pub trait FloatTensorOps<B: Backend> {
     ///
     /// The clamped tensor.
     fn float_clamp_max(tensor: FloatTensor<B>, max: Scalar) -> FloatTensor<B> {
-        let dtype = get_device_settings::<B>(&B::float_device(&tensor)).bool_dtype;
+        let dtype = get_device_settings::<B>(&tensor.device()).bool_dtype;
         let mask = Self::float_greater_elem(tensor.clone(), max, dtype);
         B::float_mask_fill(tensor, mask, max)
     }
@@ -454,6 +452,41 @@ pub trait FloatTensorOps<B: Backend> {
         indices: IntTensor<B>,
         value: FloatTensor<B>,
     ) -> FloatTensor<B>;
+
+    /// Multi-dimensional scatter: update `data` at locations specified by `indices` with `values`.
+    ///
+    /// # Arguments
+    ///
+    /// * `data` - The tensor to scatter into.
+    /// * `indices` - An M-dimensional integer tensor whose last dimension indexes into `data`.
+    /// * `values` - The values to scatter.
+    /// * `reduction` - How to combine with existing values.
+    ///
+    /// # Returns
+    ///
+    /// The tensor with scattered values.
+    fn float_scatter_nd(
+        _data: FloatTensor<B>,
+        _indices: IntTensor<B>,
+        _values: FloatTensor<B>,
+        _reduction: crate::tensor::IndexingUpdateOp,
+    ) -> FloatTensor<B> {
+        unimplemented!("float_scatter_nd is not implemented for this backend")
+    }
+
+    /// Multi-dimensional gather: collect slices from `data` at locations specified by `indices`.
+    ///
+    /// # Arguments
+    ///
+    /// * `data` - The tensor to gather from.
+    /// * `indices` - An M-dimensional integer tensor whose last dimension indexes into `data`.
+    ///
+    /// # Returns
+    ///
+    /// The gathered tensor.
+    fn float_gather_nd(_data: FloatTensor<B>, _indices: IntTensor<B>) -> FloatTensor<B> {
+        unimplemented!("float_gather_nd is not implemented for this backend")
+    }
 
     /// Select tensor elements along the given dimension corresponding for the given indices.
     ///
@@ -995,7 +1028,7 @@ pub trait FloatTensorOps<B: Backend> {
     /// The elements of `lhs` raised to the value of `rhs`.
     fn float_powi_scalar(lhs: FloatTensor<B>, rhs: Scalar) -> FloatTensor<B> {
         match rhs.elem::<i64>() {
-            0 => Self::float_ones(lhs.shape(), &B::float_device(&lhs), lhs.dtype().into()),
+            0 => Self::float_ones(lhs.shape(), &lhs.device(), lhs.dtype().into()),
             1 => lhs,
             2 => B::float_mul(lhs.clone(), lhs),
             -1 => Self::float_recip(lhs),
@@ -1083,6 +1116,51 @@ pub trait FloatTensorOps<B: Backend> {
     ///
     /// A tensor with the same shape as `tensor` with square root values.
     fn float_sqrt(tensor: FloatTensor<B>) -> FloatTensor<B>;
+
+    /// Returns a new tensor with the Euclidean distance values.
+    ///
+    /// # Arguments
+    ///
+    /// * `lhs` - The left-hand side tensor.
+    /// * `rhs` - The right-hand side tensor.
+    ///
+    /// # Returns
+    ///
+    /// A tensor with the same shape as `lhs` and `rhs` with hypotenuse values.
+    fn float_hypot(lhs: FloatTensor<B>, rhs: FloatTensor<B>) -> FloatTensor<B> {
+        // default implementation for any backend that can't either iterator over elements or doesn't have
+        // a native hypot implementation
+
+        // Mirrors glibc's approach: scale by max(|lhs|, |rhs|) to avoid
+        // overflow/underflow in the intermediate squaring step.
+        //
+        // hypot(x, y) = |max| * sqrt(1 + (min/max)^2)
+        //
+        // Edge cases:
+        //   - If max == 0, both inputs are 0, result is 0 (division guarded by clamp)
+        //   - If max is inf, result is inf (propagates naturally through sqrt)
+        //   - NaN propagates naturally
+        let abs_lhs = B::float_abs(lhs);
+        let abs_rhs = B::float_abs(rhs);
+
+        let diff = B::float_clamp_min(B::float_sub(abs_rhs.clone(), abs_lhs.clone()), 0.0.into());
+        let max = B::float_add(abs_lhs.clone(), diff.clone());
+        let min = B::float_sub(abs_rhs, diff);
+
+        // Clamp max to at least epsilon to avoid 0/0; result will be 0 anyway
+        // since min <= max, so (min/clamped_max)^2 won't blow up meaningfully.
+        let max_safe = B::float_clamp_min(
+            max.clone(),
+            max.dtype().finfo().unwrap().min_positive.into(),
+        );
+
+        let ratio = B::float_div(min, max_safe);
+        let ratio_sq = B::float_mul(ratio.clone(), ratio);
+
+        let inner = B::float_add_scalar(ratio_sq, 1.0.into());
+
+        B::float_mul(max, B::float_sqrt(inner))
+    }
 
     /// Returns a new tensor with absolute values.
     ///
@@ -1314,11 +1392,16 @@ pub trait FloatTensorOps<B: Backend> {
     /// high-level tensor API and will not be passed to this method. Backend implementations do
     /// not need to handle empty tensors.
     fn float_cat(tensors: Vec<FloatTensor<B>>, dim: usize) -> FloatTensor<B> {
-        cat_with_slice_assign::<B, Float>(
-            tensors.into_iter().map(TensorPrimitive::Float).collect(),
+        let first_tensor = tensors.first().expect("Tensors should not be empty");
+        let device = first_tensor.device();
+
+        cat_with_slice_assign::<B, _, _, _>(
+            tensors,
             dim,
+            device,
+            |shape, device, dtype| B::float_empty(shape, device, dtype.into()),
+            B::float_slice_assign,
         )
-        .tensor()
     }
 
     /// Gets the indices of the maximum elements of a tensor along an axis.
@@ -1333,6 +1416,45 @@ pub trait FloatTensorOps<B: Backend> {
     ///
     /// A tensor with the indices of the maximum elements of `tensor` along `dim`.
     fn float_argmax(tensor: FloatTensor<B>, dim: usize, out_dtype: IntDType) -> IntTensor<B>;
+
+    /// Gets the indices of the k maximum elements of a tensor along an axis.
+    /// if two elements are equals, it will be ordered by lowest indices
+    ///
+    /// # Arguments
+    ///
+    /// * `tensor` - The tensor to get the maximum elements of.
+    /// * `dim` - The dimension along which to get the maximum elements.
+    /// * `k` - number of maximum elements
+    /// * `out_dtype` - The output tensor dtype.
+    ///
+    /// # Returns
+    ///
+    /// A tensor with the indices of the maximum elements of `tensor` along `dim`.
+    fn float_argtopk(
+        tensor: FloatTensor<B>,
+        dim: usize,
+        k: usize,
+        out_dtype: IntDType,
+    ) -> IntTensor<B>;
+
+    /// Gets the values of the k maximum elements of a tensor along an axis.
+    ///
+    /// # Arguments
+    ///
+    /// * `tensor` - The tensor to get the maximum elements of.
+    /// * `dim` - The dimension along which to get the maximum elements.
+    /// * `k` - number of maximum elements
+    /// * `out_dtype` - The output tensor dtype.
+    ///
+    /// # Returns
+    ///
+    /// A tensor with the values of the maximum elements of `tensor` along `dim`.
+    fn float_topk(tensor: FloatTensor<B>, dim: usize, k: usize) -> FloatTensor<B> {
+        let device = tensor.device();
+        let dtype = get_device_settings::<B>(&device).int_dtype;
+        let k_indices = B::int_arange(0..k as i64, &device, dtype);
+        Self::float_select(Self::float_sort(tensor, dim, true), dim, k_indices)
+    }
 
     /// Gets the indices of the minimum elements of a tensor along an axis.
     ///
@@ -1374,7 +1496,7 @@ pub trait FloatTensorOps<B: Backend> {
     ///
     /// A tensor with the maximum elements of `tensor` along `dim`.
     fn float_max_dim(tensor: FloatTensor<B>, dim: usize) -> FloatTensor<B> {
-        let dtype = get_device_settings::<B>(&B::float_device(&tensor)).int_dtype;
+        let dtype = get_device_settings::<B>(&tensor.device()).int_dtype;
         let index = B::float_argmax(tensor.clone(), dim, dtype);
 
         B::float_gather(dim, tensor, index)
@@ -1429,7 +1551,7 @@ pub trait FloatTensorOps<B: Backend> {
     ///
     /// A tensor with the minimum elements of `tensor` along `dim`.
     fn float_min_dim(tensor: FloatTensor<B>, dim: usize) -> FloatTensor<B> {
-        let dtype = get_device_settings::<B>(&B::float_device(&tensor)).int_dtype;
+        let dtype = get_device_settings::<B>(&tensor.device()).int_dtype;
         let index = B::float_argmin(tensor.clone(), dim, dtype);
 
         B::float_gather(dim, tensor, index)
@@ -1578,8 +1700,8 @@ pub trait FloatTensorOps<B: Backend> {
     ///
     /// A tensor with the same shape as `tensor` containing the signs of the elements of `tensor`.
     fn float_sign(tensor: FloatTensor<B>) -> FloatTensor<B> {
-        let device = B::float_device(&tensor);
-        let bool_dtype = get_device_settings::<B>(&B::float_device(&tensor)).bool_dtype;
+        let device = tensor.device();
+        let bool_dtype = get_device_settings::<B>(&tensor.device()).bool_dtype;
         let zeros = B::float_zeros(tensor.shape(), &device, tensor.dtype().into());
         let less_than_zero = B::float_lower_elem(tensor.clone(), 0f32.into(), bool_dtype);
         let greater_than_zero = B::float_greater_elem(tensor, 0f32.into(), bool_dtype);
@@ -1606,7 +1728,20 @@ pub trait FloatTensorOps<B: Backend> {
     ///
     /// A tensor with the same shape as the input tensor, where the elements are sorted by value.
     fn float_sort(tensor: FloatTensor<B>, dim: usize, descending: bool) -> FloatTensor<B> {
-        sort::<B, Float>(TensorPrimitive::Float(tensor), dim, descending).tensor()
+        let device = tensor.device();
+        sort::<B, _, _, _>(
+            tensor,
+            dim,
+            descending,
+            device,
+            |tensor| {
+                let msg = "Failed to synchronously read tensor data. This operation is not supported until this backend has a GPU sorting implementation.";
+                try_read_sync(B::float_into_data(tensor))
+                    .expect(msg)
+                    .expect(msg)
+            },
+            |data, device, _dtype| B::float_from_data(data, device),
+        )
     }
 
     /// Sort the elements of the input `tensor` by value in along a given dimension.
@@ -1630,13 +1765,21 @@ pub trait FloatTensorOps<B: Backend> {
         descending: bool,
         indices_dtype: IntDType,
     ) -> (FloatTensor<B>, IntTensor<B>) {
-        let (values, indices) = sort_with_indices::<B, Float>(
-            TensorPrimitive::Float(tensor),
+        let device = tensor.device();
+        sort_with_indices::<B, _, _, _>(
+            tensor,
             dim,
             descending,
             indices_dtype,
-        );
-        (values.tensor(), indices)
+            device,
+            |tensor| {
+                let msg = "Failed to synchronously read tensor data. This operation is not supported until this backend has a GPU sorting implementation.";
+                try_read_sync(B::float_into_data(tensor))
+                    .expect(msg)
+                    .expect(msg)
+            },
+            |data, device, _dtype| B::float_from_data(data, device),
+        )
     }
 
     /// Returns the indices that sort the elements of the input `tensor` by value along a given dimension.
@@ -1659,7 +1802,13 @@ pub trait FloatTensorOps<B: Backend> {
         descending: bool,
         out_dtype: IntDType,
     ) -> IntTensor<B> {
-        argsort::<B, Float>(TensorPrimitive::Float(tensor), dim, descending, out_dtype)
+        let device = tensor.device();
+        argsort::<B, _, _>(tensor, dim, descending, out_dtype, device, |tensor| {
+            let msg = "Failed to synchronously read tensor data. This operation is not supported until this backend has a GPU sorting implementation.";
+            try_read_sync(B::float_into_data(tensor))
+                .expect(msg)
+                .expect(msg)
+        })
     }
 
     /// Samples tensor as a two-dimensional spatial grid of (possibly multi-channel) values,

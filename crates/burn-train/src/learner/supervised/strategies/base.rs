@@ -1,9 +1,3 @@
-use std::sync::Arc;
-
-#[cfg(feature = "ddp")]
-use burn_core::tensor::backend::distributed::{DistributedBackend, DistributedConfig};
-use burn_core::{module::AutodiffModule, prelude::Backend};
-
 use crate::{
     EarlyStoppingStrategyRef, InferenceModel, Interrupter, Learner, LearnerSummaryConfig,
     LearningCheckpointer, LearningResult, SupervisedTrainingEventProcessor, TrainLoader,
@@ -14,6 +8,9 @@ use crate::{
         store::EventStoreClient,
     },
 };
+use burn_core::tensor::distributed::{DistributedConfig, DistributedContext};
+use burn_core::{module::AutodiffModule, prelude::Device};
+use std::sync::Arc;
 
 /// A reference to an implementation of SupervisedLearningStrategy.
 pub type CustomLearningStrategy<LC> = Arc<dyn SupervisedLearningStrategy<LC>>;
@@ -28,108 +25,65 @@ pub enum MultiDeviceOptim {
 }
 
 /// Describes where training runs.
-pub enum ExecutionStrategy<B: Backend> {
+pub enum ExecutionStrategy {
     /// Training on one device
-    SingleDevice(B::Device),
+    SingleDevice(Device),
     /// Performs data-parallel distributed training where the optimization is
     /// done on an elected master device.
-    MultiDevice(Vec<B::Device>, MultiDeviceOptim),
+    MultiDevice(Vec<Device>, MultiDeviceOptim),
     /// Training with input distributed across devices, each device has its own copy of the model.
     /// Collective ops are used to sync the gradients after each pass.
-    #[cfg(feature = "ddp")]
     DistributedDataParallel {
         /// Devices on this node for the DDP
-        devices: Vec<B::Device>,
+        devices: Vec<Device>,
         /// The distributed runtime.
-        runtime: Box<dyn DistributedRuntime>,
+        context: DistributedContext,
     },
 }
 
-impl<B: Backend> ExecutionStrategy<B> {
+impl ExecutionStrategy {
     /// Returns the primary device responsible for coordination.
-    pub fn main_device(&self) -> &B::Device {
+    pub fn main_device(&self) -> &Device {
         match self {
             ExecutionStrategy::SingleDevice(device) => device,
             ExecutionStrategy::MultiDevice(devices, _optim) => &devices[0],
-            #[cfg(feature = "ddp")]
             ExecutionStrategy::DistributedDataParallel {
                 devices,
-                runtime: _,
+                context: _,
             } => &devices[0],
         }
     }
 
     /// Creates a strategy for a single device.
-    pub fn single(device: B::Device) -> Self {
+    pub fn single(device: Device) -> Self {
         Self::SingleDevice(device)
     }
 
     /// Creates a multi-device strategy.
-    pub fn multi(devices: Vec<B::Device>, optim: MultiDeviceOptim) -> Self {
+    pub fn multi(devices: Vec<Device>, optim: MultiDeviceOptim) -> Self {
         Self::MultiDevice(devices, optim)
     }
 }
 
-#[cfg(feature = "ddp")]
-impl<B: DistributedBackend> ExecutionStrategy<B> {
+impl ExecutionStrategy {
     /// Creates a distributed data parallel (DDP) strategy.
-    pub fn ddp(devices: Vec<B::Device>, config: DistributedConfig) -> Self {
-        let session = DistributedSession::<B> {
-            devices: devices.clone(),
-            config,
-        };
-        Self::DistributedDataParallel {
-            devices,
-            runtime: Box::new(session),
-        }
+    pub fn ddp(devices: Vec<Device>, config: DistributedConfig) -> Self {
+        let context = DistributedContext::init(devices.clone(), config);
+        Self::DistributedDataParallel { devices, context }
     }
 }
 
 /// How should the learner run the learning for the model
 pub enum TrainingStrategy<LC: LearningComponentsTypes> {
     /// Default training loop with specified device strategy.
-    Default(ExecutionStrategy<LC::Backend>),
+    Default(ExecutionStrategy),
     /// Training using a custom learning strategy
     Custom(CustomLearningStrategy<LC>),
 }
 
-impl<LC: LearningComponentsTypes> From<ExecutionStrategy<LC::Backend>> for TrainingStrategy<LC> {
-    fn from(value: ExecutionStrategy<LC::Backend>) -> Self {
+impl<LC: LearningComponentsTypes> From<ExecutionStrategy> for TrainingStrategy<LC> {
+    fn from(value: ExecutionStrategy) -> Self {
         Self::Default(value)
-    }
-}
-
-#[cfg(feature = "ddp")]
-/// Manages the orchestration of a distributed training environment.
-///
-/// This trait provides a generic interface to initialize and finalize
-/// the communication infrastructure required for cross-device synchronization.
-pub trait DistributedRuntime: Send + Sync + 'static {
-    /// Initialize the distributed environment.
-    fn start(&self);
-
-    /// Cleanup the distributed environment.
-    fn close(&self);
-}
-
-#[cfg(feature = "ddp")]
-/// A concrete implementation of [`DistributedRuntime`] for a [distributed backend](DistributedBackend).
-///
-/// It encapsulates the necessary configuration and device information to
-/// manage the resources related to a [`DistributedBackend`].
-pub struct DistributedSession<B: DistributedBackend> {
-    devices: Vec<B::Device>,
-    config: DistributedConfig,
-}
-
-#[cfg(feature = "ddp")]
-impl<B: DistributedBackend> DistributedRuntime for DistributedSession<B> {
-    fn start(&self) {
-        B::start_communication_server(&self.devices, self.config.clone());
-    }
-
-    fn close(&self) {
-        B::close_communication_server(&self.devices[0]);
     }
 }
 
@@ -167,28 +121,20 @@ pub trait SupervisedLearningStrategy<LC: LearningComponentsTypes> {
     /// Train the learner's model with this strategy.
     fn train(
         &self,
-        mut learner: Learner<LC>,
+        learner: Learner<LC>,
         dataloader_train: TrainLoader<LC>,
         dataloader_valid: ValidLoader<LC>,
         mut training_components: TrainingComponents<LC>,
     ) -> LearningResult<InferenceModel<LC>> {
-        let starting_epoch = match training_components.checkpoint {
-            Some(checkpoint) => {
-                if let Some(checkpointer) = &mut training_components.checkpointer {
-                    learner =
-                        checkpointer.load_checkpoint(learner, &Default::default(), checkpoint);
-                }
-                checkpoint + 1
-            }
-            None => 1,
-        };
-
+        let starting_epoch = training_components.checkpoint.unwrap_or(0) + 1;
         let summary_config = training_components.summary.clone();
 
         // Event processor start training
         training_components
             .event_processor
-            .process_train(LearnerEvent::Start);
+            .process_train(LearnerEvent::Start {
+                total_epochs: training_components.num_epochs,
+            });
         // Training loop
         let (model, mut event_processor) = self.fit(
             training_components,

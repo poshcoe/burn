@@ -1,11 +1,8 @@
 use crate::model::ModelConfig;
-use burn::data::dataloader::Progress;
-use burn::record::NoStdTrainingRecorder;
-use burn::tensor::backend::DeviceOps;
 use burn::train::{
     EventProcessorTraining, Learner, LearningComponentsTypes, SupervisedLearningStrategy,
-    SupervisedTraining, SupervisedTrainingEventProcessor, TrainLoader, TrainingBackend,
-    TrainingComponents, TrainingModel, ValidLoader,
+    SupervisedTraining, SupervisedTrainingEventProcessor, TrainLoader, TrainingComponents,
+    TrainingModel, ValidLoader,
 };
 use burn::{
     data::{
@@ -19,8 +16,7 @@ use burn::{
     module::AutodiffModule,
     optim::AdamConfig,
     prelude::*,
-    record::CompactRecorder,
-    tensor::{Device, backend::AutodiffBackend},
+    tensor::Device,
     train::{
         InferenceStep, LearnerEvent, MetricEarlyStoppingStrategy, StoppingCondition, TrainingItem,
         metric::{
@@ -30,9 +26,9 @@ use burn::{
     },
 };
 use guide::data::MnistBatcher;
-use std::{marker::PhantomData, sync::Arc};
+use std::sync::Arc;
 
-static ARTIFACT_DIR: &str = "/tmp/burn-example-mnist";
+static ARTIFACT_DIR: &str = "/tmp/burn-example-custom-train-strategy";
 
 #[derive(Config, Debug)]
 pub struct MnistTrainingConfig {
@@ -56,16 +52,17 @@ fn create_artifact_dir(artifact_dir: &str) {
     std::fs::create_dir_all(artifact_dir).ok();
 }
 
-pub fn run<B: AutodiffBackend>(device: B::Device) {
+pub fn run(device: Device) {
     create_artifact_dir(ARTIFACT_DIR);
     // Config
     let config_model = ModelConfig::new(10, 1024);
     let config_optimizer = AdamConfig::new();
     let config = MnistTrainingConfig::new(config_model, config_optimizer);
 
-    B::seed(&device, config.seed);
+    device.seed(config.seed);
+    let autodiff_device = device.clone().autodiff();
 
-    let model = config.model.init::<B>(&device);
+    let model = config.model.init(&autodiff_device);
 
     let dataset_train_original = Arc::new(MnistDataset::train());
     let dataset_train = PartialDataset::new(dataset_train_original.clone(), 0, 15_000);
@@ -77,7 +74,7 @@ pub fn run<B: AutodiffBackend>(device: B::Device) {
         .linear(LinearLrSchedulerConfig::new(1e-8, 1.0, 2000))
         .linear(LinearLrSchedulerConfig::new(1e-2, 1e-6, 10000));
     let early_stopping = MetricEarlyStoppingStrategy::new(
-        &LossMetric::<B>::new(),
+        &LossMetric::new(),
         Aggregate::Mean,
         Direction::Lowest,
         Split::Valid,
@@ -98,12 +95,12 @@ pub fn run<B: AutodiffBackend>(device: B::Device) {
 
     let training = SupervisedTraining::new(ARTIFACT_DIR, dataloader_train, dataloader_valid)
         .metrics((AccuracyMetric::new(), LossMetric::new()))
-        .with_file_checkpointer(CompactRecorder::new())
+        .with_default_checkpointers()
         .early_stopping(early_stopping)
         .num_epochs(config.num_epochs)
         .summary()
         .with_training_strategy(burn::train::TrainingStrategy::Custom(Arc::new(
-            MyCustomLearningStrategy::new(device),
+            MyCustomLearningStrategy::new(autodiff_device),
         )));
 
     let result = training.launch(Learner::new(
@@ -114,28 +111,22 @@ pub fn run<B: AutodiffBackend>(device: B::Device) {
 
     result
         .model
-        .save_file(
-            format!("{ARTIFACT_DIR}/model"),
-            &NoStdTrainingRecorder::new(),
-        )
+        .into_record()
+        .save(format!("{ARTIFACT_DIR}/model"))
         .expect("Failed to save trained model");
 }
 
-struct MyCustomLearningStrategy<LC: LearningComponentsTypes> {
-    device: Device<TrainingBackend<LC>>,
-    _p: PhantomData<LC>,
+struct MyCustomLearningStrategy {
+    device: Device,
 }
 
-impl<LC: LearningComponentsTypes> MyCustomLearningStrategy<LC> {
-    pub fn new(device: Device<TrainingBackend<LC>>) -> Self {
-        Self {
-            device,
-            _p: PhantomData,
-        }
+impl MyCustomLearningStrategy {
+    pub fn new(device: Device) -> Self {
+        Self { device }
     }
 }
 
-impl<LC: LearningComponentsTypes> SupervisedLearningStrategy<LC> for MyCustomLearningStrategy<LC> {
+impl<LC: LearningComponentsTypes> SupervisedLearningStrategy<LC> for MyCustomLearningStrategy {
     fn fit(
         &self,
         training_components: TrainingComponents<LC>,
@@ -145,7 +136,9 @@ impl<LC: LearningComponentsTypes> SupervisedLearningStrategy<LC> for MyCustomLea
         starting_epoch: usize,
     ) -> (TrainingModel<LC>, SupervisedTrainingEventProcessor<LC>) {
         let dataloader_train = dataloader_train.to_device(&self.device);
-        let dataloader_valid = dataloader_valid.to_device(self.device.inner());
+        let train_total_items = dataloader_train.num_items();
+        let dataloader_valid = dataloader_valid.to_device(&self.device.clone().inner());
+        let valid_total_items = dataloader_valid.num_items();
         learner.fork(&self.device);
         let mut event_processor = training_components.event_processor;
         let mut checkpointer = training_components.checkpointer;
@@ -157,6 +150,7 @@ impl<LC: LearningComponentsTypes> SupervisedLearningStrategy<LC> for MyCustomLea
             log::info!("Executing training step for epoch {}", epoch,);
 
             // Single device / dataloader
+            event_processor.process_train(LearnerEvent::StartSplit(train_total_items));
             let mut iterator = dataloader_train.iter();
             let mut iteration = 0;
 
@@ -172,7 +166,6 @@ impl<LC: LearningComponentsTypes> SupervisedLearningStrategy<LC> for MyCustomLea
                 let item = TrainingItem::new(
                     item.item,
                     progress,
-                    Progress::new(epoch, num_epochs),
                     Some(iteration),
                     Some(learner.lr_current()),
                 );
@@ -187,10 +180,11 @@ impl<LC: LearningComponentsTypes> SupervisedLearningStrategy<LC> for MyCustomLea
                     break;
                 }
             }
-            event_processor.process_train(LearnerEvent::EndEpoch(epoch));
+            event_processor.process_train(LearnerEvent::EndSplit(epoch));
 
             let model_valid = learner.model().valid();
 
+            event_processor.process_valid(LearnerEvent::StartSplit(valid_total_items));
             let mut iterator = dataloader_valid.iter();
             let mut iteration = 0;
 
@@ -199,17 +193,12 @@ impl<LC: LearningComponentsTypes> SupervisedLearningStrategy<LC> for MyCustomLea
                 iteration += 1;
 
                 let item = model_valid.step(item);
-                let item = TrainingItem::new(
-                    item,
-                    progress,
-                    Progress::new(epoch, num_epochs),
-                    Some(iteration),
-                    None,
-                );
+                let item = TrainingItem::new(item, progress, Some(iteration), None);
 
                 event_processor.process_valid(LearnerEvent::ProcessedItem(item));
             }
-            event_processor.process_valid(LearnerEvent::EndEpoch(epoch));
+            event_processor.process_valid(LearnerEvent::EndSplit(epoch));
+            event_processor.process_train(LearnerEvent::EndEpoch(epoch));
 
             if let Some(checkpointer) = &mut checkpointer {
                 checkpointer.checkpoint(&learner, epoch, &training_components.event_store);

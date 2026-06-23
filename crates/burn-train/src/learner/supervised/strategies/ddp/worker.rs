@@ -1,9 +1,10 @@
 use crate::ddp::epoch::{DdpTrainEpoch, DdpValidEpoch};
 use crate::ddp::strategy::WorkerComponents;
+use crate::metric::processor::{EventProcessorTraining, LearnerEvent};
 use crate::single::TrainingLoop;
 use crate::{
     Learner, LearningCheckpointer, LearningComponentsTypes, SupervisedTrainingEventProcessor,
-    TrainLoader, TrainingBackend, ValidLoader,
+    TrainLoader, ValidLoader,
 };
 use burn_core::tensor::Device;
 use std::sync::{Arc, Mutex};
@@ -15,7 +16,7 @@ pub(crate) struct DdpWorker<LC>
 where
     LC: LearningComponentsTypes + Send + 'static,
 {
-    device: Device<TrainingBackend<LC>>,
+    device: Device,
     learner: Learner<LC>,
     event_processor: Arc<Mutex<SupervisedTrainingEventProcessor<LC>>>,
     components: WorkerComponents,
@@ -34,7 +35,7 @@ where
     /// Starts a worker that runs the model in a data distributed parallel
     #[allow(clippy::too_many_arguments)]
     pub fn start(
-        device: Device<TrainingBackend<LC>>,
+        device: Device,
         learner: Learner<LC>,
         event_processor: Arc<Mutex<SupervisedTrainingEventProcessor<LC>>>,
         components: WorkerComponents,
@@ -44,7 +45,7 @@ where
         starting_epoch: usize,
         peer_count: usize,
         is_main: bool,
-    ) -> JoinHandle<<LC as LearningComponentsTypes>::TrainingModel> {
+    ) -> JoinHandle<<LC as LearningComponentsTypes>::Model> {
         let worker = Self {
             device,
             learner,
@@ -62,7 +63,7 @@ where
     }
 
     /// Fits the model,
-    pub fn fit(mut self) -> <LC as LearningComponentsTypes>::TrainingModel {
+    pub fn fit(mut self) -> <LC as LearningComponentsTypes>::Model {
         let num_epochs = self.components.num_epochs;
         let interrupter = self.components.interrupter;
 
@@ -80,14 +81,27 @@ where
         for training_progress in TrainingLoop::new(self.starting_epoch, num_epochs) {
             let epoch = training_progress.items_processed;
 
+            if self.is_main {
+                self.event_processor
+                    .lock()
+                    .unwrap()
+                    .process_train(LearnerEvent::StartSplit(self.components.train_total_items));
+            }
+
             epoch_train.run(
                 &mut self.learner,
                 &training_progress,
                 self.event_processor.clone(),
                 &interrupter,
                 self.peer_count,
-                self.is_main,
             );
+
+            if self.is_main {
+                self.event_processor
+                    .lock()
+                    .unwrap()
+                    .process_train(LearnerEvent::EndSplit(epoch));
+            }
 
             if interrupter.should_stop() {
                 break;
@@ -95,6 +109,12 @@ where
 
             // Validation
             if let Some(runner) = &epoch_valid {
+                {
+                    self.event_processor
+                        .lock()
+                        .unwrap()
+                        .process_valid(LearnerEvent::StartSplit(self.components.valid_total_items));
+                }
                 let mut event_processor = self.event_processor.lock().unwrap();
                 runner.run(
                     &self.learner.model(),
@@ -102,6 +122,8 @@ where
                     &mut event_processor,
                     &interrupter,
                 );
+                event_processor.process_valid(LearnerEvent::EndSplit(epoch));
+                event_processor.process_train(LearnerEvent::EndEpoch(epoch));
             }
 
             if let Some(checkpointer) = &mut self.checkpointer {

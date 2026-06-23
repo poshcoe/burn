@@ -22,42 +22,24 @@
 //! | `LibTorch` | `tch`      | Libtorch backend via `tch` |
 //! | `Autodiff` | `autodiff` | Autodiff-enabled backend (used in combination with any of the backends above) |
 //!
-//! **Note:** WGPU-based backends (`metal`, `vulkan`, `webgpu`) are mutually exclusive.
-//! All other backends can be combined freely.
-//!
-//! ## WGPU Backend Exclusivity
-//!
-//! The WGPU-based backends (`metal`, `vulkan`, `webgpu`) are **mutually exclusive** due to
-//! the current automatic compile, which can only select one target at a time.
-//!
-//! Enable only **one** of these features in your `Cargo.toml`:
-//! - `metal`
-//! - `vulkan`
-//! - `webgpu`
-//!
-//! If multiple WGPU features are enabled, the build script will emit a warning and **disable all WGPU
-//! backends** to prevent unintended behavior.
-
-#[cfg(not(any(
-    feature = "cpu",
-    feature = "cuda",
-    wgpu_metal,
-    feature = "rocm",
-    wgpu_vulkan,
-    wgpu_webgpu,
-    feature = "flex",
-    feature = "ndarray",
-    feature = "tch",
-)))]
-compile_error!("At least one backend feature must be enabled.");
+//! **Note:** All backends, including the WGPU-based ones (`wgpu`, `metal`, `vulkan`, `webgpu`),
+//! can be combined freely. Each enabled wgpu backend appears as its own
+//! [`DispatchDevice`] variant.
 
 #[macro_use]
 mod macros;
 
-mod backend;
-mod device;
+/// Dispatch backend module.
+pub mod backend;
+/// Dispatch device module.
+pub mod device;
 mod ops;
-mod tensor;
+/// Dispatch tensor module.
+pub mod tensor;
+
+/// Entry points for hosting a remote-execution server.
+#[cfg(feature = "remote-server")]
+pub mod remote_server;
 
 pub use backend::*;
 pub use device::*;
@@ -66,29 +48,76 @@ pub use tensor::*;
 extern crate alloc;
 
 /// Backends and devices used.
-pub(crate) mod backends {
+pub mod backends {
     #[cfg(feature = "autodiff")]
-    pub use burn_autodiff::Autodiff;
+    pub use burn_autodiff as autodiff;
+    #[cfg(feature = "autodiff")]
+    pub use burn_autodiff::Autodiff; // re-export for extensions
 
     #[cfg(feature = "cpu")]
-    pub use burn_cpu::{Cpu, CpuDevice};
+    pub use burn_cpu as cpu;
+    #[cfg(feature = "cpu")]
+    pub use burn_cpu::Cpu;
     #[cfg(feature = "cuda")]
-    pub use burn_cuda::{Cuda, CudaDevice};
+    pub use burn_cuda as cuda;
+    #[cfg(feature = "cuda")]
+    pub use burn_cuda::Cuda;
     #[cfg(feature = "rocm")]
-    pub use burn_rocm::{Rocm, RocmDevice};
-    #[cfg(wgpu_metal)]
+    pub use burn_rocm as rocm;
+    #[cfg(feature = "rocm")]
+    pub use burn_rocm::Rocm;
+    #[cfg(feature = "wgpu")]
+    pub use burn_wgpu as wgpu;
+    #[cfg(feature = "metal")]
     pub use burn_wgpu::Metal;
-    #[cfg(wgpu_vulkan)]
+    #[cfg(feature = "vulkan")]
     pub use burn_wgpu::Vulkan;
-    #[cfg(wgpu_webgpu)]
+    #[cfg(feature = "webgpu")]
+    pub use burn_wgpu::WebGpu;
+    #[cfg(feature = "wgpu")]
     pub use burn_wgpu::Wgpu;
-    #[cfg(any(wgpu_metal, wgpu_vulkan, wgpu_webgpu))]
+
+    #[cfg(any(feature = "flex", default_backend))]
+    pub use burn_flex as flex;
+    #[cfg(any(feature = "flex", default_backend))]
+    pub use burn_flex::Flex;
+    #[cfg(feature = "ndarray")]
+    pub use burn_ndarray as ndarray;
+    #[cfg(feature = "ndarray")]
+    pub use burn_ndarray::NdArray;
+    #[cfg(feature = "tch")]
+    pub use burn_tch as libtorch;
+    #[cfg(feature = "tch")]
+    pub use burn_tch::LibTorch;
+
+    #[cfg(feature = "remote")]
+    pub use burn_remote as remote;
+    #[cfg(feature = "remote")]
+    pub use burn_remote::RemoteBackend as Remote;
+
+    pub use super::devices::*;
+}
+
+// Re-export devices
+
+/// Backend devices.
+pub mod devices {
+    #[cfg(feature = "cpu")]
+    pub use burn_cpu::CpuDevice;
+    #[cfg(feature = "cuda")]
+    pub use burn_cuda::CudaDevice;
+    #[cfg(feature = "rocm")]
+    pub use burn_rocm::RocmDevice;
+    #[cfg(feature = "wgpu")]
     pub use burn_wgpu::WgpuDevice;
 
-    #[cfg(feature = "flex")]
-    pub use burn_flex::{Flex, FlexDevice};
+    #[cfg(any(feature = "flex", default_backend))]
+    pub use burn_flex::FlexDevice;
     #[cfg(feature = "ndarray")]
-    pub use burn_ndarray::{NdArray, NdArrayDevice};
+    pub use burn_ndarray::NdArrayDevice;
     #[cfg(feature = "tch")]
-    pub use burn_tch::{LibTorch, LibTorchDevice};
+    pub use burn_tch::LibTorchDevice;
+
+    #[cfg(feature = "remote")]
+    pub use burn_remote::RemoteDevice;
 }

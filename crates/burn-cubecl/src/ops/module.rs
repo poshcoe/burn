@@ -1,6 +1,5 @@
 use crate::{
-    CubeBackend, CubeRuntime, FloatElement, IntElement,
-    element::BoolElement,
+    CubeBackend, CubeRuntime,
     kernel::{self, conv::ConvTranspose2dStrategy},
 };
 use burn_backend::{
@@ -14,17 +13,11 @@ use burn_backend::{
         },
     },
 };
-use burn_backend::{
-    ops::rnn::RnnOps,
-    tensor::{BoolTensor, FloatTensor, IntTensor},
-};
+use burn_std::IntDType;
 
-impl<R, F, I, BT> ModuleOps<Self> for CubeBackend<R, F, I, BT>
+impl<R> ModuleOps<Self> for CubeBackend<R>
 where
     R: CubeRuntime,
-    F: FloatElement,
-    I: IntElement,
-    BT: BoolElement,
 {
     fn conv1d(
         x: FloatTensor<Self>,
@@ -257,6 +250,7 @@ where
         padding: [usize; 2],
         dilation: [usize; 2],
         ceil_mode: bool,
+        indices_dtype: IntDType,
     ) -> MaxPool2dWithIndices<Self> {
         let (output, indices) = kernel::pool::max_pool2d_with_indices(
             x,
@@ -265,7 +259,7 @@ where
             padding,
             dilation,
             ceil_mode,
-            I::dtype(),
+            indices_dtype.into(),
         );
 
         MaxPool2dWithIndices::new(output, indices)
@@ -309,7 +303,7 @@ where
         output_size: [usize; 2],
         options: InterpolateOptions,
     ) -> FloatTensor<Self> {
-        kernel::interpolate::interpolate(x, output_size, options)
+        kernel::interpolate::interpolate(x, output_size, options, Default::default()).unwrap()
     }
 
     fn interpolate_backward(
@@ -348,6 +342,47 @@ where
         .expect("Kernel to never fail")
     }
 
+    fn has_ctc_loss_backward() -> bool {
+        true
+    }
+
+    fn ctc_loss(
+        log_probs: FloatTensor<Self>,
+        targets: IntTensor<Self>,
+        input_lengths: IntTensor<Self>,
+        target_lengths: IntTensor<Self>,
+        blank: usize,
+    ) -> FloatTensor<Self> {
+        kernel::ctc::ctc_loss(log_probs, targets, input_lengths, target_lengths, blank)
+    }
+
+    fn ctc_loss_backward(
+        log_probs: FloatTensor<Self>,
+        targets: IntTensor<Self>,
+        input_lengths: IntTensor<Self>,
+        target_lengths: IntTensor<Self>,
+        grad_loss: FloatTensor<Self>,
+        blank: usize,
+    ) -> FloatTensor<Self> {
+        let (log_alpha_full, log_beta_full, nll) = kernel::ctc::ctc_alpha_beta(
+            log_probs.clone(),
+            targets.clone(),
+            input_lengths.clone(),
+            target_lengths,
+            blank,
+        );
+        burn_backend::ops::ctc::ctc_grad_from_alpha_beta_default::<Self>(
+            log_probs,
+            targets,
+            input_lengths,
+            grad_loss,
+            log_alpha_full,
+            log_beta_full,
+            nll,
+            blank,
+        )
+    }
+
     fn rfft(
         signal: FloatTensor<Self>,
         dim: usize,
@@ -366,13 +401,7 @@ where
     }
 }
 
-impl<R, F, I, BT> LstmOps<Self> for CubeBackend<R, F, I, BT>
-where
-    R: CubeRuntime,
-    F: FloatElement,
-    I: IntElement,
-    BT: BoolElement,
-{
+impl<R: CubeRuntime> LstmOps<Self> for CubeBackend<R> {
     fn lstm_elemwise(
         wx_rh: FloatTensor<Self>,
         c: FloatTensor<Self>,
@@ -398,11 +427,4 @@ where
         LstmElemwiseBackward::new(gates_grad, c_int_grad)
     }
 }
-impl<R, F, I, BT> RnnOps<Self> for CubeBackend<R, F, I, BT>
-where
-    R: CubeRuntime,
-    F: FloatElement,
-    I: IntElement,
-    BT: BoolElement,
-{
-}
+impl<R: CubeRuntime> RnnOps<Self> for CubeBackend<R> {}

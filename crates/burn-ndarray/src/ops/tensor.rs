@@ -15,16 +15,13 @@ use crate::{
     NdArray, cast_to_dtype, cat_with_dtype, execute_with_int_dtype, tensor::NdArrayTensor,
 };
 use crate::{NdArrayDevice, SEED, execute_with_float_out_dtype, execute_with_int_out_dtype, slice};
-use crate::{
-    SharedArray,
-    element::{ExpElement, FloatNdArrayElement, IntNdArrayElement, QuantElement},
-};
+use crate::{SharedArray, element::ExpElement};
 use crate::{execute_with_float_dtype, ops::grid_sample::grid_sample_2d};
 
 // Workspace crates
 use crate::rand::get_seeded_rng;
 use burn_backend::{Distribution, FloatDType, Scalar};
-use burn_backend::{ElementConversion, Shape, TensorData, backend::Backend, ops::FloatTensorOps};
+use burn_backend::{ElementConversion, Shape, TensorData, ops::FloatTensorOps};
 
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
@@ -48,12 +45,7 @@ fn round_ties_even_wrapper(x: f64) -> f64 {
     }
 }
 
-impl<E: FloatNdArrayElement, I: IntNdArrayElement, Q: QuantElement> FloatTensorOps<Self>
-    for NdArray<E, I, Q>
-where
-    NdArrayTensor: From<SharedArray<E>>,
-    NdArrayTensor: From<SharedArray<I>>,
-{
+impl FloatTensorOps<Self> for NdArray {
     fn float_from_data(data: TensorData, _device: &NdArrayDevice) -> FloatTensor<Self> {
         NdArrayTensor::from_data(data)
     }
@@ -83,19 +75,11 @@ where
         Ok(tensor.into_data())
     }
 
-    fn float_device(_tensor: &FloatTensor<Self>) -> NdArrayDevice {
-        NdArrayDevice::Cpu
-    }
-
     fn float_to_device(tensor: FloatTensor<Self>, _device: &NdArrayDevice) -> FloatTensor<Self> {
         tensor
     }
 
-    fn float_empty(
-        shape: Shape,
-        device: &<NdArray<E> as Backend>::Device,
-        dtype: FloatDType,
-    ) -> FloatTensor<Self> {
+    fn float_empty(shape: Shape, device: &NdArrayDevice, dtype: FloatDType) -> FloatTensor<Self> {
         Self::float_zeros(shape, device, dtype)
     }
 
@@ -208,6 +192,35 @@ where
                 execute_with_float_dtype!((tensor, value), |tensor, value| NdArrayOps::scatter(
                     dim, tensor, idx_array, value
                 ))
+            }
+        )
+    }
+
+    fn float_scatter_nd(
+        data: FloatTensor<Self>,
+        indices: NdArrayTensor,
+        values: FloatTensor<Self>,
+        reduction: burn_backend::tensor::IndexingUpdateOp,
+    ) -> FloatTensor<Self> {
+        execute_with_int_dtype!(
+            indices,
+            IntElem,
+            |idx_array: SharedArray<IntElem>| -> NdArrayTensor {
+                execute_with_float_dtype!((data, values), |data, values| NdArrayOps::scatter_nd(
+                    data, idx_array, values, reduction
+                ))
+            }
+        )
+    }
+
+    fn float_gather_nd(data: FloatTensor<Self>, indices: NdArrayTensor) -> FloatTensor<Self> {
+        execute_with_int_dtype!(
+            indices,
+            IntElem,
+            |idx_array: SharedArray<IntElem>| -> NdArrayTensor {
+                execute_with_float_dtype!(data, FloatElem, |array: SharedArray<FloatElem>| {
+                    NdArrayOps::gather_nd(array, idx_array)
+                })
             }
         )
     }
@@ -434,6 +447,15 @@ where
                 NdArrayMathOps::argmax_view::<I>(array.view(), dim)
             })
         })
+    }
+
+    fn float_argtopk(
+        _tensor: FloatTensor<Self>,
+        _dim: usize,
+        _k: usize,
+        _out_dtype: IntDType,
+    ) -> NdArrayTensor {
+        unimplemented!("float_argtopk not implemented for ndarray")
     }
 
     fn float_argmin(tensor: FloatTensor<Self>, dim: usize, out_dtype: IntDType) -> NdArrayTensor {
@@ -736,6 +758,12 @@ where
     ) -> FloatTensor<Self> {
         execute_with_float_dtype!(tensor, FloatElem, |array: SharedArray<FloatElem>| {
             NdArrayOps::unfold(array, dim, size, step)
+        })
+    }
+
+    fn float_hypot(lhs: FloatTensor<Self>, rhs: FloatTensor<Self>) -> FloatTensor<Self> {
+        execute_with_float_dtype!((lhs, rhs), FloatElem, |lhs, rhs| {
+            NdArrayMathOps::elementwise_op(lhs, rhs, |a: &FloatElem, b: &FloatElem| a.hypot(*b))
         })
     }
 }

@@ -1,4 +1,5 @@
 use burn_backend::{
+    IntDType,
     ops::{
         DeformConv2dBackward, MaxPool1dBackward, MaxPool1dWithIndices, MaxPool2dBackward,
         MaxPool2dWithIndices, ModuleOps,
@@ -8,7 +9,6 @@ use burn_backend::{
 };
 
 use crate::Dispatch;
-use crate::backends::*;
 
 impl ModuleOps<Self> for Dispatch {
     fn conv2d(
@@ -176,12 +176,13 @@ impl ModuleOps<Self> for Dispatch {
         padding: [usize; 2],
         dilation: [usize; 2],
         ceil_mode: bool,
+        indices_dtype: IntDType,
     ) -> MaxPool2dWithIndices<Self> {
         let (out, indices) = multi_op!(
             inputs[(x, float)],
             outputs[(out, Float), (indices, Int)],
             {
-                let res = B::max_pool2d_with_indices(x, kernel_size, stride, padding, dilation, ceil_mode);
+                let res = B::max_pool2d_with_indices(x, kernel_size, stride, padding, dilation, ceil_mode, indices_dtype);
                 (res.output, res.indices)
             }
         );
@@ -578,12 +579,13 @@ impl ModuleOps<Self> for Dispatch {
         padding: usize,
         dilation: usize,
         ceil_mode: bool,
+        indices_dtype: IntDType,
     ) -> MaxPool1dWithIndices<Self> {
         let (out, indices) = multi_op!(
             inputs[(x, float)],
             outputs[(out, Float), (indices, Int)],
             {
-                let res = B::max_pool1d_with_indices(x, kernel_size, stride, padding, dilation, ceil_mode);
+                let res = B::max_pool1d_with_indices(x, kernel_size, stride, padding, dilation, ceil_mode, indices_dtype);
                 (res.output, res.indices)
             }
         );
@@ -672,6 +674,52 @@ impl ModuleOps<Self> for Dispatch {
             }
         )
     }
+
+    fn has_ctc_loss_backward() -> bool {
+        // Dispatch routes per-tensor at runtime, but autodiff queries this flag
+        // statically. Returning `false` makes autodiff differentiate through
+        // the default decomposed forward, which is safe for every inner
+        // backend regardless of whether it has its own ctc_loss_backward.
+        false
+    }
+
+    fn ctc_loss(
+        log_probs: FloatTensor<Self>,
+        targets: IntTensor<Self>,
+        input_lengths: IntTensor<Self>,
+        target_lengths: IntTensor<Self>,
+        blank: usize,
+    ) -> FloatTensor<Self> {
+        multi_op!(
+            inputs[(log_probs, float), (targets, int), (input_lengths, int), (target_lengths, int)],
+            => Float,
+            B::ctc_loss(log_probs, targets, input_lengths, target_lengths, blank)
+        )
+    }
+
+    fn ctc_loss_backward(
+        log_probs: FloatTensor<Self>,
+        targets: IntTensor<Self>,
+        input_lengths: IntTensor<Self>,
+        target_lengths: IntTensor<Self>,
+        grad_loss: FloatTensor<Self>,
+        blank: usize,
+    ) -> FloatTensor<Self> {
+        multi_op!(
+            inputs[(log_probs, float), (targets, int), (input_lengths, int), (target_lengths, int), (grad_loss, float)],
+            => Float,
+            B::ctc_loss_backward(log_probs, targets, input_lengths, target_lengths, grad_loss, blank)
+        )
+    }
+
+    // TODO: linear ops
+    // fn linear(
+    //         x: FloatTensor<Self>,
+    //         weight: FloatTensor<Self>,
+    //         bias: Option<FloatTensor<Self>>,
+    //     ) -> FloatTensor<Self> {
+
+    // }
 }
 
 impl burn_backend::ops::rnn::lstm::LstmOps<Self> for Dispatch {}

@@ -32,8 +32,10 @@ pub use memory_use::*;
 
 // Training metrics
 mod acc;
+mod auc_pr;
 mod auroc;
 mod base;
+mod bleu;
 mod cer;
 mod confusion_stats;
 mod fbetascore;
@@ -44,12 +46,15 @@ mod loss;
 mod perplexity;
 mod precision;
 mod recall;
+mod rouge;
 mod top_k_acc;
 mod wer;
 
 pub use acc::*;
+pub use auc_pr::*;
 pub use auroc::*;
 pub use base::*;
+pub use bleu::*;
 pub use cer::*;
 pub use confusion_stats::ConfusionStatsInput;
 pub use fbetascore::*;
@@ -60,6 +65,7 @@ pub use loss::*;
 pub use perplexity::*;
 pub use precision::*;
 pub use recall::*;
+pub use rouge::*;
 pub use top_k_acc::*;
 pub use wer::*;
 

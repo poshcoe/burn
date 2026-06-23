@@ -1,5 +1,3 @@
-use std::marker::PhantomData;
-
 use crate::{
     AgentEnvAsyncLoop, AgentEnvLoop, AsyncAgentEnvLoopConfig, EvaluationItem,
     EventProcessorTraining, MultiAgentEnvLoop, RLComponents, RLComponentsTypes, RLEvent,
@@ -7,8 +5,9 @@ use crate::{
 };
 use burn_core::{self as burn};
 use burn_core::{config::Config, data::dataloader::Progress};
-use burn_flex::Flex;
-use burn_rl::{AsyncPolicy, Policy, PolicyLearner, SliceAccess, TransitionBuffer};
+use burn_rl::{
+    AsyncPolicy, Policy, PolicyLearner, SliceAccess, ToAction, ToObservation, TransitionBuffer,
+};
 
 /// Parameters of an on policy training with multi environments and double-batching.
 #[derive(Config, Debug)]
@@ -44,25 +43,21 @@ pub struct OffPolicyConfig {
 }
 
 /// Off-policy reinforcement learning strategy with multi-env experience collection and double-batching.
-pub struct OffPolicyStrategy<RLC: RLComponentsTypes> {
+pub struct OffPolicyStrategy {
     config: OffPolicyConfig,
-    _components: PhantomData<RLC>,
 }
-impl<RLC: RLComponentsTypes> OffPolicyStrategy<RLC> {
+impl OffPolicyStrategy {
     /// Create a new off-policy base strategy.
     pub fn new(config: OffPolicyConfig) -> Self {
-        Self {
-            config,
-            _components: PhantomData,
-        }
+        Self { config }
     }
 }
 
-impl<RLC> RLStrategy<RLC> for OffPolicyStrategy<RLC>
+impl<RLC> RLStrategy<RLC> for OffPolicyStrategy
 where
     RLC: RLComponentsTypes,
-    RLC::PolicyObs: SliceAccess<RLC::Backend>,
-    RLC::PolicyAction: SliceAccess<RLC::Backend>,
+    RLC::PolicyObs: SliceAccess,
+    RLC::PolicyAction: SliceAccess,
 {
     fn train_loop(
         &self,
@@ -75,7 +70,8 @@ where
         let mut checkpointer = training_components.checkpointer;
         let num_steps_total = training_components.num_steps;
 
-        let mut env_runner = MultiAgentEnvLoop::<Flex, RLC>::new(
+        let inference_device = training_components.inference_device;
+        let mut env_runner = MultiAgentEnvLoop::<RLC>::new(
             self.config.num_envs,
             env_init.clone(),
             AsyncPolicy::new(
@@ -84,37 +80,35 @@ where
             ),
             false,
             false,
-            &Default::default(),
+            &inference_device,
         );
         let runner_config = AsyncAgentEnvLoopConfig {
             eval: true,
             deterministic: true,
             id: 0,
         };
-        let mut env_runner_valid = AgentEnvAsyncLoop::<Flex, RLC>::new(
+        let mut env_runner_valid = AgentEnvAsyncLoop::<RLC>::new(
             env_init,
             AsyncPolicy::new(1, learner_agent.policy()),
             runner_config,
-            &Default::default(),
+            &inference_device,
             None,
             None,
         );
 
-        let device: <RLC::Backend as burn_core::prelude::Backend>::Device = Default::default();
-        let mut transition_buffer = TransitionBuffer::<
-            RLC::Backend,
-            RLC::PolicyObs,
-            RLC::PolicyAction,
-        >::new(self.config.replay_buffer_size, &device);
+        let mut transition_buffer = TransitionBuffer::<RLC::PolicyObs, RLC::PolicyAction>::new(
+            self.config.replay_buffer_size,
+            &learner_agent.device(),
+        );
 
         let mut valid_next = self.config.eval_interval + starting_epoch - 1;
         let mut progress = Progress {
             items_processed: starting_epoch,
             items_total: num_steps_total,
+            unit: Some("steps".to_string()),
         };
 
-        let mut intermediary_update: Option<<RLC::Policy as Policy<RLC::Backend>>::PolicyState> =
-            None;
+        let mut intermediary_update: Option<<RLC::Policy as Policy>::PolicyState> = None;
         while progress.items_processed < num_steps_total {
             if training_components.interrupter.should_stop() {
                 let reason = training_components
@@ -135,9 +129,10 @@ where
 
             for item in &items {
                 let t = &item.transition;
-                let state: RLC::PolicyObs = t.state.clone().into();
-                let next_state: RLC::PolicyObs = t.next_state.clone().into();
-                let action: RLC::PolicyAction = t.action.clone().into();
+                let state: RLC::PolicyObs = t.state.clone().to_observation(&env_runner.device());
+                let next_state: RLC::PolicyObs =
+                    t.next_state.clone().to_observation(&env_runner.device());
+                let action: RLC::PolicyAction = t.action.clone().to_action(&env_runner.device());
                 let reward = t.reward.to_data().to_vec::<f32>().unwrap()[0];
                 let done = t.done.to_data().to_vec::<f32>().unwrap()[0] > 0.5;
                 transition_buffer.push(state, next_state, action, reward, done);
@@ -152,7 +147,7 @@ where
                 for _ in 0..self.config.train_steps {
                     let batch = transition_buffer.sample(self.config.train_batch_size);
                     let train_item = learner_agent.train(batch);
-                    intermediary_update = Some(train_item.policy);
+                    intermediary_update = Some(learner_agent.policy().state());
 
                     event_processor.process_train(RLEvent::TrainStep(EvaluationItem::new(
                         train_item.item,
@@ -163,6 +158,10 @@ where
             }
 
             if valid_next > previous_steps && valid_next <= progress.items_processed {
+                event_processor.process_valid(crate::AgentEvaluationEvent::Start(
+                    self.config.eval_episodes,
+                ));
+
                 env_runner_valid.update_policy(learner_agent.policy().state());
                 env_runner_valid.run_episodes(
                     self.config.eval_episodes,
@@ -181,6 +180,8 @@ where
                 }
 
                 valid_next += self.config.eval_interval;
+
+                event_processor.process_valid(crate::AgentEvaluationEvent::End);
             }
         }
 

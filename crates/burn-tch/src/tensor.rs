@@ -65,6 +65,7 @@ pub struct TchTensor {
 }
 
 impl TensorMetadata for TchTensor {
+    type Device = LibTorchDevice;
     fn dtype(&self) -> DType {
         match self.tensor.kind() {
             tch::Kind::Uint8 => DType::U8,
@@ -89,11 +90,8 @@ impl TensorMetadata for TchTensor {
     fn rank(&self) -> usize {
         self.tensor.dim()
     }
-}
-
-impl burn_backend::QTensorPrimitive for TchTensor {
-    fn scheme(&self) -> &burn_backend::quantization::QuantScheme {
-        unimplemented!("Quantization is not supported")
+    fn device(&self) -> Self::Device {
+        self.tensor.device().into()
     }
 }
 
@@ -136,10 +134,11 @@ impl IntoKind for DType {
             DType::F16 => Ok(tch::Kind::Half),
             DType::BF16 => Ok(tch::Kind::BFloat16),
             DType::I64 => Ok(tch::Kind::Int64),
-            DType::I32 => Ok(tch::Kind::Int),
-            DType::I16 => Ok(tch::Kind::Int16),
-            DType::I8 => Ok(tch::Kind::Int8),
-            DType::U8 => Ok(tch::Kind::Uint8),
+            // LibTorch backend currently forces I64 int dtype
+            // DType::I32 => Ok(tch::Kind::Int),
+            // DType::I16 => Ok(tch::Kind::Int16),
+            // DType::I8 => Ok(tch::Kind::Int8),
+            // DType::U8 => Ok(tch::Kind::Uint8),
             DType::Bool(BoolStore::Native) => Ok(tch::Kind::Bool),
             other => Err(tch::TchError::Kind(format!("Unsupported dtype {other:?}"))),
         }
@@ -441,7 +440,7 @@ mod tests {
     use burn_backend::ops::FloatTensorOps;
     use burn_backend::{Backend, quantization::QuantScheme, read_sync};
 
-    type B = crate::LibTorch<f32>;
+    type B = crate::LibTorch;
 
     #[test]
     fn should_have_bf16_kind() {

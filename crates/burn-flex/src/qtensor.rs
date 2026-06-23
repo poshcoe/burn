@@ -1,9 +1,9 @@
 use alloc::vec::Vec;
 
-use burn_backend::{DType, QTensorPrimitive, TensorMetadata, quantization::QuantStore};
+use burn_backend::{DType, TensorMetadata};
 use burn_std::{QuantScheme, Shape};
 
-use crate::tensor::FlexTensor;
+use crate::{FlexDevice, tensor::FlexTensor};
 
 /// Quantized tensor for the Flex backend.
 ///
@@ -52,17 +52,9 @@ impl FlexQTensor {
     }
 }
 
-impl QTensorPrimitive for FlexQTensor {
-    fn scheme(&self) -> &QuantScheme {
-        &self.scheme
-    }
-
-    fn default_scheme() -> QuantScheme {
-        QuantScheme::default().with_store(QuantStore::Native)
-    }
-}
-
 impl TensorMetadata for FlexQTensor {
+    type Device = FlexDevice;
+
     fn dtype(&self) -> DType {
         DType::QFloat(self.scheme)
     }
@@ -73,5 +65,9 @@ impl TensorMetadata for FlexQTensor {
 
     fn rank(&self) -> usize {
         self.tensor.rank()
+    }
+
+    fn device(&self) -> Self::Device {
+        FlexDevice
     }
 }

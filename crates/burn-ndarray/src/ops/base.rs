@@ -4,6 +4,7 @@ use burn_backend::element::{Element, ElementConversion};
 use burn_backend::{DType, quantization::QuantValue};
 use core::fmt::Debug;
 use core::marker::PhantomData;
+use ndarray::Dimension;
 use ndarray::IntoDimension;
 use ndarray::SliceInfo;
 use ndarray::Zip;
@@ -184,6 +185,160 @@ where
             output.swap_axes(ndims - 1, dim);
         }
         output
+    }
+
+    pub fn scatter_nd<I: NdArrayElement>(
+        data: SharedArray<E>,
+        indices: SharedArray<I>,
+        values: SharedArray<E>,
+        reduction: burn_backend::tensor::IndexingUpdateOp,
+    ) -> SharedArray<E>
+    where
+        E: core::ops::Mul<Output = E> + PartialOrd,
+    {
+        use burn_backend::tensor::IndexingUpdateOp;
+
+        let data_shape: Vec<usize> = data.shape().to_vec();
+        let idx_shape: Vec<usize> = indices.shape().to_vec();
+        let m = idx_shape.len();
+        let k = idx_shape[m - 1];
+
+        // Number of index tuples = product of batch dims (first M-1 dims of indices)
+        let num_indices: usize = idx_shape[..m - 1].iter().product();
+        // Size of each slice to scatter = product of data.shape[K..]
+        let slice_size: usize = data_shape[k..].iter().product();
+
+        let mut output = data.into_owned();
+        let output_flat = output
+            .as_slice_mut()
+            .expect("ndarray scatter_nd requires contiguous data");
+
+        // Flatten indices to [num_indices, K]
+        let idx_flat = indices
+            .as_slice()
+            .expect("ndarray scatter_nd requires contiguous indices");
+
+        // Flatten values to [num_indices, slice_size]
+        let val_flat = values
+            .as_slice()
+            .expect("ndarray scatter_nd requires contiguous values");
+
+        let strides: Vec<usize> = {
+            let mut s = vec![0usize; k];
+            if k > 0 {
+                s[k - 1] = slice_size;
+                for i in (0..k - 1).rev() {
+                    s[i] = s[i + 1] * data_shape[i + 1];
+                }
+            }
+            s
+        };
+
+        for n in 0..num_indices {
+            // Compute flat base offset from the K-dimensional index
+            let mut base_offset = 0usize;
+            for j in 0..k {
+                let idx_val = idx_flat[n * k + j].elem::<i64>() as usize;
+                base_offset += idx_val * strides[j];
+            }
+
+            // Apply reduction over the slice
+            let val_offset = n * slice_size;
+            match reduction {
+                IndexingUpdateOp::Assign => {
+                    output_flat[base_offset..(base_offset + slice_size)]
+                        .copy_from_slice(&val_flat[val_offset..(val_offset + slice_size)]);
+                }
+                IndexingUpdateOp::Add => {
+                    for s in 0..slice_size {
+                        output_flat[base_offset + s].add_assign(val_flat[val_offset + s]);
+                    }
+                }
+                IndexingUpdateOp::Mul => {
+                    for s in 0..slice_size {
+                        output_flat[base_offset + s] =
+                            output_flat[base_offset + s] * val_flat[val_offset + s];
+                    }
+                }
+                IndexingUpdateOp::Min => {
+                    for s in 0..slice_size {
+                        let b = val_flat[val_offset + s];
+                        if b < output_flat[base_offset + s] {
+                            output_flat[base_offset + s] = b;
+                        }
+                    }
+                }
+                IndexingUpdateOp::Max => {
+                    for s in 0..slice_size {
+                        let b = val_flat[val_offset + s];
+                        if b > output_flat[base_offset + s] {
+                            output_flat[base_offset + s] = b;
+                        }
+                    }
+                }
+            }
+        }
+
+        output.into_shared()
+    }
+
+    pub fn gather_nd<I: NdArrayElement>(
+        data: SharedArray<E>,
+        indices: SharedArray<I>,
+    ) -> SharedArray<E> {
+        let data_shape: Vec<usize> = data.shape().to_vec();
+        let idx_shape: Vec<usize> = indices.shape().to_vec();
+        let m = idx_shape.len();
+        let k = idx_shape[m - 1];
+
+        // Number of index tuples
+        let num_indices: usize = idx_shape[..m - 1].iter().product();
+        // Size of each output slice
+        let slice_size: usize = data_shape[k..].iter().product();
+
+        // Output shape: idx_shape[..m-1] ++ data_shape[k..]
+        let mut out_shape_vec: Vec<usize> = idx_shape[..m - 1].to_vec();
+        out_shape_vec.extend_from_slice(&data_shape[k..]);
+        let out_total = num_indices * slice_size;
+
+        let data_flat = data
+            .as_slice()
+            .expect("ndarray gather_nd requires contiguous data");
+
+        let idx_flat = indices
+            .as_slice()
+            .expect("ndarray gather_nd requires contiguous indices");
+
+        let strides: Vec<usize> = {
+            let mut s = vec![0usize; k];
+            if k > 0 {
+                s[k - 1] = slice_size;
+                for i in (0..k - 1).rev() {
+                    s[i] = s[i + 1] * data_shape[i + 1];
+                }
+            }
+            s
+        };
+
+        let mut output_vec: Vec<E> = vec![0.elem::<E>(); out_total];
+
+        for n in 0..num_indices {
+            let mut base_offset = 0usize;
+            for j in 0..k {
+                let idx_val = idx_flat[n * k + j].elem::<i64>() as usize;
+                base_offset += idx_val * strides[j];
+            }
+
+            let out_offset = n * slice_size;
+            output_vec[out_offset..(out_offset + slice_size)]
+                .copy_from_slice(&data_flat[base_offset..(base_offset + slice_size)]);
+        }
+
+        let out_shape = Shape::from(out_shape_vec);
+        let output = ArrayD::from_shape_vec(out_shape.as_slice(), output_vec)
+            .expect("gather_nd: shape mismatch");
+
+        output.into_shared()
     }
 
     fn gather_batch_size(shape_tensor: &[usize], shape_indices: &[usize]) -> usize {
@@ -519,9 +674,9 @@ macro_rules! dispatch_unary_simd {
     ($elem: ty, $op: ty, $lhs: expr, $($ty: ty),*) => {{ $lhs }};
 }
 
-// Helper function to broadcast two tensors to a common shape for comparison operations
+// Helper function to broadcast two tensors to a common shape for binary operations
 // Returns broadcasted views that can be safely zipped
-fn broadcast_for_comparison<'a, E: Copy, S1, S2>(
+fn broadcast_for_binary_ops<'a, E: Copy, S1, S2>(
     lhs: &'a ndarray::ArrayBase<S1, ndarray::IxDyn>,
     rhs: &'a ndarray::ArrayBase<S2, ndarray::IxDyn>,
 ) -> (
@@ -688,16 +843,17 @@ where
     }
 
     pub fn remainder(lhs: SharedArray<E>, rhs: SharedArray<E>) -> SharedArray<E> {
-        // Use into_owned() instead of clone() - only copies if shared, avoids copy if unique
-        let mut out = lhs.into_owned();
-        Zip::from(&mut out).and(&rhs).for_each(|out_elem, &b| {
-            // out_elem holds lhs value; read it before overwriting with remainder
-            let a_f = (*out_elem).to_f64();
-            let b_f = b.to_f64();
-            let r = a_f - b_f * (a_f / b_f).floor();
-            *out_elem = r.elem();
-        });
-        out.into_shared()
+        let (lhs, rhs) = broadcast_for_binary_ops(&lhs, &rhs);
+
+        Zip::from(&lhs)
+            .and(&rhs)
+            .map_collect(|&a, &b| {
+                let a_f = a.to_f64();
+                let b_f = b.to_f64();
+                let r = a_f - b_f * (a_f / b_f).floor();
+                r.elem()
+            })
+            .into_shared()
     }
 
     pub fn remainder_scalar(lhs: SharedArray<E>, rhs: E) -> SharedArray<E>
@@ -770,10 +926,19 @@ where
         dim: usize,
         indices: SharedArray<I>,
     ) -> SharedArray<E> {
+        // Read the indices from a contiguous slice rather than through the
+        // array's own iterator: the slice walks a pointer, while the
+        // iterator advances a dynamic-rank index on every element and costs
+        // more than the selection itself. The standardization is a view, and
+        // hence free, for contiguous indices; otherwise, it pays that
+        // iteration once, which the direct consumption would pay anyway.
+        let indices = indices.as_standard_layout();
         let array = tensor.select(
             Axis(dim),
             &indices
-                .into_iter()
+                .as_slice()
+                .unwrap()
+                .iter()
                 .map(|i| i.elem::<i64>() as usize)
                 .collect::<Vec<_>>(),
         );
@@ -799,15 +964,67 @@ where
         output_array.into_shared()
     }
 
+    fn broadcast_dims<D>(lhs: D::Pattern, rhs: D::Pattern) -> Option<D::Pattern>
+    where
+        D: Dimension + IntoDimension<Dim = D>,
+    {
+        if lhs == rhs {
+            Some(lhs)
+        } else {
+            let lhs = lhs.into_dimension();
+            let rhs = rhs.into_dimension();
+            let lhs = lhs.slice();
+            let rhs = rhs.slice();
+
+            let total_dims = core::cmp::max(lhs.len(), rhs.len());
+            let mut target_shape = vec![0; total_dims];
+            // Iterate backwards (from the trailing dimensions inward)
+            for i in 0..total_dims {
+                let lhs_dim = lhs
+                    .len()
+                    .checked_sub(1 + i)
+                    .map(|idx| lhs[idx])
+                    .unwrap_or(1);
+                let rhs_dim = rhs
+                    .len()
+                    .checked_sub(1 + i)
+                    .map(|idx| rhs[idx])
+                    .unwrap_or(1);
+
+                if lhs_dim == rhs_dim {
+                    target_shape[total_dims - 1 - i] = lhs_dim;
+                } else if lhs_dim == 1 {
+                    target_shape[total_dims - 1 - i] = rhs_dim;
+                } else if rhs_dim == 1 {
+                    target_shape[total_dims - 1 - i] = lhs_dim;
+                } else {
+                    // Dimensions are completely incompatible (e.g., trying to match 3 and 5)
+                    return None;
+                }
+            }
+
+            let dyn_dim = IxDyn(&target_shape);
+            D::Dim::from_dimension(&dyn_dim).map(|d| d.into_pattern())
+        }
+    }
+
     pub(crate) fn elementwise_op<OtherE>(
         lhs: SharedArray<E>,
         rhs: SharedArray<OtherE>,
         var_name: impl FnMut(&E, &OtherE) -> E,
     ) -> SharedArray<E> {
-        let lhs = lhs.broadcast(rhs.dim()).unwrap_or(lhs.view());
-        let rhs = rhs.broadcast(lhs.dim()).unwrap_or(rhs.view());
+        if let Some(target) = Self::broadcast_dims::<IxDyn>(lhs.dim(), rhs.dim()) {
+            let lhs = lhs.broadcast(target.clone()).unwrap();
+            let rhs = rhs.broadcast(target).unwrap();
 
-        Zip::from(lhs).and(rhs).map_collect(var_name).into_shared()
+            Zip::from(lhs).and(rhs).map_collect(var_name).into_shared()
+        } else {
+            panic!(
+                "Incompatible shapes for broadcasting: {:?} and {:?}",
+                lhs.shape(),
+                rhs.shape()
+            );
+        }
     }
 
     pub(crate) fn elementwise_op_scalar(
@@ -829,7 +1046,7 @@ where
         );
 
         // Use the helper to broadcast both arrays to a common shape
-        let (lhs_broadcast, rhs_broadcast) = broadcast_for_comparison(&lhs, &rhs);
+        let (lhs_broadcast, rhs_broadcast) = broadcast_for_binary_ops(&lhs, &rhs);
         // Now we can safely zip and compare
         Zip::from(&lhs_broadcast)
             .and(&rhs_broadcast)
@@ -1029,7 +1246,7 @@ where
         );
 
         // Use the helper to broadcast both arrays to a common shape
-        let (lhs_broadcast, rhs_broadcast) = broadcast_for_comparison(&lhs, &rhs);
+        let (lhs_broadcast, rhs_broadcast) = broadcast_for_binary_ops(&lhs, &rhs);
         // Now we can safely zip and compare
         Zip::from(&lhs_broadcast)
             .and(&rhs_broadcast)
@@ -1077,7 +1294,7 @@ where
         );
 
         // Use the helper to broadcast both arrays to a common shape
-        let (lhs_broadcast, rhs_broadcast) = broadcast_for_comparison(&lhs, &rhs);
+        let (lhs_broadcast, rhs_broadcast) = broadcast_for_binary_ops(&lhs, &rhs);
         // Now we can safely zip and compare
         Zip::from(&lhs_broadcast)
             .and(&rhs_broadcast)
@@ -1112,7 +1329,7 @@ where
         );
 
         // Use the helper to broadcast both arrays to a common shape
-        let (lhs_broadcast, rhs_broadcast) = broadcast_for_comparison(&lhs, &rhs);
+        let (lhs_broadcast, rhs_broadcast) = broadcast_for_binary_ops(&lhs, &rhs);
         // Now we can safely zip and compare
         Zip::from(&lhs_broadcast)
             .and(&rhs_broadcast)
@@ -1147,7 +1364,7 @@ where
         );
 
         // Use the helper to broadcast both arrays to a common shape
-        let (lhs_broadcast, rhs_broadcast) = broadcast_for_comparison(&lhs, &rhs);
+        let (lhs_broadcast, rhs_broadcast) = broadcast_for_binary_ops(&lhs, &rhs);
 
         // Now we can safely zip and compare
         Zip::from(&lhs_broadcast)
@@ -1292,7 +1509,7 @@ impl NdArrayBoolOps {
         };
 
         // Use the helper to broadcast both arrays to a common shape
-        let (lhs_broadcast, rhs_broadcast) = broadcast_for_comparison(&lhs, &rhs);
+        let (lhs_broadcast, rhs_broadcast) = broadcast_for_binary_ops(&lhs, &rhs);
         // Now we can safely zip and compare
         Zip::from(&lhs_broadcast)
             .and(&rhs_broadcast)
@@ -1318,7 +1535,7 @@ impl NdArrayBoolOps {
         };
 
         // Use the helper to broadcast both arrays to a common shape
-        let (lhs_broadcast, rhs_broadcast) = broadcast_for_comparison(&lhs, &rhs);
+        let (lhs_broadcast, rhs_broadcast) = broadcast_for_binary_ops(&lhs, &rhs);
         // Now we can safely zip and compare
         Zip::from(&lhs_broadcast)
             .and(&rhs_broadcast)
@@ -1334,7 +1551,7 @@ impl NdArrayBoolOps {
         };
 
         // Use the helper to broadcast both arrays to a common shape
-        let (lhs_broadcast, rhs_broadcast) = broadcast_for_comparison(&lhs, &rhs);
+        let (lhs_broadcast, rhs_broadcast) = broadcast_for_binary_ops(&lhs, &rhs);
         // Now we can safely zip and compare
         Zip::from(&lhs_broadcast)
             .and(&rhs_broadcast)

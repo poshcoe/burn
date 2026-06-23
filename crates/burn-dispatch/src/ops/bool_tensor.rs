@@ -5,7 +5,6 @@ use burn_backend::{
     tensor::{BoolTensor, FloatTensor, IntTensor},
 };
 
-use crate::backends::*;
 use crate::{Dispatch, DispatchDevice};
 
 impl BoolTensorOps<Self> for Dispatch {
@@ -35,10 +34,6 @@ impl BoolTensorOps<Self> for Dispatch {
 
     fn bool_into_float(tensor: BoolTensor<Self>, out_dtype: FloatDType) -> FloatTensor<Self> {
         unary_op!(tensor, bool, |tensor| B::bool_into_float(tensor, out_dtype) => Float)
-    }
-
-    fn bool_device(tensor: &BoolTensor<Self>) -> DispatchDevice {
-        tensor.device()
     }
 
     fn bool_to_device(tensor: BoolTensor<Self>, device: &DispatchDevice) -> BoolTensor<Self> {

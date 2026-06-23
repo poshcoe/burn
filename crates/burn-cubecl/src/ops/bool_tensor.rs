@@ -1,8 +1,10 @@
 use crate::{
-    CubeBackend, CubeRuntime, FloatElement, IntElement,
+    CubeBackend, CubeRuntime,
     element::BoolElement,
     kernel::{self, AndOp, OrOp},
+    tensor::CubeTensor,
 };
+use burn_backend::cubecl::dtype_to_storage_type;
 use burn_backend::{
     ExecutionError, Slice,
     ops::BoolTensorOps,
@@ -11,17 +13,21 @@ use burn_backend::{
 use burn_backend::{Scalar, Shape, TensorData};
 use burn_std::{BoolDType, BoolStore, DType, FloatDType, IntDType};
 use cubecl::prelude::InputScalar;
+use cubek::reduce::components::instructions::ReduceOperationConfig;
 use std::ops::Range;
 
 use super::{expand, numeric, permute, unfold};
 
-impl<R, F, I, BT> BoolTensorOps<Self> for CubeBackend<R, F, I, BT>
-where
-    R: CubeRuntime,
-    F: FloatElement,
-    I: IntElement,
-    BT: BoolElement,
-{
+/// The boolean storage of a cubecl bool tensor. Cubecl backends never use
+/// native bool (see `CubeBackend::supports_dtype`), so it is always `U8`/`U32`.
+fn bool_store<R: CubeRuntime>(tensor: &CubeTensor<R>) -> BoolDType {
+    match tensor.dtype {
+        DType::Bool(store) => store,
+        other => unreachable!("cubecl bool tensors are always Bool(_): {other:?}"),
+    }
+}
+
+impl<R: CubeRuntime> BoolTensorOps<Self> for CubeBackend<R> {
     fn bool_empty(shape: Shape, device: &Device<Self>, dtype: BoolDType) -> BoolTensor<Self> {
         super::empty(shape, device, dtype.into())
     }
@@ -50,10 +56,6 @@ where
 
     fn bool_into_int(tensor: BoolTensor<Self>, out_dtype: IntDType) -> IntTensor<Self> {
         kernel::bool_cast(tensor, out_dtype.into())
-    }
-
-    fn bool_device(tensor: &BoolTensor<Self>) -> Device<Self> {
-        tensor.device.clone()
     }
 
     fn bool_to_device(tensor: BoolTensor<Self>, device: &Device<Self>) -> BoolTensor<Self> {
@@ -98,9 +100,10 @@ where
 
     fn bool_not(tensor: BoolTensor<Self>) -> BoolTensor<Self> {
         let dtype = tensor.dtype;
+        let storage = dtype_to_storage_type(dtype);
         let scalar = match dtype {
-            DType::Bool(BoolStore::U32) => InputScalar::new(u32::false_val(), dtype),
-            DType::Bool(BoolStore::U8) => InputScalar::new(u8::false_val(), dtype),
+            DType::Bool(BoolStore::U32) => InputScalar::new(u32::false_val(), storage),
+            DType::Bool(BoolStore::U8) => InputScalar::new(u8::false_val(), storage),
             other => unimplemented!("Unsupported dtype for `bool_from_data` {other:?}"),
         };
         kernel::equal_elem(tensor, scalar, dtype)
@@ -112,6 +115,26 @@ where
 
     fn bool_or(lhs: BoolTensor<Self>, rhs: BoolTensor<Self>) -> BoolTensor<Self> {
         kernel::launch_binop::<R, OrOp>(lhs, rhs)
+    }
+
+    fn bool_any(tensor: BoolTensor<Self>) -> BoolTensor<Self> {
+        let store = bool_store(&tensor);
+        kernel::reduce::reduce_logical(tensor, None, ReduceOperationConfig::Any, store)
+    }
+
+    fn bool_any_dim(tensor: BoolTensor<Self>, dim: usize) -> BoolTensor<Self> {
+        let store = bool_store(&tensor);
+        kernel::reduce::reduce_logical(tensor, Some(dim), ReduceOperationConfig::Any, store)
+    }
+
+    fn bool_all(tensor: BoolTensor<Self>) -> BoolTensor<Self> {
+        let store = bool_store(&tensor);
+        kernel::reduce::reduce_logical(tensor, None, ReduceOperationConfig::All, store)
+    }
+
+    fn bool_all_dim(tensor: BoolTensor<Self>, dim: usize) -> BoolTensor<Self> {
+        let store = bool_store(&tensor);
+        kernel::reduce::reduce_logical(tensor, Some(dim), ReduceOperationConfig::All, store)
     }
 
     fn bool_into_float(tensor: BoolTensor<Self>, out_dtype: FloatDType) -> FloatTensor<Self> {
@@ -182,7 +205,12 @@ where
         value: Scalar,
     ) -> BoolTensor<Self> {
         let dtype = tensor.dtype;
-        kernel::mask_fill_auto(tensor, mask, InputScalar::new(value, dtype), dtype)
+        kernel::mask_fill_auto(
+            tensor,
+            mask,
+            InputScalar::new(value, dtype_to_storage_type(dtype)),
+            dtype,
+        )
     }
 
     fn bool_gather(
@@ -204,6 +232,10 @@ where
 
     fn bool_equal_elem(lhs: BoolTensor<Self>, rhs: Scalar) -> BoolTensor<Self> {
         let dtype = lhs.dtype;
-        kernel::equal_elem(lhs, InputScalar::new(rhs, dtype), dtype)
+        kernel::equal_elem(
+            lhs,
+            InputScalar::new(rhs, dtype_to_storage_type(dtype)),
+            dtype,
+        )
     }
 }

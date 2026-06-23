@@ -3,22 +3,21 @@ use super::{
     batcher::Batcher,
 };
 use burn_dataset::Dataset;
-use burn_tensor::backend::Backend;
+use burn_tensor::Device;
 use rand::{SeedableRng, rngs::StdRng};
 use std::sync::Arc;
 
 /// A builder for data loaders.
-pub struct DataLoaderBuilder<B: Backend, I, O> {
+pub struct DataLoaderBuilder<I, O> {
     strategy: Option<Box<dyn BatchStrategy<I>>>,
-    batcher: Arc<dyn Batcher<B, I, O>>,
+    batcher: Arc<dyn Batcher<I, O>>,
     num_threads: Option<usize>,
     shuffle: Option<u64>,
-    device: Option<B::Device>,
+    device: Option<Device>,
 }
 
-impl<B, I, O> DataLoaderBuilder<B, I, O>
+impl<I, O> DataLoaderBuilder<I, O>
 where
-    B: Backend,
     I: Send + Sync + Clone + std::fmt::Debug + 'static,
     O: Send + Clone + std::fmt::Debug + 'static,
 {
@@ -33,7 +32,7 @@ where
     /// The data loader builder.
     pub fn new<Bt>(batcher: Bt) -> Self
     where
-        Bt: Batcher<B, I, O> + 'static,
+        Bt: Batcher<I, O> + 'static,
     {
         Self {
             batcher: Arc::new(batcher),
@@ -105,7 +104,7 @@ where
     /// # Returns
     ///
     /// The data loader builder.
-    pub fn set_device(mut self, device: B::Device) -> Self {
+    pub fn set_device(mut self, device: Device) -> Self {
         self.device = Some(device);
         self
     }
@@ -119,7 +118,7 @@ where
     /// # Returns
     ///
     /// The data loader.
-    pub fn build<D>(self, dataset: D) -> Arc<dyn DataLoader<B, O>>
+    pub fn build<D>(self, dataset: D) -> Arc<dyn DataLoader<O>>
     where
         D: Dataset<I> + 'static,
     {
@@ -157,27 +156,25 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[cfg(test)]
+    use burn_tensor::Device;
+
     use super::*;
-    use crate::TestBackend;
     use crate::data::dataset::FakeDataset;
 
     #[derive(new, Clone)]
     struct TestBatcherDevice;
 
     #[cfg(test)]
-    impl<I> Batcher<TestBackend, I, TestDevice> for TestBatcherDevice {
-        fn batch(&self, _items: Vec<I>, device: &TestDevice) -> TestDevice {
-            *device
+    impl<I> Batcher<I, Device> for TestBatcherDevice {
+        fn batch(&self, _items: Vec<I>, device: &Device) -> Device {
+            device.clone()
         }
     }
 
-    type TestDevice = <TestBackend as Backend>::Device;
-
     #[test]
     fn test_dataloader_no_workers() {
-        type TestDevice = <TestBackend as Backend>::Device;
-
-        let default_device = TestDevice::default();
+        let default_device = Device::default();
         let dataloader = DataLoaderBuilder::new(TestBatcherDevice::new())
             .batch_size(1)
             .build(FakeDataset::<String>::new(9));
@@ -191,7 +188,7 @@ mod tests {
 
     #[test]
     fn test_dataloader_default_device() {
-        let default_device = TestDevice::default();
+        let default_device = Device::default();
         let dataloader = DataLoaderBuilder::new(TestBatcherDevice::new())
             .batch_size(1)
             .num_workers(1)
@@ -211,29 +208,15 @@ mod tests {
             .num_workers(1)
             .build(FakeDataset::<String>::new(11));
 
-        #[cfg(all(
-            test,
-            not(feature = "test-tch"),
-            not(feature = "test-wgpu"),
-            not(feature = "test-cuda")
-        ))]
+        #[cfg(all(test, not(feature = "tch"), not(feature = "cuda")))]
         // Only one device exists...
-        let (device1, device2) = (burn_flex::FlexDevice, burn_flex::FlexDevice);
+        let (device1, device2) = (Device::flex(), Device::flex());
 
-        #[cfg(all(test, feature = "test-tch"))]
-        let (device1, device2) = (
-            burn_tch::LibTorchDevice::Cuda(0),
-            burn_tch::LibTorchDevice::Cuda(1),
-        );
+        #[cfg(all(test, feature = "tch"))]
+        let (device1, device2) = (Device::libtorch_cuda(0), Device::libtorch_cuda(1));
 
-        #[cfg(all(test, feature = "test-wgpu"))]
-        let (device1, device2) = (
-            burn_wgpu::WgpuDevice::DiscreteGpu(0),
-            burn_wgpu::WgpuDevice::DiscreteGpu(1),
-        );
-
-        #[cfg(all(test, feature = "test-cuda"))]
-        let (device1, device2) = (burn_cuda::CudaDevice::new(0), burn_cuda::CudaDevice::new(1));
+        #[cfg(all(test, feature = "cuda"))]
+        let (device1, device2) = (Device::cuda(0), Device::cuda(1));
 
         assert_eq!(dataloader.num_items(), 11);
         let dataloader_1 = dataloader.slice(0, 5).to_device(&device1);
@@ -245,8 +228,8 @@ mod tests {
         let (mut iterator_1, mut iterator_2) = (dataloader_1.iter(), dataloader_2.iter());
 
         for _ in 0..5 {
-            assert_eq!(iterator_1.next(), Some(device1));
-            assert_eq!(iterator_2.next(), Some(device2));
+            assert_eq!(iterator_1.next().as_ref(), Some(&device1));
+            assert_eq!(iterator_2.next().as_ref(), Some(&device2));
         }
 
         assert_eq!(iterator_1.next(), None);

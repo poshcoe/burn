@@ -1,15 +1,13 @@
 use super::{expand, numeric, permute, unfold};
 use crate::CubeBackend;
+use crate::CubeRuntime;
+use crate::kernel::matmul::{MatmulStrategy, matmul};
 use crate::kernel::prng::{random_bernoulli, random_normal, random_uniform};
 use crate::kernel::unary_basic::BasicFloatUnaryKind;
 use crate::kernel::{
     self, FloatUnaryOp, FloatUnaryOpFamily, launch_unary_float, reduce, unary_basic,
 };
-use crate::{CubeRuntime, FloatElement, IntElement};
-use crate::{
-    element::BoolElement,
-    kernel::matmul::{MatmulStrategy, matmul},
-};
+use burn_backend::cubecl::dtype_to_storage_type;
 use burn_backend::ops::GridSampleOptions;
 use burn_backend::tensor::{BoolTensor, Device, FloatTensor, IntTensor};
 use burn_backend::{DType, ElementConversion, FloatDType, Slice};
@@ -20,12 +18,9 @@ use cubecl::prelude::*;
 use cubek::reduce::components::instructions::ReduceOperationConfig;
 use std::ops::Range;
 
-impl<R, F, I, BT> FloatTensorOps<Self> for CubeBackend<R, F, I, BT>
+impl<R> FloatTensorOps<Self> for CubeBackend<R>
 where
     R: CubeRuntime,
-    F: FloatElement,
-    I: IntElement,
-    BT: BoolElement,
 {
     #[cfg_attr(feature = "tracing", tracing::instrument(
         level="trace",
@@ -67,10 +62,6 @@ where
         super::into_data(tensor).await
     }
 
-    fn float_device(tensor: &FloatTensor<Self>) -> Device<Self> {
-        tensor.device.clone()
-    }
-
     #[cfg_attr(feature = "tracing", tracing::instrument(
         level="trace",
         skip(tensor),
@@ -91,7 +82,7 @@ where
 
     fn float_add_scalar(lhs: FloatTensor<Self>, rhs: Scalar) -> FloatTensor<Self> {
         let dtype = lhs.dtype;
-        numeric::add_scalar(lhs, InputScalar::new(rhs, dtype))
+        numeric::add_scalar(lhs, InputScalar::new(rhs, dtype_to_storage_type(dtype)))
     }
 
     fn float_zeros(shape: Shape, device: &Device<Self>, dtype: FloatDType) -> FloatTensor<Self> {
@@ -111,7 +102,7 @@ where
             client,
             shape,
             device.clone(),
-            InputScalar::new(fill_value, dtype),
+            InputScalar::new(fill_value, dtype_to_storage_type(dtype)),
             dtype,
         )
     }
@@ -127,7 +118,7 @@ where
 
     fn float_sub_scalar(lhs: FloatTensor<Self>, rhs: Scalar) -> FloatTensor<Self> {
         let dtype = lhs.dtype;
-        numeric::sub_scalar(lhs, InputScalar::new(rhs, dtype))
+        numeric::sub_scalar(lhs, InputScalar::new(rhs, dtype_to_storage_type(dtype)))
     }
 
     fn float_mul(lhs: FloatTensor<Self>, rhs: FloatTensor<Self>) -> FloatTensor<Self> {
@@ -136,7 +127,7 @@ where
 
     fn float_mul_scalar(lhs: FloatTensor<Self>, rhs: Scalar) -> FloatTensor<Self> {
         let dtype = lhs.dtype;
-        numeric::mul_scalar(lhs, InputScalar::new(rhs, dtype))
+        numeric::mul_scalar(lhs, InputScalar::new(rhs, dtype_to_storage_type(dtype)))
     }
 
     fn float_div(lhs: FloatTensor<Self>, rhs: FloatTensor<Self>) -> FloatTensor<Self> {
@@ -145,7 +136,7 @@ where
 
     fn float_div_scalar(lhs: FloatTensor<Self>, rhs: Scalar) -> FloatTensor<Self> {
         let dtype = lhs.dtype;
-        numeric::div_scalar(lhs, InputScalar::new(rhs, dtype))
+        numeric::div_scalar(lhs, InputScalar::new(rhs, dtype_to_storage_type(dtype)))
     }
 
     fn float_remainder(lhs: FloatTensor<Self>, rhs: FloatTensor<Self>) -> FloatTensor<Self> {
@@ -154,7 +145,7 @@ where
 
     fn float_remainder_scalar(lhs: FloatTensor<Self>, rhs: Scalar) -> FloatTensor<Self> {
         let dtype = lhs.dtype;
-        numeric::remainder_scalar(lhs, InputScalar::new(rhs, dtype))
+        numeric::remainder_scalar(lhs, InputScalar::new(rhs, dtype_to_storage_type(dtype)))
     }
 
     fn float_matmul(lhs: FloatTensor<Self>, rhs: FloatTensor<Self>) -> FloatTensor<Self> {
@@ -193,6 +184,19 @@ where
         value: FloatTensor<Self>,
     ) -> FloatTensor<Self> {
         kernel::scatter(dim, tensor, indices, value, false)
+    }
+
+    fn float_scatter_nd(
+        data: FloatTensor<Self>,
+        indices: IntTensor<Self>,
+        values: FloatTensor<Self>,
+        reduction: burn_backend::tensor::IndexingUpdateOp,
+    ) -> FloatTensor<Self> {
+        kernel::scatter_nd(data, indices, values, reduction)
+    }
+
+    fn float_gather_nd(data: FloatTensor<Self>, indices: IntTensor<Self>) -> FloatTensor<Self> {
+        kernel::gather_nd(data, indices)
     }
 
     fn float_select(
@@ -255,7 +259,12 @@ where
     ) -> FloatTensor<Self> {
         let dtype = tensor.dtype;
         let bool_dtype = mask.dtype;
-        kernel::mask_fill_auto(tensor, mask, InputScalar::new(value, dtype), bool_dtype)
+        kernel::mask_fill_auto(
+            tensor,
+            mask,
+            InputScalar::new(value, dtype_to_storage_type(dtype)),
+            bool_dtype,
+        )
     }
 
     fn float_equal(
@@ -272,7 +281,11 @@ where
         out_dtype: BoolDType,
     ) -> BoolTensor<Self> {
         let dtype = lhs.dtype;
-        kernel::equal_elem(lhs, InputScalar::new(rhs, dtype), out_dtype.into())
+        kernel::equal_elem(
+            lhs,
+            InputScalar::new(rhs, dtype_to_storage_type(dtype)),
+            out_dtype.into(),
+        )
     }
 
     fn float_greater(
@@ -289,7 +302,11 @@ where
         out_dtype: BoolDType,
     ) -> BoolTensor<Self> {
         let dtype = lhs.dtype;
-        kernel::greater_elem(lhs, InputScalar::new(rhs, dtype), out_dtype.into())
+        kernel::greater_elem(
+            lhs,
+            InputScalar::new(rhs, dtype_to_storage_type(dtype)),
+            out_dtype.into(),
+        )
     }
 
     fn float_greater_equal(
@@ -306,7 +323,11 @@ where
         out_dtype: BoolDType,
     ) -> BoolTensor<Self> {
         let dtype = lhs.dtype;
-        kernel::greater_equal_elem(lhs, InputScalar::new(rhs, dtype), out_dtype.into())
+        kernel::greater_equal_elem(
+            lhs,
+            InputScalar::new(rhs, dtype_to_storage_type(dtype)),
+            out_dtype.into(),
+        )
     }
 
     fn float_lower(
@@ -323,7 +344,11 @@ where
         out_dtype: BoolDType,
     ) -> BoolTensor<Self> {
         let dtype = lhs.dtype;
-        kernel::lower_elem(lhs, InputScalar::new(rhs, dtype), out_dtype.into())
+        kernel::lower_elem(
+            lhs,
+            InputScalar::new(rhs, dtype_to_storage_type(dtype)),
+            out_dtype.into(),
+        )
     }
 
     fn float_lower_equal(
@@ -340,7 +365,11 @@ where
         out_dtype: BoolDType,
     ) -> BoolTensor<Self> {
         let dtype = lhs.dtype;
-        kernel::lower_equal_elem(lhs, InputScalar::new(rhs, dtype), out_dtype.into())
+        kernel::lower_equal_elem(
+            lhs,
+            InputScalar::new(rhs, dtype_to_storage_type(dtype)),
+            out_dtype.into(),
+        )
     }
 
     fn float_sum(tensor: FloatTensor<Self>) -> FloatTensor<Self> {
@@ -396,6 +425,30 @@ where
             ReduceOperationConfig::MaxAbs,
         )
         .unwrap()
+    }
+
+    fn float_any(tensor: FloatTensor<Self>, out_dtype: BoolDType) -> BoolTensor<Self> {
+        reduce::reduce_logical(tensor, None, ReduceOperationConfig::Any, out_dtype)
+    }
+
+    fn float_any_dim(
+        tensor: FloatTensor<Self>,
+        dim: usize,
+        out_dtype: BoolDType,
+    ) -> BoolTensor<Self> {
+        reduce::reduce_logical(tensor, Some(dim), ReduceOperationConfig::Any, out_dtype)
+    }
+
+    fn float_all(tensor: FloatTensor<Self>, out_dtype: BoolDType) -> BoolTensor<Self> {
+        reduce::reduce_logical(tensor, None, ReduceOperationConfig::All, out_dtype)
+    }
+
+    fn float_all_dim(
+        tensor: FloatTensor<Self>,
+        dim: usize,
+        out_dtype: BoolDType,
+    ) -> BoolTensor<Self> {
+        reduce::reduce_logical(tensor, Some(dim), ReduceOperationConfig::All, out_dtype)
     }
 
     fn float_sum_dim(tensor: FloatTensor<Self>, dim: usize) -> FloatTensor<Self> {
@@ -497,7 +550,9 @@ where
         }
 
         let dtype = lhs.dtype;
-        launch_unary_float::<R, Powf, _>(lhs, |_| InputScalar::new(rhs, dtype))
+        launch_unary_float::<R, Powf, _>(lhs, |_| {
+            InputScalar::new(rhs, dtype_to_storage_type(dtype))
+        })
     }
 
     fn float_sqrt(tensor: FloatTensor<Self>) -> FloatTensor<Self> {
@@ -595,6 +650,33 @@ where
         .unwrap()
     }
 
+    fn float_argtopk(
+        tensor: FloatTensor<Self>,
+        dim: usize,
+        k: usize,
+        out_dtype: IntDType,
+    ) -> IntTensor<Self> {
+        reduce::reduce_dim(
+            tensor,
+            Some(out_dtype.into()),
+            dim,
+            Default::default(),
+            ReduceOperationConfig::ArgTopK(k),
+        )
+        .unwrap()
+    }
+
+    fn float_topk(tensor: FloatTensor<Self>, dim: usize, k: usize) -> FloatTensor<Self> {
+        reduce::reduce_dim(
+            tensor,
+            None,
+            dim,
+            Default::default(),
+            ReduceOperationConfig::TopK(k),
+        )
+        .unwrap()
+    }
+
     fn float_argmin(tensor: FloatTensor<Self>, dim: usize, out_dtype: IntDType) -> IntTensor<Self> {
         reduce::reduce_dim(
             tensor,
@@ -614,8 +696,8 @@ where
         let dtype = tensor.dtype;
         kernel::clamp(
             tensor,
-            InputScalar::new(min, dtype),
-            InputScalar::new(max, dtype),
+            InputScalar::new(min, dtype_to_storage_type(dtype)),
+            InputScalar::new(max, dtype_to_storage_type(dtype)),
         )
     }
 

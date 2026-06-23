@@ -19,18 +19,16 @@ metal = ["burn/metal"]
 cuda = ["burn/cuda"]
 vulkan = ["burn/vulkan"]
 rocm = ["burn/rocm"]
+remote = ["burn/remote"]
 
 [dependencies]
-burn = { path = "../../crates/burn", features = [
+burn = { workspace = true, features = [
     "train",
     "vision",
     "metrics",
     "fusion",
-    "dispatch",
     "flex",
-], default-features = false }
+] }
 
-# Serialization
 log = { workspace = true }
 rand.workspace = true
-serde = { workspace = true, features = ["std", "derive"] }

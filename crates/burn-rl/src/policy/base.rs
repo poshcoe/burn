@@ -1,6 +1,6 @@
 use derive_new::new;
 
-use burn_core::{prelude::*, record::Record, tensor::backend::AutodiffBackend};
+use burn_core::tensor::Device;
 
 use crate::TransitionBatch;
 
@@ -14,9 +14,9 @@ pub struct ActionContext<A, C> {
 }
 
 /// The state of a policy.
-pub trait PolicyState<B: Backend> {
+pub trait PolicyState {
     /// The type of the record.
-    type Record: Record<B>;
+    type Record;
 
     /// Convert the state to a record.
     fn into_record(self) -> Self::Record;
@@ -24,8 +24,20 @@ pub trait PolicyState<B: Backend> {
     fn load_record(&self, record: Self::Record) -> Self;
 }
 
+/// Defines how an environment's state is converted to a policy's observation.
+pub trait ToObservation<O> {
+    /// Convert an environment's state to a policy's observation, moving it to the given device if needed.
+    fn to_observation(&self, device: &Device) -> O;
+}
+
+/// Defines how an environment's action is converted to a policy's action.
+pub trait ToAction<A> {
+    /// Convert an environment's action to a policy's action, moving it to the given device if needed.
+    fn to_action(&self, device: &Device) -> A;
+}
+
 /// Trait for a RL policy.
-pub trait Policy<B: Backend>: Clone {
+pub trait Policy: Clone {
     /// The observation given as input to the policy.
     type Observation;
     /// The action distribution parameters defining how the action will be sampled.
@@ -36,7 +48,7 @@ pub trait Policy<B: Backend>: Clone {
     /// Additional context on the policy's decision.
     type ActionContext;
     /// The current parameterization of the policy.
-    type PolicyState: PolicyState<B>;
+    type PolicyState: PolicyState;
 
     /// Produces the action distribution from a batch of observations.
     fn forward(&mut self, obs: Self::Observation) -> Self::ActionDistribution;
@@ -52,8 +64,10 @@ pub trait Policy<B: Backend>: Clone {
     /// Returns the current parameterization.
     fn state(&self) -> Self::PolicyState;
 
+    /// Loads the policy on the given device.
+    fn to_device(self, device: &Device) -> Self;
     /// Loads the policy parameters from a record.
-    fn load_record(self, record: <Self::PolicyState as PolicyState<B>>::Record) -> Self;
+    fn load_record(self, record: <Self::PolicyState as PolicyState>::Record) -> Self;
 }
 
 /// Trait for a type that can be batched and unbatched (split).
@@ -73,36 +87,36 @@ pub struct RLTrainOutput<TO, P> {
 }
 
 /// Batched transitions for a PolicyLearner.
-pub type LearnerTransitionBatch<B, P> =
-    TransitionBatch<B, <P as Policy<B>>::Observation, <P as Policy<B>>::Action>;
+pub type LearnerTransitionBatch<P> =
+    TransitionBatch<<P as Policy>::Observation, <P as Policy>::Action>;
 
 /// Learner for a policy.
-pub trait PolicyLearner<B>
+pub trait PolicyLearner
 where
-    B: AutodiffBackend,
-    <Self::InnerPolicy as Policy<B>>::Observation: Clone + Batchable,
-    <Self::InnerPolicy as Policy<B>>::ActionDistribution: Clone + Batchable,
-    <Self::InnerPolicy as Policy<B>>::Action: Clone + Batchable,
+    <Self::InnerPolicy as Policy>::Observation: Clone + Batchable,
+    <Self::InnerPolicy as Policy>::ActionDistribution: Clone + Batchable,
+    <Self::InnerPolicy as Policy>::Action: Clone + Batchable,
 {
     /// Additional context of a training step.
     type TrainContext;
     /// The policy to train.
-    type InnerPolicy: Policy<B>;
+    type InnerPolicy: Policy;
     /// The record of the learner.
-    type Record: Record<B>;
+    type Record;
 
     /// Execute a training step on the policy.
     fn train(
         &mut self,
-        input: LearnerTransitionBatch<B, Self::InnerPolicy>,
-    ) -> RLTrainOutput<Self::TrainContext, <Self::InnerPolicy as Policy<B>>::PolicyState>;
-    /// Returns the learner's current policy.
+        input: LearnerTransitionBatch<Self::InnerPolicy>,
+    ) -> RLTrainOutput<Self::TrainContext, <Self::InnerPolicy as Policy>::PolicyState>;
+    /// Returns the learner's current policy for validation.
     fn policy(&self) -> Self::InnerPolicy;
     /// Update the learner's policy.
     fn update_policy(&mut self, update: Self::InnerPolicy);
-
     /// Convert the learner's state into a record.
     fn record(&self) -> Self::Record;
     /// Load the learner's state from a record.
     fn load_record(self, record: Self::Record) -> Self;
+    /// Returns the device used for training.
+    fn device(&self) -> Device;
 }

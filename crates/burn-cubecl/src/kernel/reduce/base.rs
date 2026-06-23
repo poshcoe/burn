@@ -5,14 +5,10 @@ use crate::{
     ops::numeric::{empty_device_contiguous_dtype, zeros_client},
     tensor::CubeTensor,
 };
+use burn_backend::cubecl::{dtype_to_elem_type, elem_type_to_dtype};
 use burn_backend::{DType, TensorMetadata};
-use burn_std::Metadata;
-use cubecl::{
-    AutotuneKey,
-    client::ComputeClient,
-    features::AtomicUsage,
-    ir::{StorageType, Type},
-};
+use burn_std::{BoolDType, Metadata};
+use cubecl::{AutotuneKey, client::ComputeClient, features::AtomicUsage, ir::Type};
 use cubek::reduce::{
     ReduceDtypes, ReduceError, ReduceStrategy,
     components::instructions::ReduceOperationConfig,
@@ -36,7 +32,7 @@ pub struct SumAutotuneKey {
 fn supports_atomic_add<R: CubeRuntime>(client: &ComputeClient<R>, dtype: DType) -> bool {
     client
         .properties()
-        .atomic_type_usage(Type::new(StorageType::Atomic(dtype.into())))
+        .atomic_type_usage(Type::atomic(dtype_to_elem_type(dtype)))
         .contains(AtomicUsage::Add)
 }
 
@@ -77,7 +73,7 @@ pub fn sum<Run: CubeRuntime>(
                 tensor.binding(),
                 output.clone().binding(),
                 cube_count,
-                dtype.into(),
+                dtype_to_elem_type(dtype),
             )?;
 
             Ok(output)
@@ -135,6 +131,42 @@ pub fn reduce<Run: CubeRuntime>(
     Ok(tensor)
 }
 
+/// Reduce with a logical instruction ([`Any`](ReduceOperationConfig::Any) /
+/// [`All`](ReduceOperationConfig::All)) and return the result as a boolean tensor.
+///
+/// `Any` / `All` require the output dtype (like `Arg*` index outputs): the
+/// kernel writes the `0/1` flags directly into the numeric backing of the
+/// boolean storage (cubek has no bool elem), so the only step left here is the
+/// kernel-free relabel to `Bool`.
+///
+/// `dim == None` reduces the whole tensor to a scalar; `Some(dim)` reduces a
+/// single axis, keeping it with length 1.
+pub fn reduce_logical<Run: CubeRuntime>(
+    tensor: CubeTensor<Run>,
+    dim: Option<usize>,
+    config: ReduceOperationConfig,
+    out_dtype: BoolDType,
+) -> CubeTensor<Run> {
+    debug_assert!(
+        matches!(
+            config,
+            ReduceOperationConfig::Any | ReduceOperationConfig::All
+        ),
+        "reduce_logical only supports Any / All, got {config:?}"
+    );
+    let out_bool = DType::Bool(out_dtype);
+    let backing = elem_type_to_dtype(dtype_to_elem_type(out_bool));
+
+    let mut out = match dim {
+        Some(d) => reduce_dim::<Run>(tensor, Some(backing), d, Default::default(), config),
+        None => reduce::<Run>(tensor, Some(backing), Default::default(), config),
+    }
+    .expect("Any/All reduce on a valid axis cannot fail");
+
+    out.dtype = out_bool; // same storage, relabel as Bool (no kernel)
+    out
+}
+
 fn argsort(shape: &[usize]) -> Vec<usize> {
     let mut indices = (0..shape.len()).collect::<Vec<_>>();
     indices.sort_by_key(|&i| &shape[i]);
@@ -158,15 +190,27 @@ pub fn reduce_dim<Run: CubeRuntime>(
     debug_assert!(
         !matches!(
             config,
-            ReduceOperationConfig::ArgMax | ReduceOperationConfig::ArgMin
+            ReduceOperationConfig::ArgMax
+                | ReduceOperationConfig::ArgMin
+                | ReduceOperationConfig::ArgTopK(_)
+                | ReduceOperationConfig::Any
+                | ReduceOperationConfig::All
         ) || output_dtype.is_some(),
-        "The `output_dtype` has to be `Some` only when the `config` is `ArgMax` or `ArgMin`.
+        "The `output_dtype` has to be `Some` when the `config` is `ArgMax`, `ArgMin`, `ArgTopK`, `Any` or `All`.
         "
     );
 
-    let dtypes = config.precision(input.dtype.into(), output_dtype.map(Into::into));
+    let accumulator_len = match config {
+        ReduceOperationConfig::ArgTopK(k) => k,
+        ReduceOperationConfig::TopK(k) => k,
+        _ => 1,
+    };
+    let dtypes = config.precision(
+        dtype_to_elem_type(input.dtype),
+        output_dtype.map(dtype_to_elem_type),
+    );
     let client = input.client.clone();
-    let output = init_reduce_output::<Run>(&input, dim, &dtypes).ok_or(
+    let output = init_reduce_output::<Run>(&input, dim, &dtypes, accumulator_len).ok_or(
         cubek::reduce::ReduceError::InvalidAxis {
             axis: dim,
             rank: input.meta.num_dims(),
@@ -212,15 +256,16 @@ pub fn init_reduce_output<Run: CubeRuntime>(
     input: &CubeTensor<Run>,
     dim: usize,
     dtypes: &ReduceDtypes,
+    accumulator_len: usize,
 ) -> Option<CubeTensor<Run>> {
     (dim < input.meta.num_dims()).then(|| {
         let mut shape_out = input.shape();
-        shape_out[dim] = 1;
+        shape_out[dim] = accumulator_len;
         empty_device_contiguous_dtype(
             input.client.clone(),
             input.device.clone(),
             shape_out,
-            dtypes.output.elem_type().into(),
+            elem_type_to_dtype(dtypes.output.elem_type()),
         )
     })
 }

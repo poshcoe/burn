@@ -171,7 +171,7 @@ mod tests {
     use std::sync::Arc;
 
     use crate::{
-        EventProcessorTraining, TestBackend,
+        EventProcessorTraining,
         logger::InMemoryMetricLogger,
         metric::{
             LossMetric,
@@ -261,7 +261,7 @@ mod tests {
     }
 
     fn test_early_stopping(warmup: Option<usize>, n_epochs: usize, data: &[(&[f64], bool, &str)]) {
-        let loss = LossMetric::<TestBackend>::new();
+        let loss = LossMetric::new();
         let mut early_stopping = MetricEarlyStoppingStrategy::new(
             &loss,
             Aggregate::Mean,
@@ -279,9 +279,8 @@ mod tests {
         let store = Arc::new(EventStoreClient::new(store));
         let mut processor = MinimalEventProcessor::new(metrics, store.clone());
 
-        let mut epoch = 1;
-        processor.process_train(crate::LearnerEvent::Start);
-        for (points, should_start, comment) in data {
+        processor.process_train(crate::LearnerEvent::Start { total_epochs: 0 });
+        for (epoch, (points, should_start, comment)) in (1..).zip(data.iter()) {
             for point in points.iter() {
                 process_train(&mut processor, *point, epoch);
             }
@@ -292,7 +291,6 @@ mod tests {
                 early_stopping.should_stop(epoch, &store),
                 "{comment}"
             );
-            epoch += 1;
         }
     }
 }

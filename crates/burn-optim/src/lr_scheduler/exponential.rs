@@ -1,9 +1,9 @@
 use burn_core as burn;
 
-use super::{LrScheduler, String};
+use super::{LrScheduler, LrSchedulerRecord, String};
 use crate::LearningRate;
+use crate::RecordState;
 use burn::config::Config;
-use burn::tensor::backend::Backend;
 
 /// The configuration for creating an [exponential learning rate scheduler](ExponentialLrScheduler).
 ///
@@ -56,21 +56,30 @@ pub struct ExponentialLrScheduler {
 }
 
 impl LrScheduler for ExponentialLrScheduler {
-    type Record<B: Backend> = LearningRate;
-
     fn step(&mut self) -> LearningRate {
         self.previous_lr *= self.gamma;
         self.previous_lr
     }
 
-    fn to_record<B: Backend>(&self) -> Self::Record<B> {
-        self.previous_lr
+    fn to_record(&self) -> LrSchedulerRecord {
+        LrSchedulerRecord::from_state(&ExponentialLrSchedulerState {
+            previous_lr: self.previous_lr,
+        })
     }
 
-    fn load_record<B: Backend>(mut self, record: Self::Record<B>) -> Self {
-        self.previous_lr = record;
+    fn load_record(mut self, record: LrSchedulerRecord) -> Self {
+        if let Some(state) = record.into_state::<ExponentialLrSchedulerState>() {
+            self.previous_lr = state.previous_lr;
+        }
         self
     }
+}
+
+/// The serializable state of an [exponential scheduler](ExponentialLrScheduler).
+#[derive(RecordState, Clone, Debug)]
+pub struct ExponentialLrSchedulerState {
+    // `f64` (not the `LearningRate` alias) so the derive recognizes it as a scalar leaf.
+    previous_lr: f64,
 }
 
 #[cfg(test)]

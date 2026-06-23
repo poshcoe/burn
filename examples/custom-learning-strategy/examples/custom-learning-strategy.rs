@@ -1,5 +1,5 @@
-use burn::backend::{Autodiff, WebGpu};
+use burn::tensor::Device;
 
 fn main() {
-    custom_learning_strategy::training::run::<Autodiff<WebGpu>>(Default::default());
+    custom_learning_strategy::training::run(Device::default());
 }

@@ -6,9 +6,10 @@ pub use base::*;
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use burn_rl::{Batchable, Environment, EnvironmentInit, Policy, PolicyState};
+    use burn_rl::{
+        Batchable, Environment, EnvironmentInit, Policy, PolicyState, ToAction, ToObservation,
+    };
 
-    use crate::tests::TestAutodiffBackend;
     use crate::{
         AgentEvaluationEvent, EventProcessorTraining, ItemLazy, RLComponentsTypes, RLEvent,
     };
@@ -25,7 +26,7 @@ pub(crate) mod tests {
     #[derive(Clone)]
     pub(crate) struct MockPolicy(pub usize);
 
-    impl Policy<TestAutodiffBackend> for MockPolicy {
+    impl Policy for MockPolicy {
         type Observation = MockObservation;
         type ActionDistribution = MockActionDistribution;
         type Action = MockPolicyAction;
@@ -68,10 +69,11 @@ pub(crate) mod tests {
             MockPolicyState(self.0)
         }
 
-        fn load_record(
-            self,
-            _record: <Self::PolicyState as PolicyState<TestAutodiffBackend>>::Record,
-        ) -> Self {
+        fn to_device(self, _device: &burn_core::prelude::Device) -> Self {
+            self
+        }
+
+        fn load_record(self, _record: <Self::PolicyState as PolicyState>::Record) -> Self {
             self
         }
     }
@@ -95,7 +97,7 @@ pub(crate) mod tests {
     #[derive(Clone)]
     pub(crate) struct MockPolicyState(pub usize);
 
-    impl PolicyState<TestAutodiffBackend> for MockPolicyState {
+    impl PolicyState for MockPolicyState {
         type Record = ();
 
         fn into_record(self) -> Self::Record {}
@@ -155,8 +157,8 @@ pub(crate) mod tests {
     #[derive(Clone, Debug)]
     pub(crate) struct MockAction(pub i32);
 
-    impl From<MockState> for MockObservation {
-        fn from(_value: MockState) -> Self {
+    impl ToObservation<MockObservation> for MockState {
+        fn to_observation(&self, _device: &burn_core::prelude::Device) -> MockObservation {
             MockObservation(vec![0.])
         }
     }
@@ -167,16 +169,14 @@ pub(crate) mod tests {
         }
     }
 
-    impl From<MockAction> for MockPolicyAction {
-        fn from(value: MockAction) -> Self {
-            MockPolicyAction(vec![value.0])
+    impl ToAction<MockPolicyAction> for MockAction {
+        fn to_action(&self, _device: &burn_core::prelude::Device) -> MockPolicyAction {
+            MockPolicyAction(vec![self.0])
         }
     }
 
     impl ItemLazy for MockActionContext {
-        type ItemSync = MockActionContext;
-
-        fn sync(self) -> Self::ItemSync {
+        fn sync(self) -> Self {
             self
         }
     }
@@ -227,7 +227,6 @@ pub(crate) mod tests {
     pub(crate) struct MockRLComponents;
 
     impl RLComponentsTypes for MockRLComponents {
-        type Backend = TestAutodiffBackend;
         type Env = MockEnv;
         type EnvInit = MockEnvInit;
         type State = MockState;
@@ -246,18 +245,15 @@ pub(crate) mod tests {
     #[derive(Clone)]
     pub(crate) struct MockLearningAgent;
 
-    impl PolicyLearner<TestAutodiffBackend> for MockLearningAgent {
+    impl PolicyLearner for MockLearningAgent {
         type InnerPolicy = MockPolicy;
         type TrainContext = ();
         type Record = ();
 
         fn train(
             &mut self,
-            _input: LearnerTransitionBatch<TestAutodiffBackend, Self::InnerPolicy>,
-        ) -> RLTrainOutput<
-            Self::TrainContext,
-            <Self::InnerPolicy as Policy<TestAutodiffBackend>>::PolicyState,
-        > {
+            _input: LearnerTransitionBatch<Self::InnerPolicy>,
+        ) -> RLTrainOutput<Self::TrainContext, <Self::InnerPolicy as Policy>::PolicyState> {
             unimplemented!()
         }
 
@@ -274,6 +270,10 @@ pub(crate) mod tests {
         }
 
         fn load_record(self, _record: Self::Record) -> Self {
+            unimplemented!()
+        }
+
+        fn device(&self) -> burn_core::prelude::Device {
             unimplemented!()
         }
     }

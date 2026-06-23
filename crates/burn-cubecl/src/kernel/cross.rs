@@ -1,17 +1,21 @@
 use crate::{
     CubeRuntime,
-    kernel::utils::{address_type, broadcast_shape},
-    ops::numeric::empty_device_dtype,
+    kernel::{
+        into_contiguous,
+        utils::{address_type, broadcast_shape},
+    },
+    ops::{numeric::empty_device_dtype, swap_dims},
     tensor::CubeTensor,
 };
-use cubecl::std::tensor::layout::linear::LinearView;
+use burn_backend::cubecl::dtype_to_storage_type;
+use cubecl::std::tensor::layout::linear::{LinearView, LinearViewMut};
 use cubecl::{calculate_cube_count_elemwise, prelude::*};
 
 #[cube(launch_unchecked, address_type = "dynamic")]
 fn cross_kernel<E: Float>(
-    lhs: &LinearView<E>,
-    rhs: &LinearView<E>,
-    output: &mut LinearView<E, ReadWrite>,
+    lhs: LinearView<'_, E>,
+    rhs: LinearView<'_, E>,
+    mut output: LinearViewMut<'_, E>,
     #[define(E)] _dtype: StorageType,
 ) {
     // Each thread processes one 3-element vector
@@ -23,12 +27,12 @@ fn cross_kernel<E: Float>(
     }
 
     // Extract vectors
-    let a0 = lhs[base_pos];
-    let a1 = lhs[base_pos + 1];
-    let a2 = lhs[base_pos + 2];
-    let b0 = rhs[base_pos];
-    let b1 = rhs[base_pos + 1];
-    let b2 = rhs[base_pos + 2];
+    let a0 = lhs.read(base_pos);
+    let a1 = lhs.read(base_pos + 1);
+    let a2 = lhs.read(base_pos + 2);
+    let b0 = rhs.read(base_pos);
+    let b1 = rhs.read(base_pos + 1);
+    let b2 = rhs.read(base_pos + 2);
 
     // Compute cross product: a × b
     let x = a1 * b2 - a2 * b1;
@@ -36,9 +40,9 @@ fn cross_kernel<E: Float>(
     let z = a0 * b1 - a1 * b0;
 
     // Store result
-    output[base_pos] = x;
-    output[base_pos + 1] = y;
-    output[base_pos + 2] = z;
+    output.write(base_pos, x);
+    output.write(base_pos + 1, y);
+    output.write(base_pos + 2, z);
 }
 
 pub(crate) fn cross<R: CubeRuntime>(
@@ -58,11 +62,17 @@ pub(crate) fn cross<R: CubeRuntime>(
         );
     }
 
-    // For now, only support cross on the last dimension
+    // The kernel reads each 3-vector from contiguous memory, so it expects the
+    // cross dimension to be the last (innermost) and physically contiguous.
+    // For non-last dims we permute the cross dim to the last position, run the
+    // kernel, then permute the result back. swap_dims only updates strides, so
+    // make the permuted operands contiguous before launch.
     if dim != ndims - 1 {
-        unimplemented!(
-            "Cross product on non-last dimension not yet implemented for CubeCL backend"
-        );
+        let last = ndims - 1;
+        let lhs = into_contiguous(swap_dims(lhs, dim, last));
+        let rhs = into_contiguous(swap_dims(rhs, dim, last));
+        let result = cross(lhs, rhs, last);
+        return swap_dims(result, dim, last);
     }
 
     let output_shape = broadcast_shape(&[&lhs, &rhs]);
@@ -90,7 +100,7 @@ pub(crate) fn cross<R: CubeRuntime>(
             lhs.into_linear_view_like(&output),
             rhs.into_linear_view_like(&output),
             output.clone().into_linear_view(),
-            dtype.into(),
+            dtype_to_storage_type(dtype),
         );
     };
 

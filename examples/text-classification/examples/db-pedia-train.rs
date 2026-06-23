@@ -1,7 +1,7 @@
 use burn::{
     nn::transformer::TransformerEncoderConfig,
     optim::{AdamConfig, decay::WeightDecayConfig},
-    tensor::backend::AutodiffBackend,
+    tensor::{Device, DeviceConfig, Element},
 };
 
 use text_classification::{DbPediaDataset, training::ExperimentConfig};
@@ -12,13 +12,17 @@ type ElemType = f32;
 #[cfg(feature = "f16")]
 type ElemType = burn::tensor::f16;
 
-pub fn launch<B: AutodiffBackend>(device: B::Device) {
+pub fn launch(mut device: Device) {
     let config = ExperimentConfig::new(
         TransformerEncoderConfig::new(256, 1024, 8, 4).with_norm_first(true),
         AdamConfig::new().with_weight_decay(Some(WeightDecayConfig::new(5e-5))),
     );
 
-    text_classification::training::train::<B, DbPediaDataset>(
+    device
+        .configure(DeviceConfig::default().float_dtype(ElemType::dtype()))
+        .unwrap();
+
+    text_classification::training::train::<DbPediaDataset>(
         burn::train::ExecutionStrategy::SingleDevice(device),
         DbPediaDataset::train(),
         DbPediaDataset::test(),
@@ -29,58 +33,42 @@ pub fn launch<B: AutodiffBackend>(device: B::Device) {
 
 #[cfg(feature = "flex")]
 mod flex {
-    use crate::launch;
-    use burn::backend::{Autodiff, Flex};
+    use burn::tensor::Device;
 
     pub fn run() {
-        launch::<Autodiff<Flex>>(Default::default());
+        crate::launch(Device::flex());
     }
 }
 
 #[cfg(feature = "tch-gpu")]
 mod tch_gpu {
-    use burn::backend::{
-        Autodiff,
-        libtorch::{LibTorch, LibTorchDevice},
-    };
-
-    use crate::{ElemType, launch};
+    use burn::tensor::{Device, DeviceIndex};
 
     pub fn run() {
         #[cfg(not(target_os = "macos"))]
-        let device = LibTorchDevice::Cuda(0);
+        let device = Device::libtorch_cuda(DeviceIndex::Default);
         #[cfg(target_os = "macos")]
-        let device = LibTorchDevice::Mps;
+        let device = Device::libtorch_mps();
 
-        launch::<Autodiff<LibTorch<ElemType>>>(device);
+        crate::launch(device);
     }
 }
 
 #[cfg(feature = "tch-cpu")]
 mod tch_cpu {
-    use burn::backend::{
-        Autodiff,
-        libtorch::{LibTorch, LibTorchDevice},
-    };
-
-    use crate::{ElemType, launch};
+    use burn::tensor::Device;
 
     pub fn run() {
-        launch::<Autodiff<LibTorch<ElemType>>>(LibTorchDevice::Cpu);
+        crate::launch(Device::libtorch());
     }
 }
 
 #[cfg(feature = "wgpu")]
 mod wgpu {
-    use burn::backend::{
-        Autodiff,
-        wgpu::{Wgpu, WgpuDevice},
-    };
-
-    use crate::{ElemType, launch};
+    use burn::tensor::{Device, DeviceKind};
 
     pub fn run() {
-        launch::<Autodiff<Wgpu<ElemType, i32>>>(WgpuDevice::default());
+        crate::launch(Device::wgpu(DeviceKind::DefaultDevice));
     }
 }
 

@@ -8,11 +8,18 @@ use crate::{
 
 /// Event happening during the training/validation process.
 pub enum LearnerEvent<T> {
-    /// Signal the start of the process (e.g., training start)
-    Start,
+    /// Signal the start of the process (e.g., training start).
+    Start {
+        /// The total number of training epochs.
+        total_epochs: usize,
+    },
     /// Signal that an item have been processed.
     ProcessedItem(TrainingItem<T>),
-    /// Signal the end of an epoch.
+    /// Signal the start of a split, carrying the total number of items in that split.
+    StartSplit(usize),
+    /// Signal the end of a split, carrying the current epoch number.
+    EndSplit(usize),
+    /// Signal the end of a full epoch.
     EndEpoch(usize),
     /// Signal the end of the process (e.g., training end).
     End(Option<LearnerSummary>),
@@ -21,9 +28,16 @@ pub enum LearnerEvent<T> {
 /// Event happening during the evaluation process.
 pub enum EvaluatorEvent<T> {
     /// Signal the start of the process (e.g., evaluation start)
-    Start,
+    Start {
+        /// The total number of items to evaluate.
+        total_tests: usize,
+    },
+    /// Signal the start of a test split, carrying the split name and total number of items.
+    StartTest(EvaluationName, usize),
     /// Signal that an item have been processed.
     ProcessedItem(EvaluationName, EvaluationItem<T>),
+    /// Signal the end of a single test split.
+    EndTest,
     /// Signal the end of the process (e.g., evaluation end).
     End(Option<LearnerSummary>),
 }
@@ -32,11 +46,8 @@ pub enum EvaluatorEvent<T> {
 ///
 /// We want to sync them on a different thread to avoid blocking training.
 pub trait ItemLazy: Send {
-    /// Item that is properly synced and ready to be processed by metrics.
-    type ItemSync: Send;
-
     /// Sync the item.
-    fn sync(self) -> Self::ItemSync;
+    fn sync(self) -> Self;
 }
 
 /// Process events happening during training and validation.
@@ -70,9 +81,6 @@ pub struct TrainingItem<T> {
     /// The progress.
     pub progress: Progress,
 
-    /// The global progress of the training (e.g. epochs).
-    pub global_progress: Progress,
-
     /// The iteration, if it it different from the items processed.
     pub iteration: Option<usize>,
 
@@ -81,13 +89,10 @@ pub struct TrainingItem<T> {
 }
 
 impl<T: ItemLazy> ItemLazy for TrainingItem<T> {
-    type ItemSync = TrainingItem<T::ItemSync>;
-
-    fn sync(self) -> Self::ItemSync {
+    fn sync(self) -> Self {
         TrainingItem {
             item: self.item.sync(),
             progress: self.progress,
-            global_progress: self.global_progress,
             iteration: self.iteration,
             lr: self.lr,
         }
@@ -108,9 +113,7 @@ pub struct EvaluationItem<T> {
 }
 
 impl<T: ItemLazy> ItemLazy for EvaluationItem<T> {
-    type ItemSync = EvaluationItem<T::ItemSync>;
-
-    fn sync(self) -> Self::ItemSync {
+    fn sync(self) -> Self {
         EvaluationItem {
             item: self.item.sync(),
             progress: self.progress,
@@ -120,7 +123,5 @@ impl<T: ItemLazy> ItemLazy for EvaluationItem<T> {
 }
 
 impl ItemLazy for () {
-    type ItemSync = ();
-
-    fn sync(self) -> Self::ItemSync {}
+    fn sync(self) -> Self {}
 }

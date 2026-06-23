@@ -49,11 +49,6 @@ impl FloatTensorOps<Flex> for Flex {
         Ok(tensor.into_data())
     }
 
-    fn float_device(_tensor: &FloatTensor<Flex>) -> Device<Flex> {
-        // CPU backend: all tensors are on the default device
-        Default::default()
-    }
-
     fn float_to_device(tensor: FloatTensor<Flex>, _device: &Device<Flex>) -> FloatTensor<Flex> {
         // CPU backend: no-op, tensors are always on CPU
         tensor
@@ -307,6 +302,39 @@ impl FloatTensorOps<Flex> for Flex {
                 crate::ops::gather_scatter::scatter_add::<bf16>(tensor, dim, indices, value)
             }
             _ => panic!("float_scatter_add: unsupported dtype {:?}", tensor.dtype()),
+        }
+    }
+
+    fn float_scatter_nd(
+        data: FloatTensor<Flex>,
+        indices: IntTensor<Flex>,
+        values: FloatTensor<Flex>,
+        reduction: burn_backend::tensor::IndexingUpdateOp,
+    ) -> FloatTensor<Flex> {
+        match data.dtype() {
+            DType::F32 => {
+                crate::ops::gather_scatter::scatter_nd::<f32>(data, indices, values, reduction)
+            }
+            DType::F64 => {
+                crate::ops::gather_scatter::scatter_nd::<f64>(data, indices, values, reduction)
+            }
+            DType::F16 => {
+                crate::ops::gather_scatter::scatter_nd::<f16>(data, indices, values, reduction)
+            }
+            DType::BF16 => {
+                crate::ops::gather_scatter::scatter_nd::<bf16>(data, indices, values, reduction)
+            }
+            _ => panic!("float_scatter_nd: unsupported dtype {:?}", data.dtype()),
+        }
+    }
+
+    fn float_gather_nd(data: FloatTensor<Flex>, indices: IntTensor<Flex>) -> FloatTensor<Flex> {
+        match data.dtype() {
+            DType::F32 => crate::ops::gather_scatter::gather_nd::<f32>(data, indices),
+            DType::F64 => crate::ops::gather_scatter::gather_nd::<f64>(data, indices),
+            DType::F16 => crate::ops::gather_scatter::gather_nd::<f16>(data, indices),
+            DType::BF16 => crate::ops::gather_scatter::gather_nd::<bf16>(data, indices),
+            _ => panic!("float_gather_nd: unsupported dtype {:?}", data.dtype()),
         }
     }
 
@@ -882,6 +910,15 @@ impl FloatTensorOps<Flex> for Flex {
         }
     }
 
+    fn float_argtopk(
+        _tensor: FloatTensor<Flex>,
+        _dim: usize,
+        _k: usize,
+        _out_dtype: burn_std::IntDType,
+    ) -> IntTensor<Flex> {
+        unimplemented!("float_argtopk not implemented for flex")
+    }
+
     fn float_argmin(
         tensor: FloatTensor<Flex>,
         dim: usize,
@@ -1041,6 +1078,16 @@ impl FloatTensorOps<Flex> for Flex {
             out_dtype,
             |x: f32| x.is_infinite(),
             |x: f64| x.is_infinite(),
+        )
+    }
+
+    fn float_hypot(lhs: FloatTensor<Flex>, rhs: FloatTensor<Flex>) -> FloatTensor<Flex> {
+        binary_op(
+            lhs,
+            rhs,
+            |a: f32, b| a.hypot(b),
+            |a: f64, b| a.hypot(b),
+            None,
         )
     }
 }

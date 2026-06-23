@@ -4,12 +4,13 @@ use crate::{
     ops::numeric::empty_device_dtype,
     tensor::CubeTensor,
 };
+use burn_backend::cubecl::dtype_to_storage_type;
 use burn_backend::{Slice, TensorMetadata};
 use burn_std::{Metadata, SliceOps};
 use cubecl::{
     calculate_cube_count_elemwise, intrinsic,
     prelude::*,
-    std::{FastDivmod, tensor::layout::linear::LinearView},
+    std::{FastDivmod, tensor::layout::linear::LinearViewMut},
 };
 use std::ops::Range;
 
@@ -58,7 +59,7 @@ pub fn slice<R: CubeRuntime>(tensor: CubeTensor<R>, indices: &[Range<usize>]) ->
 #[cube(launch_unchecked, address_type = "dynamic")]
 fn slice_kernel<E: Numeric>(
     input: &Tensor<E>,
-    output: &mut LinearView<E, ReadWrite>,
+    mut output: LinearViewMut<'_, E>,
     out_shape: Sequence<FastDivmod<usize>>,
     indices: Sequence<usize>,
     #[define(E)] _dtype: StorageType,
@@ -85,7 +86,7 @@ fn slice_kernel<E: Numeric>(
         offset_input += offset_local * input.stride(dim);
     }
 
-    output[ABSOLUTE_POS] = input[offset_input];
+    output.write(ABSOLUTE_POS, input[offset_input]);
 }
 
 pub(crate) fn slice_on_output<R: CubeRuntime>(
@@ -116,7 +117,7 @@ pub(crate) fn slice_on_output<R: CubeRuntime>(
             output.clone().into_linear_view(),
             shape_divmod(&output),
             indices_sequence,
-            dtype.into(),
+            dtype_to_storage_type(dtype),
         )
     };
 
@@ -127,7 +128,7 @@ pub(crate) fn slice_on_output<R: CubeRuntime>(
 #[cube(launch_unchecked, address_type = "dynamic")]
 fn slice_with_steps_kernel<E: Numeric>(
     input: &Tensor<E>,
-    output: &mut LinearView<E, ReadWrite>,
+    mut output: LinearViewMut<'_, E>,
     out_shape: Sequence<FastDivmod<usize>>,
     starts: Sequence<usize>,
     ends: Sequence<usize>,
@@ -167,7 +168,7 @@ fn slice_with_steps_kernel<E: Numeric>(
         input_offset += input_idx * input.stride(dim);
     }
 
-    output[ABSOLUTE_POS] = input[input_offset];
+    output.write(ABSOLUTE_POS, input[input_offset]);
 }
 
 /// Slice a tensor with steps
@@ -233,7 +234,7 @@ pub fn slice_with_steps<R: CubeRuntime>(tensor: CubeTensor<R>, slices: &[Slice])
             starts,
             ends,
             steps,
-            dtype.into(),
+            dtype_to_storage_type(dtype),
         );
     }
 

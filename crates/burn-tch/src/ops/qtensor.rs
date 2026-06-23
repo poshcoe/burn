@@ -5,9 +5,9 @@ use burn_backend::{
     tensor::{Device, FloatTensor, IntTensor, QuantizedTensor},
 };
 
-use crate::{LibTorch, LibTorchDevice, TchElement};
+use crate::{LibTorch, LibTorchDevice};
 
-impl<E: TchElement> QTensorOps<Self> for LibTorch<E> {
+impl QTensorOps<Self> for LibTorch {
     fn q_from_data(_data: TensorData, _device: &LibTorchDevice) -> QuantizedTensor<Self> {
         unimplemented!()
     }
@@ -28,10 +28,6 @@ impl<E: TchElement> QTensorOps<Self> for LibTorch<E> {
     }
 
     fn dequantize(_tensor: QuantizedTensor<Self>, _dtype: FloatDType) -> FloatTensor<Self> {
-        unimplemented!()
-    }
-
-    fn q_device(_tensor: &QuantizedTensor<Self>) -> LibTorchDevice {
         unimplemented!()
     }
 
@@ -62,21 +58,6 @@ impl<E: TchElement> QTensorOps<Self> for LibTorch<E> {
     }
 
     fn q_flip(_tensor: QuantizedTensor<Self>, _axes: &[usize]) -> QuantizedTensor<Self> {
-        unimplemented!()
-    }
-
-    fn q_select(
-        _tensor: QuantizedTensor<Self>,
-        _dim: usize,
-        _indices: IntTensor<Self>,
-    ) -> QuantizedTensor<Self> {
-        unimplemented!()
-    }
-
-    fn q_slice(
-        _tensor: QuantizedTensor<Self>,
-        _slices: &[burn_backend::Slice],
-    ) -> QuantizedTensor<Self> {
         unimplemented!()
     }
 
@@ -117,10 +98,6 @@ impl<E: TchElement> QTensorOps<Self> for LibTorch<E> {
         _dim: usize,
         _indices_dtype: IntDType,
     ) -> (QuantizedTensor<Self>, IntTensor<Self>) {
-        unimplemented!()
-    }
-
-    fn q_expand(_tensor: QuantizedTensor<Self>, _shape: Shape) -> QuantizedTensor<Self> {
         unimplemented!()
     }
 

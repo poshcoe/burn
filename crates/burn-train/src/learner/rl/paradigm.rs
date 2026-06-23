@@ -1,6 +1,6 @@
 use crate::checkpoint::{
-    AsyncCheckpointer, CheckpointingStrategy, ComposedCheckpointingStrategy, FileCheckpointer,
-    KeepLastNCheckpoints, MetricCheckpointingStrategy,
+    AsyncCheckpointer, Checkpoint, CheckpointingStrategy, ComposedCheckpointingStrategy,
+    FileCheckpointer, KeepLastNCheckpoints, MetricCheckpointingStrategy,
 };
 use crate::learner::base::Interrupter;
 use crate::logger::{FileMetricLogger, MetricLogger};
@@ -14,9 +14,11 @@ use crate::{
     RLPolicyRecord, RLStrategy,
 };
 use crate::{EpisodeSummary, RLStrategies};
-use burn_core::record::FileRecorder;
-use burn_core::tensor::backend::AutodiffBackend;
-use burn_rl::{Batchable, Environment, EnvironmentInit, Policy, PolicyLearner, SliceAccess};
+use burn_core::tensor::Device;
+use burn_rl::{
+    Batchable, Environment, EnvironmentInit, Policy, PolicyLearner, PolicyState, SliceAccess,
+    ToAction, ToObservation,
+};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -26,8 +28,8 @@ pub struct RLTraining<RLC: RLComponentsTypes> {
     // Not that complex. Extracting into yet another type would only make it more confusing.
     #[allow(clippy::type_complexity)]
     checkpointers: Option<(
-        AsyncCheckpointer<RLPolicyRecord<RLC>, RLC::Backend>,
-        AsyncCheckpointer<RLAgentRecord<RLC>, RLC::Backend>,
+        AsyncCheckpointer<RLPolicyRecord<RLC>>,
+        AsyncCheckpointer<RLAgentRecord<RLC>>,
     )>,
     num_steps: usize,
     checkpoint: Option<usize>,
@@ -44,24 +46,26 @@ pub struct RLTraining<RLC: RLComponentsTypes> {
     summary_metrics: BTreeSet<String>,
     summary: bool,
     env_initializer: RLC::EnvInit,
+    inference_device: Device,
 }
 
-impl<B, E, EI, A> RLTraining<RLComponentsMarker<B, E, EI, A>>
+impl<E, EI, A> RLTraining<RLComponentsMarker<E, EI, A>>
 where
-    B: AutodiffBackend,
     E: Environment + 'static,
     EI: EnvironmentInit<E> + Send + 'static,
-    A: PolicyLearner<B> + Send + 'static,
+    A: PolicyLearner + Send + 'static,
+    <A as PolicyLearner>::Record: Checkpoint,
     A::TrainContext: ItemLazy + Clone + Send,
-    A::InnerPolicy: Policy<B> + Send,
-    <A::InnerPolicy as Policy<B>>::Observation: Batchable + Clone + Send,
-    <A::InnerPolicy as Policy<B>>::ActionDistribution: Batchable + Clone + Send,
-    <A::InnerPolicy as Policy<B>>::Action: Batchable + Clone + Send,
-    <A::InnerPolicy as Policy<B>>::ActionContext: ItemLazy + Clone + Send + 'static,
-    <A::InnerPolicy as Policy<B>>::PolicyState: Clone + Send,
-    E::State: Into<<A::InnerPolicy as Policy<B>>::Observation> + Clone + Send + 'static,
-    E::Action: From<<A::InnerPolicy as Policy<B>>::Action>
-        + Into<<A::InnerPolicy as Policy<B>>::Action>
+    A::InnerPolicy: Policy + Send,
+    <A::InnerPolicy as Policy>::Observation: Batchable + Clone + Send,
+    <A::InnerPolicy as Policy>::ActionDistribution: Batchable + Clone + Send,
+    <A::InnerPolicy as Policy>::Action: Batchable + Clone + Send,
+    <A::InnerPolicy as Policy>::ActionContext: ItemLazy + Clone + Send + 'static,
+    <A::InnerPolicy as Policy>::PolicyState: Clone + Send,
+    <<A::InnerPolicy as Policy>::PolicyState as PolicyState>::Record: Checkpoint,
+    E::State: ToObservation<<A::InnerPolicy as Policy>::Observation> + Clone + Send + 'static,
+    E::Action: From<<A::InnerPolicy as Policy>::Action>
+        + ToAction<<A::InnerPolicy as Policy>::Action>
         + Clone
         + Send
         + 'static,
@@ -103,6 +107,7 @@ where
             summary_metrics: BTreeSet::new(),
             summary: false,
             env_initializer,
+            inference_device: Default::default(),
         }
     }
 }
@@ -186,7 +191,7 @@ impl<RLC: RLComponentsTypes + 'static> RLTraining<RLC> {
     /// Register a textual metric for a training step.
     pub fn text_metric_train<Me: Metric + 'static>(mut self, metric: Me) -> Self
     where
-        <RLC::TrainingOutput as ItemLazy>::ItemSync: Adaptor<Me::Input>,
+        RLC::TrainingOutput: Adaptor<Me::Input>,
     {
         self.metrics.register_text_metric_train(metric);
         self
@@ -196,7 +201,7 @@ impl<RLC: RLComponentsTypes + 'static> RLTraining<RLC> {
     pub fn metric_train<Me>(mut self, metric: Me) -> Self
     where
         Me: Metric + Numeric + 'static,
-        <RLC::TrainingOutput as ItemLazy>::ItemSync: Adaptor<Me::Input>,
+        RLC::TrainingOutput: Adaptor<Me::Input>,
     {
         self.summary_metrics.insert(metric.name().to_string());
         self.metrics.register_metric_train(metric);
@@ -206,7 +211,7 @@ impl<RLC: RLComponentsTypes + 'static> RLTraining<RLC> {
     /// Register a textual metric for each action taken by the agent.
     pub fn text_metric_agent<Me: Metric + 'static>(mut self, metric: Me) -> Self
     where
-        <RLC::ActionContext as ItemLazy>::ItemSync: Adaptor<Me::Input>,
+        RLC::ActionContext: Adaptor<Me::Input>,
     {
         self.metrics.register_text_metric_agent(metric.clone());
         self.metrics.register_text_metric_agent_valid(metric);
@@ -217,7 +222,7 @@ impl<RLC: RLComponentsTypes + 'static> RLTraining<RLC> {
     pub fn metric_agent<Me>(mut self, metric: Me) -> Self
     where
         Me: Metric + Numeric + 'static,
-        <RLC::ActionContext as ItemLazy>::ItemSync: Adaptor<Me::Input>,
+        RLC::ActionContext: Adaptor<Me::Input>,
     {
         self.summary_metrics.insert(metric.name().to_string());
         self.metrics.register_agent_metric(metric.clone());
@@ -283,22 +288,26 @@ impl<RLC: RLComponentsTypes + 'static> RLTraining<RLC> {
 
     /// Register a checkpointer that will save the environment runner's [policy](Policy)
     /// and the [PolicyLearner](PolicyLearner) state to different files.
-    pub fn with_file_checkpointer<FR>(mut self, recorder: FR) -> Self
+    pub fn with_checkpointer(mut self) -> Self
     where
-        FR: FileRecorder<RLC::Backend> + 'static,
-        FR: FileRecorder<<RLC::Backend as AutodiffBackend>::InnerBackend> + 'static,
+        RLPolicyRecord<RLC>: Checkpoint,
+        RLAgentRecord<RLC>: Checkpoint,
     {
         let checkpoint_dir = self.directory.join("checkpoint");
-        let checkpointer_policy =
-            FileCheckpointer::new(recorder.clone(), &checkpoint_dir, "policy");
-        let checkpointer_learning =
-            FileCheckpointer::new(recorder.clone(), &checkpoint_dir, "learning-agent");
+        let checkpointer_policy = FileCheckpointer::new(&checkpoint_dir, "policy");
+        let checkpointer_learning = FileCheckpointer::new(&checkpoint_dir, "learning-agent");
 
         self.checkpointers = Some((
             AsyncCheckpointer::new(checkpointer_policy),
             AsyncCheckpointer::new(checkpointer_learning),
         ));
 
+        self
+    }
+
+    /// The device on which to run inference during rollout collection and validation.
+    pub fn with_inference_device(mut self, device: Device) -> Self {
+        self.inference_device = device;
         self
     }
 
@@ -313,8 +322,8 @@ impl<RLC: RLComponentsTypes + 'static> RLTraining<RLC> {
     /// Launch the training with the specified [PolicyLearner](PolicyLearner) on the specified environment.
     pub fn launch(mut self, learner_agent: RLC::LearningAgent) -> RLResult<RLC::Policy>
     where
-        RLC::PolicyObs: SliceAccess<RLC::Backend>,
-        RLC::PolicyAction: SliceAccess<RLC::Backend>,
+        RLC::PolicyObs: SliceAccess,
+        RLC::PolicyAction: SliceAccess,
     {
         if self.tracing_logger.is_some()
             && let Err(e) = self.tracing_logger.as_ref().unwrap().install()
@@ -359,7 +368,15 @@ impl<RLC: RLComponentsTypes + 'static> RLTraining<RLC> {
             num_steps: self.num_steps,
             grad_accumulation: self.grad_accumulation,
             summary,
+            inference_device: self.inference_device,
         };
+
+        let mut learner_agent = learner_agent;
+        if let Some(checkpoint) = components.checkpoint
+            && let Some(checkpointer) = &components.checkpointer
+        {
+            learner_agent = checkpointer.load_checkpoint(learner_agent, checkpoint);
+        }
 
         match self.learning_strategy {
             RLStrategies::OffPolicyStrategy(config) => {
@@ -421,7 +438,7 @@ macro_rules! gen_tuple {
     ($($M:ident),*) => {
         impl<$($M,)* RLC: RLComponentsTypes + 'static> TrainTextMetricRegistration<RLC> for ($($M,)*)
         where
-            $(<RLC::TrainingOutput as ItemLazy>::ItemSync: Adaptor<$M::Input>,)*
+            $(RLC::TrainingOutput: Adaptor<$M::Input>,)*
             $($M: Metric + 'static,)*
         {
             #[allow(non_snake_case)]
@@ -437,7 +454,7 @@ macro_rules! gen_tuple {
 
         impl<$($M,)* RLC: RLComponentsTypes + 'static> TrainMetricRegistration<RLC> for ($($M,)*)
         where
-            $(<RLC::TrainingOutput as ItemLazy>::ItemSync: Adaptor<$M::Input>,)*
+            $(RLC::TrainingOutput: Adaptor<$M::Input>,)*
             $($M: Metric + Numeric + 'static,)*
         {
             #[allow(non_snake_case)]
@@ -453,7 +470,7 @@ macro_rules! gen_tuple {
 
         impl<$($M,)* RLC: RLComponentsTypes + 'static> AgentTextMetricRegistration<RLC> for ($($M,)*)
         where
-            $(<RLC::ActionContext as ItemLazy>::ItemSync: Adaptor<$M::Input>,)*
+            $(RLC::ActionContext: Adaptor<$M::Input>,)*
             $($M: Metric + 'static,)*
         {
             #[allow(non_snake_case)]
@@ -469,7 +486,7 @@ macro_rules! gen_tuple {
 
         impl<$($M,)* RLC: RLComponentsTypes + 'static> AgentMetricRegistration<RLC> for ($($M,)*)
         where
-            $(<RLC::ActionContext as ItemLazy>::ItemSync: Adaptor<$M::Input>,)*
+            $(RLC::ActionContext: Adaptor<$M::Input>,)*
             $($M: Metric + Numeric + 'static,)*
         {
             #[allow(non_snake_case)]

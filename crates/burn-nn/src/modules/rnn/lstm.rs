@@ -162,11 +162,11 @@ pub struct Lstm<B: Backend> {
     /// If true, couples input and forget gates: f_t = 1 - i_t.
     pub input_forget: bool,
     /// Activation function for gates (input, forget, output).
-    pub gate_activation: Activation<B>,
+    pub gate_activation: Activation,
     /// Activation function for cell gate (candidate cell state).
-    pub cell_activation: Activation<B>,
+    pub cell_activation: Activation,
     /// Activation function for hidden output.
-    pub hidden_activation: Activation<B>,
+    pub hidden_activation: Activation,
 }
 
 impl<B: Backend> Lstm<B> {
@@ -250,12 +250,12 @@ pub struct BiLstmState<B: Backend> {
 #[derive(Module, Debug)]
 pub struct BiLstm<B: Backend> {
     /// LSTM for the forward direction.
-    pub forward: Lstm<B>,
+    pub forward: Lstm,
     /// LSTM for the reverse direction.
     pub reverse: Lstm<B>,
 }
 
-impl<B: Backend> BiLstm<B> {
+impl BiLstm {
     /// Applies the forward pass on the input tensor. This Bidirectional LSTM implementation
     /// returns the state for each element in a sequence (i.e., across d_sequence) and a final state.
     ///

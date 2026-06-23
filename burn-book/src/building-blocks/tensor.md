@@ -171,6 +171,8 @@ Those operations are available for all tensor kinds: `Int`, `Float`, and `Bool`.
 | `tensor.roll(shifts, dims)`                          | `tensor.roll(shifts, dims)`                                               |
 | `tensor.roll_dim(shift, dim)`                        | `tensor.roll([shift], [dim])`                                             |
 | `tensor.scatter(dim, indices, values, update)`       | `tensor.scatter_add(dim, indices, values)`                                |
+| `tensor.scatter_nd(indices, values, update)`         | N/A                                                                       |
+| `tensor.gather_nd(indices)`                          | N/A                                                                       |
 | `tensor.select(dim, indices)`                        | `tensor.index_select(dim, indices)`                                       |
 | `tensor.select_assign(dim, indices, values, update)` | `tensor.index_add(dim, indices, values)`                                  |
 | `tensor.shape()`                                     | `tensor.shape`                                                            |

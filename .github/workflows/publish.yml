@@ -18,7 +18,7 @@ jobs:
       - publish-burn-core
       - publish-burn-optim
       # dev dependencies
-      - publish-burn-ndarray
+      - publish-burn-flex
     uses: tracel-ai/github-actions/.github/workflows/publish-crate.yml@v9
     with:
       crate: burn-rl
@@ -33,15 +33,15 @@ jobs:
       - publish-burn-fusion
       - publish-burn-cubecl-fusion
       - publish-burn-cubecl
-      - publish-burn-ndarray
+      - publish-burn-flex
       - publish-burn-tch
-      - publish-burn-tensor
+      - publish-burn-core
       - publish-burn-ir
-      - publish-burn-tensor-testgen
       - publish-burn-store
       # dev dependencies
       - publish-burn-wgpu
       - publish-burn-cuda
+      - publish-burn-backend-extension
     uses: tracel-ai/github-actions/.github/workflows/publish-crate.yml@v9
     with:
       crate: burn-vision
@@ -56,7 +56,7 @@ jobs:
       - publish-burn-tensor
       # dev dependencies
       - publish-burn-autodiff
-      - publish-burn-ndarray
+      - publish-burn-flex
       - publish-burn-wgpu
     uses: tracel-ai/github-actions/.github/workflows/publish-crate.yml@v9
     with:
@@ -104,19 +104,19 @@ jobs:
     secrets:
       CRATES_IO_API_TOKEN: ${{ secrets.CRATES_IO_API_TOKEN }}
 
-  publish-burn-tensor-testgen:
+  publish-burn-backend-extension:
     uses: tracel-ai/github-actions/.github/workflows/publish-crate.yml@v9
     with:
-      crate: burn-tensor-testgen
+      crate: burn-backend-extension
       dry-run-only: ${{ github.event_name == 'workflow_dispatch' && inputs.dry-run-only || false }}
     secrets:
       CRATES_IO_API_TOKEN: ${{ secrets.CRATES_IO_API_TOKEN }}
 
   publish-burn-tensor:
     needs:
-      - publish-burn-tensor-testgen
       - publish-burn-std
       - publish-burn-backend
+      - publish-burn-dispatch
     uses: tracel-ai/github-actions/.github/workflows/publish-crate.yml@v9
     with:
       crate: burn-tensor
@@ -176,7 +176,6 @@ jobs:
       - publish-burn-fusion
       - publish-burn-cubecl-fusion
       - publish-burn-tensor
-      - publish-burn-ndarray
     uses: tracel-ai/github-actions/.github/workflows/publish-crate.yml@v9
     with:
       crate: burn-cubecl
@@ -186,8 +185,7 @@ jobs:
 
   publish-burn-autodiff:
     needs:
-      - publish-burn-tensor
-      - publish-burn-tensor-testgen
+      - publish-burn-backend
       - publish-burn-std
     uses: tracel-ai/github-actions/.github/workflows/publish-crate.yml@v9
     with:
@@ -236,7 +234,6 @@ jobs:
     needs:
       - publish-burn-tensor
       - publish-burn-autodiff
-      - publish-burn-ndarray
       - publish-burn-std
       - publish-burn-cubecl
     uses: tracel-ai/github-actions/.github/workflows/publish-crate.yml@v9
@@ -262,7 +259,6 @@ jobs:
     needs:
       - publish-burn-tensor
       - publish-burn-autodiff
-      - publish-burn-ndarray
       - publish-burn-std
       - publish-burn-cubecl
     uses: tracel-ai/github-actions/.github/workflows/publish-crate.yml@v9
@@ -276,7 +272,6 @@ jobs:
     needs:
       - publish-burn-tensor
       - publish-burn-autodiff
-      - publish-burn-ndarray
       - publish-burn-std
       - publish-burn-cubecl
     uses: tracel-ai/github-actions/.github/workflows/publish-crate.yml@v9
@@ -298,21 +293,21 @@ jobs:
     secrets:
       CRATES_IO_API_TOKEN: ${{ secrets.CRATES_IO_API_TOKEN }}
 
-  publish-burn-collective:
-    needs:
-      - publish-burn-std
-      - publish-burn-tensor
-      - publish-burn-communication
-      # dev dependencies
-      - publish-burn-wgpu
-      - publish-burn-ndarray
-      - publish-burn-cuda
-    uses: tracel-ai/github-actions/.github/workflows/publish-crate.yml@v9
-    with:
-      crate: burn-collective
-      dry-run-only: ${{ github.event_name == 'workflow_dispatch' && inputs.dry-run-only || false }}
-    secrets:
-      CRATES_IO_API_TOKEN: ${{ secrets.CRATES_IO_API_TOKEN }}
+  # publish-burn-collective:
+  #   needs:
+  #     - publish-burn-std
+  #     - publish-burn-tensor
+  #     - publish-burn-communication
+  #     # dev dependencies
+  #     - publish-burn-wgpu
+  #     - publish-burn-flex
+  #     - publish-burn-cuda
+  #   uses: tracel-ai/github-actions/.github/workflows/publish-crate.yml@v9
+  #   with:
+  #     crate: burn-collective
+  #     dry-run-only: ${{ github.event_name == 'workflow_dispatch' && inputs.dry-run-only || false }}
+  #   secrets:
+  #     CRATES_IO_API_TOKEN: ${{ secrets.CRATES_IO_API_TOKEN }}
 
   publish-burn-communication:
     needs:
@@ -336,7 +331,7 @@ jobs:
       - publish-burn-wgpu
       - publish-burn-tch
       - publish-burn-cuda
-      - publish-burn-ndarray
+      - publish-burn-flex
       - publish-burn-candle
       - publish-burn-remote
     uses: tracel-ai/github-actions/.github/workflows/publish-crate.yml@v9
@@ -353,7 +348,7 @@ jobs:
       - publish-burn-autodiff
       - publish-burn-wgpu
       - publish-burn-tch
-      - publish-burn-ndarray
+      - publish-burn-flex
       - publish-burn-candle
       - publish-burn-remote
     uses: tracel-ai/github-actions/.github/workflows/publish-crate.yml@v9
@@ -371,7 +366,7 @@ jobs:
       - publish-burn-autodiff
       - publish-burn-wgpu
       - publish-burn-tch
-      - publish-burn-ndarray
+      - publish-burn-flex
       - publish-burn-candle
       - publish-burn-remote
       - publish-burn-nn
@@ -388,7 +383,7 @@ jobs:
       - publish-burn-optim
       - publish-burn-collective
       - publish-burn-rl
-      - publish-burn-ndarray
+      - publish-burn-flex
     uses: tracel-ai/github-actions/.github/workflows/publish-crate.yml@v9
     with:
       crate: burn-train
@@ -400,6 +395,7 @@ jobs:
     needs:
       - publish-burn-std
       - publish-burn-backend
+      - publish-burn-backend-extension
       - publish-burn-autodiff
       - publish-burn-cpu
       - publish-burn-cuda

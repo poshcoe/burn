@@ -5,7 +5,6 @@ use burn_backend::{
     tensor::{BoolTensor, FloatTensor, IntTensor},
 };
 
-use crate::backends::*;
 use crate::{Dispatch, DispatchDevice};
 
 impl FloatTensorOps<Self> for Dispatch {
@@ -31,11 +30,19 @@ impl FloatTensorOps<Self> for Dispatch {
         unary_float!(tensor, float, |tensor| B::float_into_data(tensor).await)
     }
 
-    fn float_device(tensor: &FloatTensor<Self>) -> DispatchDevice {
-        tensor.device()
-    }
-
     fn float_to_device(tensor: FloatTensor<Self>, device: &DispatchDevice) -> FloatTensor<Self> {
+        // Relocating a non-tracked float tensor onto an autodiff device is a plain data move:
+        // place it on the underlying hardware device and leave the tensor non-tracked. The
+        // int/bool `to_device` paths already handle this case; only the float path used to
+        // panic. This is what lets gradient tensors — which are never autodiff-tracked — be
+        // moved onto the autodiff `device_main` during multi-device training.
+        #[cfg(feature = "autodiff")]
+        if let DispatchDevice::Autodiff(device_ad) = device
+            && !matches!(&tensor.kind, crate::DispatchTensorKind::Autodiff(_))
+        {
+            return Self::float_to_device(tensor, &device_ad.inner);
+        }
+
         float_to_device!(
             Float,
             float,
@@ -148,6 +155,22 @@ impl FloatTensorOps<Self> for Dispatch {
             inputs[(tensor, float), (indices, int), (value, float)], => Float,
             B::float_scatter_add(dim, tensor, indices, value)
         )
+    }
+
+    fn float_scatter_nd(
+        data: FloatTensor<Self>,
+        indices: IntTensor<Self>,
+        values: FloatTensor<Self>,
+        reduction: burn_backend::tensor::IndexingUpdateOp,
+    ) -> FloatTensor<Self> {
+        multi_op!(
+            inputs[(data, float), (indices, int), (values, float)], => Float,
+            B::float_scatter_nd(data, indices, values, reduction)
+        )
+    }
+
+    fn float_gather_nd(data: FloatTensor<Self>, indices: IntTensor<Self>) -> FloatTensor<Self> {
+        binary_float!((data, float), (indices, int), |data, indices| B::float_gather_nd(data, indices) => Float)
     }
 
     fn float_select(
@@ -417,6 +440,19 @@ impl FloatTensorOps<Self> for Dispatch {
         unary_float!(tensor, float, |tensor| B::float_argmax(tensor, dim, out_dtype) => Int)
     }
 
+    fn float_argtopk(
+        tensor: FloatTensor<Self>,
+        dim: usize,
+        k: usize,
+        out_dtype: IntDType,
+    ) -> IntTensor<Self> {
+        unary_float!(tensor, float, |tensor| B::float_argtopk(tensor, dim, k, out_dtype) => Int)
+    }
+
+    fn float_topk(tensor: FloatTensor<Self>, dim: usize, k: usize) -> FloatTensor<Self> {
+        unary_float!(tensor, float, |tensor| B::float_topk(tensor, dim, k) => Float)
+    }
+
     fn float_argmin(tensor: FloatTensor<Self>, dim: usize, out_dtype: IntDType) -> IntTensor<Self> {
         unary_float!(tensor, float, |tensor| B::float_argmin(tensor, dim, out_dtype) => Int)
     }
@@ -652,5 +688,9 @@ impl FloatTensorOps<Self> for Dispatch {
 
     fn float_is_inf(tensor: FloatTensor<Self>, out_dtype: BoolDType) -> BoolTensor<Self> {
         unary_float!(tensor, float, |tensor| B::float_is_inf(tensor, out_dtype) => Bool)
+    }
+
+    fn float_hypot(lhs: FloatTensor<Self>, rhs: FloatTensor<Self>) -> FloatTensor<Self> {
+        binary_float!((lhs, float), (rhs, float), |lhs, rhs| B::float_hypot(lhs, rhs) => Float)
     }
 }

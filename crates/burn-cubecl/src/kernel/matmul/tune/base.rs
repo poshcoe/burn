@@ -4,18 +4,25 @@ use crate::{
     tensor::CubeTensor,
 };
 use burn_backend::DType;
+use burn_backend::cubecl::dtype_to_storage_type;
 use cubecl::{
     std::tensor::MatrixBatchLayout,
     tune::{LocalTuner, Tunable, TunableSet, TuneGroup, local_tuner},
 };
 use cubek::matmul::{
+    components::tile::TileMatmulKind,
     definition::MatmulKind,
-    launch::{MatmulAutotuneKey, MatmulGlobalScale, Strategy, should_tune_double_buffering},
     routines::{
-        BlueprintStrategy, TileSizeSelection, double_buffering::DoubleBufferingArgs,
-        double_unit::DoubleUnitSelectionArgs, ordered_double_buffering::OrderedSelectionArgs,
-        simple::SimpleArgs, simple_unit::SimpleUnitSelectionArgs,
+        BlueprintStrategy, TileSizeSelection,
+        batch::{
+            double_buffering::DoubleBufferingArgs, double_unit::DoubleUnitSelectionArgs,
+            ordered_double_buffering::OrderedSelectionArgs, simple::SimpleArgs,
+            simple_unit::SimpleUnitSelectionArgs,
+        },
+        cpu_gemm::CpuGemmStrategy,
+        gemm::GemmStrategy,
     },
+    strategy::{MatmulAutotuneKey, MatmulGlobalScale, Strategy, should_tune_double_buffering},
 };
 
 fn matmul_input_gen<R: CubeRuntime>(
@@ -58,7 +65,7 @@ pub fn matmul_autotune<R: CubeRuntime>(
             //
             // TODO: Actually implement good gemv with fused relayout.
             } else if matches!(key.analysis.kind, MatmulKind::MatVec | MatmulKind::VecMat) {
-                PRIORITY_HIGH
+                PRIORITY_MAX
             } else {
                 PRIORITY_MEDIUM
             }
@@ -148,6 +155,13 @@ pub fn matmul_autotune<R: CubeRuntime>(
             }
         });
 
+        // CPU-only group
+        let cpu =
+            TuneGroup::<MatmulAutotuneKey>::new("cpu", move |_key| match num_cpu_cores.is_some() {
+                true => PRIORITY_MAX,
+                false => PRIORITY_NEVER,
+            });
+
         fn double_buffering_priority(key: &MatmulAutotuneKey, max: i8, min: i8) -> i8 {
             if should_tune_double_buffering(false, key) {
                 max
@@ -186,7 +200,7 @@ pub fn matmul_autotune<R: CubeRuntime>(
                 false,
             ),
             (
-                Strategy::GemvPlaneParallel(BlueprintStrategy::Inferred(Default::default())),
+                Strategy::Gemm(BlueprintStrategy::Inferred(Default::default())),
                 false,
             ),
             (
@@ -238,11 +252,39 @@ pub fn matmul_autotune<R: CubeRuntime>(
             }
         }
 
+        // Gemm no stage
+        // In unit because not accelerated
+        let gemm_no_stage_strategy = Strategy::Gemm(BlueprintStrategy::Inferred(GemmStrategy {
+            target_num_planes: None,
+        }));
+        set = set.with(
+            Tunable::new(
+                &gemm_no_stage_strategy.to_string(),
+                move |(lhs, rhs, out)| {
+                    launch_matmul::<R>(&gemm_no_stage_strategy, lhs, rhs, out)
+                        .map_err(|err| format!("{err:?}"))
+                },
+            )
+            .group(&unit, move |_key| PRIORITY_MAX),
+        );
+
+        // CPU GEMM (CPU-only via the `cpu` group; the size limit is specific to this strategy).
+        let cpu_gemm_strategy =
+            Strategy::CpuGemm(BlueprintStrategy::Inferred(CpuGemmStrategy::default()));
+        set = set.with(
+            Tunable::new(&cpu_gemm_strategy.to_string(), move |(lhs, rhs, out)| {
+                launch_matmul::<R>(&cpu_gemm_strategy, lhs, rhs, out)
+                    .map_err(|err| format!("{err:?}"))
+            })
+            .group(&cpu, move |_key| PRIORITY_MAX),
+        );
+
         // Accelerated matmuls
         for (strategy, double_buf, group_extra, tile_group) in [
             (
                 Strategy::SimpleCyclicCmma(BlueprintStrategy::Inferred(SimpleArgs {
                     multi_rows: false,
+                    tile_matmul: TileMatmulKind::Cmma,
                 })),
                 false,
                 None,
@@ -251,6 +293,7 @@ pub fn matmul_autotune<R: CubeRuntime>(
             (
                 Strategy::SimpleCyclicMma(BlueprintStrategy::Inferred(SimpleArgs {
                     multi_rows: false,
+                    tile_matmul: TileMatmulKind::Mma,
                 })),
                 false,
                 None,
@@ -259,6 +302,7 @@ pub fn matmul_autotune<R: CubeRuntime>(
             (
                 Strategy::SimpleCyclicCmma(BlueprintStrategy::Inferred(SimpleArgs {
                     multi_rows: true,
+                    tile_matmul: TileMatmulKind::Cmma,
                 })),
                 false,
                 None,
@@ -267,6 +311,7 @@ pub fn matmul_autotune<R: CubeRuntime>(
             (
                 Strategy::SimpleCyclicMma(BlueprintStrategy::Inferred(SimpleArgs {
                     multi_rows: true,
+                    tile_matmul: TileMatmulKind::Mma,
                 })),
                 false,
                 None,
@@ -277,6 +322,7 @@ pub fn matmul_autotune<R: CubeRuntime>(
                     partition_k: Some(2),
                     row_count: Some(4),
                     rows_per_plane: Some(2),
+                    tile_matmul: TileMatmulKind::Cmma,
                 })),
                 true,
                 None,
@@ -287,6 +333,7 @@ pub fn matmul_autotune<R: CubeRuntime>(
                     partition_k: Some(2),
                     row_count: Some(4),
                     rows_per_plane: Some(2),
+                    tile_matmul: TileMatmulKind::Mma,
                 })),
                 true,
                 None,
@@ -297,6 +344,7 @@ pub fn matmul_autotune<R: CubeRuntime>(
                     partition_k: Some(2),
                     row_count: Some(8),
                     rows_per_plane: Some(2),
+                    tile_matmul: TileMatmulKind::Cmma,
                 })),
                 true,
                 None,
@@ -307,6 +355,7 @@ pub fn matmul_autotune<R: CubeRuntime>(
                     partition_k: Some(2),
                     row_count: Some(8),
                     rows_per_plane: Some(2),
+                    tile_matmul: TileMatmulKind::Mma,
                 })),
                 true,
                 None,
@@ -315,6 +364,7 @@ pub fn matmul_autotune<R: CubeRuntime>(
             (
                 Strategy::DoubleCyclicCmma(BlueprintStrategy::Inferred(DoubleBufferingArgs {
                     specialized: false,
+                    tile_matmul: TileMatmulKind::Cmma,
                 })),
                 true,
                 None,
@@ -323,6 +373,7 @@ pub fn matmul_autotune<R: CubeRuntime>(
             (
                 Strategy::DoubleCyclicMma(BlueprintStrategy::Inferred(DoubleBufferingArgs {
                     specialized: false,
+                    tile_matmul: TileMatmulKind::Mma,
                 })),
                 true,
                 None,
@@ -331,6 +382,7 @@ pub fn matmul_autotune<R: CubeRuntime>(
             (
                 Strategy::DoubleCyclicCmma(BlueprintStrategy::Inferred(DoubleBufferingArgs {
                     specialized: true,
+                    tile_matmul: TileMatmulKind::Cmma,
                 })),
                 true,
                 None,
@@ -339,6 +391,7 @@ pub fn matmul_autotune<R: CubeRuntime>(
             (
                 Strategy::DoubleCyclicMma(BlueprintStrategy::Inferred(DoubleBufferingArgs {
                     specialized: true,
+                    tile_matmul: TileMatmulKind::Mma,
                 })),
                 true,
                 None,
@@ -359,6 +412,7 @@ pub fn matmul_autotune<R: CubeRuntime>(
             (
                 Strategy::SimpleTmaCmma(BlueprintStrategy::Inferred(SimpleArgs {
                     multi_rows: false,
+                    tile_matmul: TileMatmulKind::Cmma,
                 })),
                 false,
                 Some(&tma),
@@ -367,6 +421,7 @@ pub fn matmul_autotune<R: CubeRuntime>(
             (
                 Strategy::SimpleTmaMma(BlueprintStrategy::Inferred(SimpleArgs {
                     multi_rows: false,
+                    tile_matmul: TileMatmulKind::Mma,
                 })),
                 false,
                 Some(&tma),
@@ -375,6 +430,7 @@ pub fn matmul_autotune<R: CubeRuntime>(
             (
                 Strategy::SimpleTmaCmma(BlueprintStrategy::Inferred(SimpleArgs {
                     multi_rows: true,
+                    tile_matmul: TileMatmulKind::Cmma,
                 })),
                 false,
                 Some(&tma),
@@ -383,6 +439,7 @@ pub fn matmul_autotune<R: CubeRuntime>(
             (
                 Strategy::SimpleTmaMma(BlueprintStrategy::Inferred(SimpleArgs {
                     multi_rows: true,
+                    tile_matmul: TileMatmulKind::Mma,
                 })),
                 false,
                 Some(&tma),
@@ -444,9 +501,9 @@ fn create_key<R: CubeRuntime>(
         rhs.meta.shape(),
         lhs.meta.strides(),
         rhs.meta.strides(),
-        lhs.dtype.into(),
-        rhs.dtype.into(),
-        out.dtype.into(),
+        dtype_to_storage_type(lhs.dtype),
+        dtype_to_storage_type(rhs.dtype),
+        dtype_to_storage_type(out.dtype),
         lhs.try_scheme(),
         rhs.try_scheme(),
     )

@@ -1,7 +1,7 @@
 use super::{
     argwhere::argwhere_data, cat::cat_with_slice_assign, repeat_dim::repeat_with_slice_assign,
 };
-use crate::tensor::{Bool, BoolTensor, Device, FloatTensor, IntTensor};
+use crate::tensor::{BoolTensor, Device, FloatTensor, IntTensor};
 use crate::{Backend, TensorData, TensorMetadata, get_device_settings};
 use crate::{ExecutionError, Scalar};
 use alloc::vec::Vec;
@@ -100,17 +100,6 @@ pub trait BoolTensorOps<B: Backend> {
     ///
     /// The float tensor with the same data as the bool tensor.
     fn bool_into_float(tensor: BoolTensor<B>, out_dtype: FloatDType) -> FloatTensor<B>;
-
-    /// Gets the device of the tensor.
-    ///
-    /// # Arguments
-    ///
-    /// * `tensor` - The tensor.
-    ///
-    /// # Returns
-    ///
-    /// The device of the tensor.
-    fn bool_device(tensor: &BoolTensor<B>) -> Device<B>;
 
     /// Moves the tensor to the device.
     fn bool_to_device(tensor: BoolTensor<B>, device: &Device<B>) -> BoolTensor<B>;
@@ -271,7 +260,15 @@ pub trait BoolTensorOps<B: Backend> {
     ///
     /// The tensor with the dimension repeated.
     fn bool_repeat_dim(tensor: BoolTensor<B>, dim: usize, times: usize) -> BoolTensor<B> {
-        repeat_with_slice_assign::<B, Bool>(tensor, dim, times)
+        let device = tensor.device();
+        repeat_with_slice_assign::<B, _, _, _>(
+            tensor,
+            dim,
+            times,
+            device,
+            |shape, device, dtype| B::bool_empty(shape, device, dtype.into()),
+            B::bool_slice_assign,
+        )
     }
 
     /// Concatenates the tensors along the given dimension.
@@ -291,7 +288,15 @@ pub trait BoolTensorOps<B: Backend> {
     /// high-level tensor API and will not be passed to this method. Backend implementations do
     /// not need to handle empty tensors.
     fn bool_cat(tensors: Vec<BoolTensor<B>>, dim: usize) -> BoolTensor<B> {
-        cat_with_slice_assign::<B, Bool>(tensors, dim)
+        let first_tensor = tensors.first().expect("Tensors should not be empty");
+        let device = first_tensor.device();
+        cat_with_slice_assign::<B, _, _, _>(
+            tensors,
+            dim,
+            device,
+            |shape, device, dtype| B::bool_empty(shape, device, dtype.into()),
+            B::bool_slice_assign,
+        )
     }
 
     /// Equates the two tensors.
@@ -456,7 +461,7 @@ pub trait BoolTensorOps<B: Backend> {
     /// A boolean tensor with a single element, True if any element in the tensor is True, False otherwise.
     fn bool_any(tensor: BoolTensor<B>) -> BoolTensor<B> {
         let dtype = tensor.dtype();
-        let int_dtype = get_device_settings::<B>(&B::bool_device(&tensor)).int_dtype;
+        let int_dtype = get_device_settings::<B>(&tensor.device()).int_dtype;
         let sum = B::int_sum(B::bool_into_int(tensor, int_dtype));
         B::int_greater_elem(sum, 0.into(), dtype.into())
     }
@@ -475,7 +480,7 @@ pub trait BoolTensorOps<B: Backend> {
     /// evaluates to True, False otherwise.
     fn bool_any_dim(tensor: BoolTensor<B>, dim: usize) -> BoolTensor<B> {
         let dtype = tensor.dtype();
-        let int_dtype = get_device_settings::<B>(&B::bool_device(&tensor)).int_dtype;
+        let int_dtype = get_device_settings::<B>(&tensor.device()).int_dtype;
         let sum = B::int_sum_dim(B::bool_into_int(tensor, int_dtype), dim);
         B::int_greater_elem(sum, 0.into(), dtype.into())
     }
@@ -492,7 +497,7 @@ pub trait BoolTensorOps<B: Backend> {
     /// evaluate to True, False otherwise.
     fn bool_all(tensor: BoolTensor<B>) -> BoolTensor<B> {
         let dtype = tensor.dtype();
-        let int_dtype = get_device_settings::<B>(&B::bool_device(&tensor)).int_dtype;
+        let int_dtype = get_device_settings::<B>(&tensor.device()).int_dtype;
         let num_elems = tensor.shape().num_elements() as i64;
         let sum = B::int_sum(B::bool_into_int(tensor, int_dtype));
         B::int_equal_elem(sum, num_elems.into(), dtype.into())
@@ -512,7 +517,7 @@ pub trait BoolTensorOps<B: Backend> {
     /// evaluates to True, False otherwise.
     fn bool_all_dim(tensor: BoolTensor<B>, dim: usize) -> BoolTensor<B> {
         let dtype = tensor.dtype();
-        let int_dtype = get_device_settings::<B>(&B::bool_device(&tensor)).int_dtype;
+        let int_dtype = get_device_settings::<B>(&tensor.device()).int_dtype;
         let num_elems = tensor.shape()[dim] as i64;
         let sum = B::int_sum_dim(B::bool_into_int(tensor, int_dtype), dim);
         B::int_equal_elem(sum, num_elems.into(), dtype.into())
@@ -536,11 +541,11 @@ pub trait BoolTensorOps<B: Backend> {
         async move {
             // Size of each output tensor is variable (= number of nonzero elements in the tensor).
             // Reading the data to count the number of truth values might cause sync but is required.
-            let device = B::bool_device(&tensor);
+            let device = &tensor.device();
             let data = B::bool_into_data(tensor)
                 .await
                 .expect("Can read the data without error");
-            argwhere_data::<B>(data, &device, out_dtype)
+            argwhere_data::<B>(data, device, out_dtype)
         }
     }
 

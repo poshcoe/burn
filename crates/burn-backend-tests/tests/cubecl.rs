@@ -1,8 +1,7 @@
 //! CubeCL kernel tests.
-
+#![cfg(feature = "cube")]
 #![recursion_limit = "256"]
-// TODO: some tests are failing WITH fusion. Should validate the existing failures.
-#[cfg(all(feature = "cube", not(feature = "fusion")))]
+
 #[path = "."]
 mod cube {
     type FloatElem = f32;
@@ -14,8 +13,8 @@ mod cube {
         pub struct ReferenceDevice;
 
         impl ReferenceDevice {
-            pub fn new() -> burn_dispatch::DispatchDevice {
-                burn_dispatch::DispatchDevice::NdArray(Default::default())
+            pub fn new() -> burn_tensor::Device {
+                burn_ndarray::NdArrayDevice::Cpu.into()
             }
         }
     }

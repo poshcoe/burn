@@ -1,4 +1,5 @@
 use burn_ir::OperationIr;
+use burn_std::config::{fusion::FusionLogLevel, log_fusion};
 
 use super::{ExecutionMode, ExplorationAction, Explorer};
 use crate::search::BlockOptimization;
@@ -18,6 +19,8 @@ pub(crate) trait StreamSegment<O> {
     fn operations(&self) -> &[OperationIr];
     /// Execute part of the segment using the given plan id.
     fn execute(&mut self, id: ExecutionPlanId, store: &mut ExecutionPlanStore<O>);
+    /// Execute the segment with a one-off optimization, without caching it in the store.
+    fn execute_unfused(&mut self, optimization: BlockOptimization<O>);
 }
 
 impl<O: NumOperations> Processor<O> {
@@ -65,6 +68,17 @@ impl<O: NumOperations> Processor<O> {
                     };
                 }
                 Action::Execute(id) => {
+                    let mode_dbg = match mode {
+                        ExecutionMode::Lazy => "lazy",
+                        ExecutionMode::Sync => "sync",
+                    };
+                    let num_ops = segment.operations().len();
+                    log_fusion(FusionLogLevel::Full, move || {
+                        format!(
+                            "[plan] cache hit: execute plan #{id} ({mode_dbg}, segment has {num_ops} ops)"
+                        )
+                    });
+
                     if let ExecutionMode::Sync = mode {
                         store.add_trigger(id, ExecutionTrigger::OnSync);
                     }
@@ -113,6 +127,12 @@ impl<O: NumOperations> Processor<O> {
                     panic!("Can't continue exploring when sync.")
                 }
             }
+            ExplorationAction::Unfused(optim) => {
+                // Exploration is capped: run the ops unfused and don't touch the store, so a
+                // never-cacheable dynamic graph stops both re-exploring and growing the cache.
+                item.execute_unfused(optim);
+                self.reset(store, item.operations());
+            }
         }
     }
 
@@ -137,6 +157,19 @@ impl<O: NumOperations> Processor<O> {
     ) -> ExecutionPlanId {
         let num_optimized = optimization.ordering.len();
         let relative = &operations[0..num_optimized];
+
+        {
+            let total_ops = operations.len();
+            let mode_dbg = match mode {
+                ExecutionMode::Lazy => "lazy",
+                ExecutionMode::Sync => "sync",
+            };
+            log_fusion(FusionLogLevel::Full, move || {
+                format!(
+                    "[plan] exploration completed: {mode_dbg}, {num_optimized}/{total_ops} ops optimized"
+                )
+            });
+        }
 
         match mode {
             ExecutionMode::Lazy => {

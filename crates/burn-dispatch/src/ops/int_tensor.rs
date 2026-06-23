@@ -5,7 +5,6 @@ use burn_backend::{
     tensor::{BoolTensor, FloatTensor, IntTensor},
 };
 
-use crate::backends::*;
 use crate::{Dispatch, DispatchDevice};
 
 impl IntTensorOps<Self> for Dispatch {
@@ -19,10 +18,6 @@ impl IntTensorOps<Self> for Dispatch {
 
     fn int_from_data(data: TensorData, device: &DispatchDevice) -> IntTensor<Self> {
         creation_op!(Int, device, |device| B::int_from_data(data, device))
-    }
-
-    fn int_device(tensor: &IntTensor<Self>) -> DispatchDevice {
-        tensor.device()
     }
 
     fn int_to_device(tensor: IntTensor<Self>, device: &DispatchDevice) -> IntTensor<Self> {
@@ -89,6 +84,22 @@ impl IntTensorOps<Self> for Dispatch {
             inputs[(tensor, int), (indices, int), (value, int)], => Int,
             B::int_scatter_add(dim, tensor, indices, value)
         )
+    }
+
+    fn int_scatter_nd(
+        data: IntTensor<Self>,
+        indices: IntTensor<Self>,
+        values: IntTensor<Self>,
+        reduction: burn_backend::tensor::IndexingUpdateOp,
+    ) -> IntTensor<Self> {
+        multi_op!(
+            inputs[(data, int), (indices, int), (values, int)], => Int,
+            B::int_scatter_nd(data, indices, values, reduction)
+        )
+    }
+
+    fn int_gather_nd(data: IntTensor<Self>, indices: IntTensor<Self>) -> IntTensor<Self> {
+        binary_op!((data, int), (indices, int), |data, indices| B::int_gather_nd(data, indices) => Int)
     }
 
     fn int_select(
@@ -265,6 +276,14 @@ impl IntTensorOps<Self> for Dispatch {
 
     fn int_argmax(tensor: IntTensor<Self>, dim: usize) -> IntTensor<Self> {
         unary_op!(tensor, int, |tensor| B::int_argmax(tensor, dim) => Int)
+    }
+
+    fn int_argtopk(tensor: IntTensor<Self>, dim: usize, k: usize) -> IntTensor<Self> {
+        unary_op!(tensor, int, |tensor| B::int_argtopk(tensor, dim, k) => Int)
+    }
+
+    fn int_topk(tensor: IntTensor<Self>, dim: usize, k: usize) -> IntTensor<Self> {
+        unary_op!(tensor, int, |tensor| B::int_topk(tensor, dim, k) => Int)
     }
 
     fn int_argmin(tensor: IntTensor<Self>, dim: usize) -> IntTensor<Self> {

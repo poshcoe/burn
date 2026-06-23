@@ -27,33 +27,26 @@ std = [
     "dep:memmap2",
     "safetensors/std",
     "burn-core/std",
-    "burn-tensor/std",
+    "burn-pack?/std",
     "dep:regex",
     "byteorder/std",
 ]
-tracing = [
-    "burn-core/tracing",
-    "burn-cuda?/tracing",
-    "burn-nn/tracing",
-    "burn-tch?/tracing",
-    "burn-tensor/tracing",
-    "burn-wgpu?/tracing",
-]
 
-
-burnpack = ["serde", "ciborium"]
-cuda = ["burn-cuda"]
-metal = ["wgpu", "burn-wgpu/metal"]
-tch = ["burn-tch"]
-wgpu = ["burn-wgpu"]
+# The burnpack format lives in the `burn-pack` crate; this enables the BurnpackStore over it.
+burnpack = ["dep:burn-pack"]
+cuda = ["burn-core/cuda"]
+metal = ["wgpu", "burn-core/metal"]
+tch = ["burn-core/tch"]
+wgpu = ["burn-core/wgpu"]
 
 safetensors = ["dep:safetensors"]
 
-pytorch = ["burn-core/record-item-custom-serde", "zip", "serde", "tar"]
+pytorch = ["std", "zip", "serde", "tar", "dep:thiserror", "dep:num-traits", "dep:burn-tensor"]
 
 [dependencies]
-burn-core = { path = "../burn-core", version = "=0.21.0-pre.3", default-features = false }
-burn-tensor = { path = "../burn-tensor", version = "=0.21.0-pre.3", default-features = false }
+burn-core = { workspace = true }
+burn-pack = { workspace = true, optional = true }
+burn-tensor = { workspace = true, optional = true }
 
 # External dependencies
 byteorder = { workspace = true, default-features = false }
@@ -62,9 +55,11 @@ ciborium = { workspace = true, optional = true }
 half = { workspace = true }
 hashbrown = { workspace = true, features = ["serde"] }
 memmap2 = { workspace = true, optional = true }
+num-traits = { workspace = true, optional = true }
 regex = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 textdistance = { workspace = true }
+thiserror = { workspace = true, optional = true }
 zip = { workspace = true, optional = true }
 tar = { workspace = true, optional = true }
 
@@ -73,15 +68,11 @@ lzma-rust2 = { workspace = true, optional = true }
 
 safetensors = { workspace = true, optional = true }
 
-# Optional backend dependencies for benchmarks
-burn-cuda = { path = "../burn-cuda", version = "=0.21.0-pre.3", optional = true }
-burn-tch = { path = "../burn-tch", version = "=0.21.0-pre.3", optional = true }
-burn-wgpu = { path = "../burn-wgpu", version = "=0.21.0-pre.3", optional = true }
-
 [dev-dependencies]
-# burn-import = { path = "../burn-import", version = "=0.21.0-pre.3" } # disabled (circular dep in publish, only for bench)
-burn-flex = { path = "../burn-flex", version = "=0.21.0-pre.3" }
-burn-nn = { path = "../burn-nn", version = "=0.21.0-pre.3", default-features = false }
+# burn-import = { path = "../burn-import", version = "0.22.0" } # disabled (circular dep in publish, only for bench)
+burn-core = { workspace = true, features = ["flex"] }
+burn-nn = { workspace = true }
+
 divan = "0.1"
 tempfile = { workspace = true }
 

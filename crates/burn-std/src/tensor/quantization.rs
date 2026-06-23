@@ -19,6 +19,22 @@ use serde::{Deserialize, Serialize};
 
 use crate::{DType, Metadata, Shape, bytes::Bytes};
 
+/// Configuration for a device quantization behavior.
+///
+/// This configuration determines how tensors are quantized and how quantization rules
+/// propagate through operations on a given device. It is applied once during device
+/// initialization. See also the [device settings](crate::DeviceSettings).
+#[derive(new, Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct QuantConfig {
+    /// Defines how a tensor is quantized.
+    pub scheme: QuantScheme,
+    /// How quantization is propagated during computation.
+    pub propagation: QuantPropagation,
+    // NOTE: accumulation is currently unused, only scheme and propagation have an impact
+    // /// The precision used for the accumulation in various kernels.
+    // pub acc: QuantAcc,
+}
+
 #[derive(
     Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default,
 )]
@@ -31,6 +47,17 @@ pub enum QuantAcc {
     F16,
     /// bfloat16 precision.
     BF16,
+}
+
+/// Calibration method used to compute the quantization range mapping.
+pub enum Calibration {
+    /// Computes quantization range mapping based on the min and max values.
+    MinMax,
+    /// Absolute-mean calibration for BitNet b1.58-style `{-1, 0, +1}` weight quantization.
+    ///
+    /// The range is `[-γ, +γ]` where γ = `mean(|W|)` per tensor or per block (BitNet b1.58
+    /// §3.1). Use with `QuantValue::Q2S` and `QuantStore::PackedU32` for 2-bit packed storage.
+    AbsMean,
 }
 
 /// Specify if the output of an operation is quantized using the scheme of the input

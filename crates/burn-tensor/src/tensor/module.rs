@@ -1,8 +1,11 @@
+use burn_backend::ops::rnn::Rnn;
+
 use crate::{
     Bool, Int, Tensor, TensorPrimitive,
     backend::Backend,
     check,
     check::TensorCheck,
+    ops::rnn::{RnnMode, RnnOptions, RnnSize},
     ops::{
         AttentionModuleOptions, ConvOptions, ConvTransposeOptions, InterpolateOptions, PadMode,
         PaddedConvOptions, UnfoldOptions,
@@ -545,27 +548,36 @@ pub fn lstm<B: Backend>(
     input_weights: Tensor<B, 3>,
     recurrent_weights: Tensor<B, 3>,
     biases: Option<Tensor<B, 3>>,
-    size: &RnnSize,
+    size: RnnSize,
 ) -> (Tensor<B, 3>, Tensor<B, 3>, Tensor<B, 3>) {
+    let options = RnnOptions {
+        mode: RnnMode::Lstm,
+        size,
+        enable_backprop_cache: false,
+    };
     // RNN forward in LSTM mode
-    let out = B::rnn(
+    let Rnn {
+        out,
+        hidden_state: h,
+        cell_state: c,
+        ..
+    } = B::rnn(
         input.primitive.tensor(),
         hidden_state.primitive.tensor(),
+        Some(cell_state.primitive.tensor()),
         input_weights.primitive.tensor(),
         recurrent_weights.primitive.tensor(),
         biases.map(|b| b.primitive.tensor()),
-        RnnCell::Lstm(cell_state.primitive.tensor()),
-        size,
+        &options,
     );
-    let RnnCell::Lstm(out_cell_state) = out.cell else {
-        panic!("LSTM cell given but not returned.")
-    };
     (
         // output excludes first state in the trajectory (initial state)
-        Tensor::new(TensorPrimitive::Float(out.traj)),
-        Tensor::new(TensorPrimitive::Float(out.hidden_state)),
-        Tensor::new(TensorPrimitive::Float(out_cell_state)),
+        Tensor::new(TensorPrimitive::Float(out)),
+        Tensor::new(TensorPrimitive::Float(h)),
+        Tensor::new(TensorPrimitive::Float(c.unwrap())),
     )
+}
+
 /// Exports attention fallback to test backend's attention against.
 pub fn attention_fallback<B: Backend>(
     query: Tensor<B, 4>,

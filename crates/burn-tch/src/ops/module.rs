@@ -522,4 +522,5 @@ impl<E: TchElement> ModuleOps<Self> for LibTorch<E> {
     }
 }
 
-impl<E: TchElement, Q: QuantElement> RnnOps<Self> for LibTorch<E, Q> {}
+impl<E: TchElement> burn_backend::ops::rnn::lstm::LstmOps<Self> for LibTorch<E> {}
+impl<E: TchElement> burn_backend::ops::rnn::RnnOps<Self> for LibTorch<E> {}

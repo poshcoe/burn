@@ -346,4 +346,11 @@ impl<F: FloatCandleElement, I: IntCandleElement> ModuleOps<Self> for Candle<F, I
     }
 }
 
-impl<F: FloatCandleElement, I: IntCandleElement> RnnOps<Self> for Candle<F, I> {}
+impl<F: FloatCandleElement, I: IntCandleElement> burn_backend::ops::rnn::lstm::LstmOps<Self>
+    for Candle<F, I>
+{
+}
+impl<F: FloatCandleElement, I: IntCandleElement> burn_backend::ops::rnn::RnnOps<Self>
+    for Candle<F, I>
+{
+}

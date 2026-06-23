@@ -397,7 +397,17 @@ where
     }
 }
 
-impl<E: FloatNdArrayElement, I: IntNdArrayElement, Q: QuantElement> RnnOps<Self>
+impl<E: FloatNdArrayElement, I: IntNdArrayElement, Q: QuantElement> rnn::lstm::LstmOps<Self>
     for NdArray<E, I, Q>
+where
+    NdArrayTensor: From<SharedArray<E>>,
+    NdArrayTensor: From<SharedArray<I>>,
+{
+}
+impl<E: FloatNdArrayElement, I: IntNdArrayElement, Q: QuantElement> rnn::RnnOps<Self>
+    for NdArray<E, I, Q>
+where
+    NdArrayTensor: From<SharedArray<E>>,
+    NdArrayTensor: From<SharedArray<I>>,
 {
 }

@@ -770,3 +770,6 @@ impl ModuleOps<Flex> for Flex {
         Flex::float_select_add(grad, 0, indices, output_grad)
     }
 }
+
+impl burn_backend::ops::rnn::lstm::LstmOps<Flex> for Flex {}
+impl burn_backend::ops::rnn::RnnOps<Flex> for Flex {}

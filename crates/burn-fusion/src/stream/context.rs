@@ -503,48 +503,6 @@ impl RelativeOps for ModuleOperationIr {
                     out: desc.out.to_relative(converter),
                 })
             }
-            ModuleOperationIr::Rnn(desc) => ModuleOperationIr::Rnn(RnnOpIr {
-                input: desc.input.to_relative(converter),
-                hidden_state: desc.hidden_state.to_relative(converter),
-                input_weights: desc.input_weights.to_relative(converter),
-                recurrent_weights: desc.recurrent_weights.to_relative(converter),
-                biases: desc.biases.as_ref().map(|b| b.to_relative(converter)),
-                cell: match &desc.cell {
-                    RnnCellIr::Lstm(c) => RnnCellIr::Lstm(c.to_relative(converter)),
-                    RnnCellIr::Gru => RnnCellIr::Gru,
-                },
-                size: desc.size.clone(),
-                out: RnnTrajectoryIr {
-                    traj: desc.out.traj.to_relative(converter),
-                    hidden_state: desc.out.hidden_state.to_relative(converter),
-                    cell: match &desc.out.cell {
-                        RnnCellIr::Lstm(c) => RnnCellIr::Lstm(c.to_relative(converter)),
-                        RnnCellIr::Gru => RnnCellIr::Gru,
-                    },
-                    cache: desc
-                        .out
-                        .cache
-                        .as_ref()
-                        .map(|cache| cache.iter().map(|v| v.to_relative(converter)).collect()),
-                },
-            }),
-            ModuleOperationIr::RnnGatesBackward(desc) => {
-                ModuleOperationIr::RnnGatesBackward(RnnGatesBackwardOpIr {
-                    recurrent_weights: desc.recurrent_weights.to_relative(converter),
-                    traj_grad: desc.traj_grad.to_relative(converter),
-                    cache: desc
-                        .cache
-                        .iter()
-                        .map(|v| v.to_relative(converter))
-                        .collect(),
-                    cell: match &desc.cell {
-                        RnnCellIr::Lstm(c) => RnnCellIr::Lstm(c.to_relative(converter)),
-                        RnnCellIr::Gru => RnnCellIr::Gru,
-                    },
-                    size: desc.size.clone(),
-                    gates_grad: desc.gates_grad.to_relative(converter),
-                })
-            }
             ModuleOperationIr::Rfft(desc) => ModuleOperationIr::Rfft(RfftOpIr {
                 signal: desc.signal.to_relative(converter),
                 dim: desc.dim,
@@ -568,6 +526,44 @@ impl RelativeOps for ModuleOperationIr {
                 options: desc.options.clone(),
                 out: desc.out.to_relative(converter),
             }),
+            ModuleOperationIr::RnnElemwise(desc) => {
+                ModuleOperationIr::RnnElemwise(RnnElemwiseOpIr {
+                    wx_rh: desc.wx_rh.to_relative(converter),
+                    c: desc.c.as_ref().map(|c| c.to_relative(converter)),
+                    options: desc.options.clone(),
+                    h_out: desc.h_out.to_relative(converter),
+                    c_out: desc
+                        .c_out
+                        .as_ref()
+                        .map(|c_out| c_out.to_relative(converter)),
+                    gates_out: desc
+                        .gates_out
+                        .as_ref()
+                        .map(|gates_out| gates_out.to_relative(converter)),
+                })
+            }
+            ModuleOperationIr::RnnElemwiseBackward(desc) => {
+                ModuleOperationIr::RnnElemwiseBackward(RnnElemwiseBackwardOpIr {
+                    h_out_grad: desc.h_out_grad.to_relative(converter),
+                    h_int_grad: desc.h_int_grad.to_relative(converter),
+                    c: desc.c.as_ref().map(|c| c.to_relative(converter)),
+                    c_out: desc
+                        .c_out
+                        .as_ref()
+                        .map(|c_out| c_out.to_relative(converter)),
+                    c_int_grad: desc
+                        .c_int_grad
+                        .as_ref()
+                        .map(|c_int_grad| c_int_grad.to_relative(converter)),
+                    gates: desc.gates.to_relative(converter),
+                    options: desc.options.clone(),
+                    gates_grad: desc.gates_grad.to_relative(converter),
+                    c_int_grad_out: desc
+                        .c_int_grad_out
+                        .as_ref()
+                        .map(|c_int_grad_out| c_int_grad_out.to_relative(converter)),
+                })
+            }
         }
     }
 }

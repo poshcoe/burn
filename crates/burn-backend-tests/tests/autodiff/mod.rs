@@ -41,6 +41,7 @@ mod gradients;
 mod log;
 mod log1p;
 mod log_sigmoid;
+mod lstm;
 mod mask;
 mod matmul;
 mod maxmin;

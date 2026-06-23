@@ -403,7 +403,7 @@ impl Slice {
     }
 
     /// Creates a slice that represents a single index
-    pub fn index(idx: isize) -> Self {
+    pub const fn index(idx: isize) -> Self {
         Self {
             start: idx,
             end: handle_signed_inclusive_end(idx),
@@ -536,7 +536,7 @@ fn convert_signed_index(index: isize, size: usize) -> usize {
     }
 }
 
-fn handle_signed_inclusive_end(end: isize) -> Option<isize> {
+const fn handle_signed_inclusive_end(end: isize) -> Option<isize> {
     match end {
         -1 => None,
         end => Some(end + 1),

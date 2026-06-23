@@ -1,4 +1,5 @@
 use super::{conv, pool};
+use crate::ops::rnn::RnnOps;
 use crate::ops::unfold::unfold4d_using_conv2d;
 use crate::tensor::{BoolTensor, FloatTensor, IntTensor};
 use crate::{Backend, ElementConversion, TensorMetadata};

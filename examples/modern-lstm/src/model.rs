@@ -101,8 +101,8 @@ impl<B: Backend> LstmCell<B> {
     ///  Tuple of (h_t, c_t) representing new hidden and cell states
     pub fn forward(&self, x: Tensor<B, 2>, state: LstmState<B>) -> LstmState<B> {
         let (h_prev, c_prev) = (state.hidden, state.cell);
-        let h_prev = h_prev.squeeze(0);
-        let c_prev = c_prev.squeeze(0);
+        let h_prev = h_prev.squeeze();
+        let c_prev = c_prev.squeeze();
 
         // Combined matrix multiplication for all gates
         // Shape: (batch_size, 4 * hidden_size)
@@ -138,15 +138,17 @@ impl<B: Backend> LstmCell<B> {
 
         let h_t = self.dropout.forward(h_t);
 
-        LstmState::new(h_t.unsqueeze(), c_t.unsqueeze())
+        LstmState {
+            hidden: h_t.unsqueeze(),
+            cell: c_t.unsqueeze(),
+        }
     }
 
     // Initialize cell state and hidden state if provided or with zeros
     pub fn init_state(&self, batch_size: usize, device: &B::Device) -> LstmState<B> {
         let cell = Tensor::zeros([1, batch_size, self.hidden_size], device);
         let hidden = Tensor::zeros([1, batch_size, self.hidden_size], device);
-
-        LstmState::new(cell, hidden)
+        LstmState { hidden, cell }
     }
 }
 
@@ -231,10 +233,12 @@ impl<B: Backend> StackedLstm<B> {
         for t in 0..seq_length {
             let mut input_t = x.clone().slice(s![.., t..t + 1, ..]).squeeze_dim::<2>(1);
             for (i, lstm_cell) in self.layers.iter().enumerate() {
-                let mut state: LstmState<B> =
-                    LstmState::new(states[i].cell.clone(), states[i].hidden.clone());
+                let mut state: LstmState<B> = LstmState {
+                    cell: states[i].cell.clone(),
+                    hidden: states[i].hidden.clone(),
+                };
                 state = lstm_cell.forward(input_t, state);
-                input_t = state.hidden.clone().squeeze(0);
+                input_t = state.hidden.clone().squeeze();
                 states[i] = state;
             }
             layer_outputs.push(input_t);

@@ -2,6 +2,7 @@ use burn_backend::{
     ops::{
         DeformConv2dBackward, MaxPool1dBackward, MaxPool1dWithIndices, MaxPool2dBackward,
         MaxPool2dWithIndices, ModuleOps,
+        rnn::{RnnElemwise, RnnElemwiseBackward, RnnOps, RnnOptions},
     },
     tensor::{FloatTensor, IntTensor},
 };
@@ -670,5 +671,48 @@ impl ModuleOps<Self> for Dispatch {
                 B::irfft(spectrum_re, spectrum_im, dim, n)
             }
         )
+    }
+}
+
+impl burn_backend::ops::rnn::lstm::LstmOps<Self> for Dispatch {}
+impl RnnOps<Self> for Dispatch {
+    fn rnn_elemwise(
+        wx_rh: FloatTensor<Self>,
+        c: Option<FloatTensor<Self>>,
+        options: &RnnOptions,
+    ) -> RnnElemwise<Self> {
+        let (h, c, gates) = multi_op!(
+            inputs[(wx_rh, float)],
+            opt_inputs[(c, float)],
+            outputs[(h, Float)],
+            opt_outputs[c, gates],
+            {
+                let out = B::rnn_elemwise(wx_rh, c, options);
+                (out.h, out.c, out.gates)
+            }
+        );
+        RnnElemwise::new(h, c, gates)
+    }
+
+    fn rnn_elemwise_backward(
+        h_out_grad: FloatTensor<Self>,
+        h_int_grad: FloatTensor<Self>,
+        c: Option<FloatTensor<Self>>,
+        c_out: Option<FloatTensor<Self>>,
+        c_int_grad: Option<FloatTensor<Self>>,
+        gates: FloatTensor<Self>,
+        options: &RnnOptions,
+    ) -> RnnElemwiseBackward<Self> {
+        let (gates_grad, c_int_grad) = multi_op!(
+            inputs[(h_out_grad, float), (h_int_grad, float), (gates, float)],
+            opt_inputs[(c, float), (c_out, float), (c_int_grad, float)],
+            outputs[(gates_grad, Float)],
+            opt_outputs[c_int_grad_out],
+            {
+                let out = B::rnn_elemwise_backward(h_out_grad, h_int_grad, c, c_out, c_int_grad, gates, options);
+                (out.gates_grad, out.c_int_grad)
+            }
+        );
+        RnnElemwiseBackward::new(gates_grad, c_int_grad)
     }
 }

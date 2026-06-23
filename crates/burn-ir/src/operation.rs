@@ -1,4 +1,5 @@
 use burn_backend::ops::AttentionModuleOptions;
+use burn_backend::ops::rnn::RnnOptions;
 use burn_backend::tensor::IndexingUpdateOp;
 use core::hash::Hash;
 use serde::{Deserialize, Serialize};
@@ -253,16 +254,16 @@ pub enum ModuleOperationIr {
     Interpolate(InterpolateOpIr),
     /// Operation corresponding to [interpolate backward](burn_backend::ops::ModuleOps::interpolate_backward).
     InterpolateBackward(InterpolateBackwardOpIr),
-    /// Operation corresponding to [rnn](burn_tensor::ops::rnn::RnnOps::rnn).
-    Rnn(RnnOpIr),
-    /// Operation corresponding to [rnn_gates_backward](burn_tensor::ops::rnn::RnnOps::rnn_gates_backward).
-    RnnGatesBackward(RnnGatesBackwardOpIr),
     /// Operation corresponding to [rfft](burn_backend::ops::ModuleOps::rfft)
     Rfft(RfftOpIr),
     /// Operation corresponding to [irfft](burn_backend::ops::ModuleOps::irfft)
     IRfft(IRfftOpIr),
     /// Operation corresponding to [attention](burn_backend::ops::ModuleOps::attention).
     Attention(AttentionOpIr),
+    /// Operation corresponding to [rnn](burn_tensor::ops::rnn::RnnOps::rnn).
+    RnnElemwise(RnnElemwiseOpIr),
+    /// Operation corresponding to [rnn_gates_backward](burn_tensor::ops::rnn::RnnOps::rnn_gates_backward).
+    RnnElemwiseBackward(RnnElemwiseBackwardOpIr),
 }
 
 /// Basic operations that can be done on any tensor type.
@@ -1782,9 +1783,6 @@ pub struct InterpolateBackwardOpIr {
 
 #[derive(Clone, Debug, Hash, PartialEq, Serialize, Deserialize)]
 #[allow(missing_docs)]
-pub enum RnnCellIr {
-    Lstm(TensorIr),
-    Gru,
 pub enum GridSamplePaddingModeIr {
     Zeros,
     Border,
@@ -1793,11 +1791,6 @@ pub enum GridSamplePaddingModeIr {
 
 #[derive(Clone, Debug, Hash, PartialEq, Serialize, Deserialize)]
 #[allow(missing_docs)]
-pub struct RnnTrajectoryIr {
-    pub traj: TensorIr,
-    pub hidden_state: TensorIr,
-    pub cell: RnnCellIr,
-    pub cache: Option<Vec<TensorIr>>,
 pub struct GridSampleOptionsIr {
     pub mode: InterpolateModeIr,
     pub padding_mode: GridSamplePaddingModeIr,
@@ -1806,26 +1799,6 @@ pub struct GridSampleOptionsIr {
 
 #[derive(Clone, Debug, Hash, PartialEq, Serialize, Deserialize)]
 #[allow(missing_docs)]
-pub struct RnnOpIr {
-    pub input: TensorIr,
-    pub hidden_state: TensorIr,
-    pub input_weights: TensorIr,
-    pub recurrent_weights: TensorIr,
-    pub biases: Option<TensorIr>,
-    pub cell: RnnCellIr,
-    pub size: RnnSize,
-    pub out: RnnTrajectoryIr,
-}
-
-#[derive(Clone, Debug, Hash, PartialEq, Serialize, Deserialize)]
-#[allow(missing_docs)]
-pub struct RnnGatesBackwardOpIr {
-    pub recurrent_weights: TensorIr,
-    pub traj_grad: TensorIr,
-    pub cache: Vec<TensorIr>,
-    pub cell: RnnCellIr,
-    pub size: RnnSize,
-    pub gates_grad: TensorIr,
 pub struct GridSample2dOpIr {
     pub tensor: TensorIr,
     pub grid: TensorIr,
@@ -1869,6 +1842,124 @@ impl From<GridSampleOptions> for GridSampleOptionsIr {
             mode: val.mode.into(),
             padding_mode: val.padding_mode.into(),
             align_corners: val.align_corners,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Serialize, Deserialize)]
+#[allow(missing_docs)]
+pub struct RnnElemwiseOpIr {
+    pub wx_rh: TensorIr,
+    pub c: Option<TensorIr>,
+    pub options: RnnOptions,
+    pub h_out: TensorIr,
+    pub c_out: Option<TensorIr>,
+    pub gates_out: Option<TensorIr>,
+}
+
+#[allow(missing_docs)]
+impl RnnElemwiseOpIr {
+    pub fn create<F>(
+        wx_rh: TensorIr,
+        c: Option<TensorIr>,
+        options: RnnOptions,
+        mut new_id: F,
+    ) -> Self
+    where
+        F: FnMut() -> TensorId,
+    {
+        // all input dtypes must match
+        let dtype = wx_rh.dtype;
+        if let Some(c) = &c {
+            assert!(c.dtype == dtype, "dtype mismatch");
+        }
+        // build description manually, multiple outputs
+        let size = &options.size;
+        let shape = size.state_shape();
+        let c_out = c
+            .is_some()
+            .then_some(TensorIr::uninit(new_id(), shape.clone(), dtype));
+        // gates out if backprop is enabled
+        let gates_out = options.enable_backprop_cache.then_some(TensorIr::uninit(
+            new_id(),
+            [1, size.bat_d, size.hid_d * options.mode.gate_count()].into(),
+            dtype,
+        ));
+        let h_out = TensorIr::uninit(new_id(), shape, dtype);
+        Self {
+            wx_rh,
+            c,
+            options,
+            h_out,
+            c_out,
+            gates_out,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Serialize, Deserialize)]
+#[allow(missing_docs)]
+pub struct RnnElemwiseBackwardOpIr {
+    pub h_out_grad: TensorIr,
+    pub h_int_grad: TensorIr,
+    pub c: Option<TensorIr>,
+    pub c_out: Option<TensorIr>,
+    pub c_int_grad: Option<TensorIr>,
+    pub gates: TensorIr,
+    pub options: RnnOptions,
+    pub gates_grad: TensorIr,
+    pub c_int_grad_out: Option<TensorIr>,
+}
+
+#[allow(missing_docs)]
+impl RnnElemwiseBackwardOpIr {
+    pub fn create<F>(
+        h_out_grad: TensorIr,
+        h_int_grad: TensorIr,
+        c: Option<TensorIr>,
+        c_out: Option<TensorIr>,
+        c_int_grad: Option<TensorIr>,
+        gates: TensorIr,
+        options: RnnOptions,
+        mut new_id: F,
+    ) -> Self
+    where
+        F: FnMut() -> TensorId,
+    {
+        // all input dtypes must match (cache unchecked)
+        let dtype = h_out_grad.dtype;
+        assert!(h_int_grad.dtype == dtype, "dtype mismatch");
+        if let Some(c) = &c {
+            assert!(c.dtype == dtype, "dtype mismatch");
+        }
+        if let Some(c_out) = &c_out {
+            assert!(c_out.dtype == dtype, "dtype mismatch");
+        }
+        if let Some(c_grad) = &c_int_grad {
+            assert!(c_grad.dtype == dtype, "dtype mismatch");
+        }
+        // build description manually, multiple outputs
+        let size = &options.size;
+        let shape = size.state_shape();
+        let gates_grad = TensorIr::uninit(
+            new_id(),
+            [1, size.bat_d, size.seq_d * options.mode.gate_count()].into(),
+            dtype,
+        );
+        let c_int_grad_out =
+            c_int_grad
+                .is_some()
+                .then_some(TensorIr::uninit(new_id(), shape.clone(), dtype));
+        Self {
+            h_out_grad,
+            h_int_grad,
+            c,
+            c_out,
+            c_int_grad,
+            gates,
+            options,
+            gates_grad,
+            c_int_grad_out,
         }
     }
 }
@@ -2828,6 +2919,30 @@ impl ModuleOperationIr {
                     Box::new([&repr.query, &repr.key, &repr.value].into_iter())
                 }
             }
+            ModuleOperationIr::RnnElemwise(repr) => {
+                if let Some(c) = &repr.c {
+                    Box::new([&repr.wx_rh, c].into_iter())
+                } else {
+                    Box::new([&repr.wx_rh].into_iter())
+                }
+            }
+            ModuleOperationIr::RnnElemwiseBackward(repr) => {
+                if let Some(c) = &repr.c {
+                    Box::new(
+                        [
+                            &repr.h_out_grad,
+                            &repr.h_int_grad,
+                            c,
+                            repr.c_out.as_ref().unwrap(),
+                            repr.c_int_grad.as_ref().unwrap(),
+                            &repr.gates,
+                        ]
+                        .into_iter(),
+                    )
+                } else {
+                    Box::new([&repr.h_out_grad, &repr.h_int_grad, &repr.gates].into_iter())
+                }
+            }
         }
     }
     fn outputs(&self) -> Box<dyn Iterator<Item = &TensorIr> + '_> {
@@ -2907,43 +3022,26 @@ impl ModuleOperationIr {
             ModuleOperationIr::MaxPool2dWithIndicesBackward(repr) => {
                 Box::new([&repr.out].into_iter())
             }
-            ModuleOperationIr::Rnn(repr) => {
-                let mut nodes = vec![
-                    &repr.input,
-                    &repr.hidden_state,
-                    &repr.input_weights,
-                    &repr.recurrent_weights,
-                    &repr.out.traj,
-                    &repr.out.hidden_state,
-                ];
-                match &repr.cell {
-                    RnnCellIr::Lstm(c_inp) => {
-                        nodes.push(c_inp);
-                        let RnnCellIr::Lstm(c_out) = &repr.out.cell else {
-                            panic!()
-                        };
-                        nodes.push(c_out);
-                    }
-                    RnnCellIr::Gru => {}
-                }
-                if let Some(b) = &repr.biases {
-                    nodes.push(b);
-                }
-                if let Some(v) = repr.out.cache.as_ref() {
-                    nodes.extend(v);
-                }
-                nodes
-            }
-            ModuleOperationIr::RnnGatesBackward(repr) => {
-                let mut nodes = vec![&repr.recurrent_weights, &repr.traj_grad, &repr.gates_grad];
-                nodes.extend(&repr.cache);
-                nodes
-            }
             ModuleOperationIr::Interpolate(repr) => Box::new([&repr.out].into_iter()),
             ModuleOperationIr::InterpolateBackward(repr) => Box::new([&repr.out].into_iter()),
             ModuleOperationIr::Rfft(repr) => Box::new([&repr.out_re, &repr.out_im].into_iter()),
             ModuleOperationIr::IRfft(repr) => Box::new([&repr.out_signal].into_iter()),
             ModuleOperationIr::Attention(repr) => Box::new([&repr.out].into_iter()),
+            ModuleOperationIr::RnnElemwise(repr) => match (&repr.c_out, &repr.gates_out) {
+                (Some(c_out), Some(gates_out)) => {
+                    Box::new([&repr.h_out, c_out, gates_out].into_iter())
+                }
+                (Some(c_out), None) => Box::new([&repr.h_out, c_out].into_iter()),
+                (None, Some(gates_out)) => Box::new([&repr.h_out, gates_out].into_iter()),
+                (None, None) => Box::new([&repr.h_out].into_iter()),
+            },
+            ModuleOperationIr::RnnElemwiseBackward(repr) => {
+                if let Some(c_int_grad_out) = &repr.c_int_grad_out {
+                    Box::new([&repr.gates_grad, c_int_grad_out].into_iter())
+                } else {
+                    Box::new([&repr.gates_grad].into_iter())
+                }
+            }
         }
     }
 
@@ -3140,24 +3238,6 @@ impl ModuleOperationIr {
                 repr.x.mark_read_only(nodes, &mut output);
                 repr.grad.mark_read_only(nodes, &mut output);
             }
-            ModuleOperationIr::Rnn(repr) => {
-                repr.input.mark_read_only(nodes, &mut output);
-                repr.hidden_state.mark_read_only(nodes, &mut output);
-                match &mut repr.cell {
-                    RnnCellIr::Lstm(c) => c.mark_read_only(nodes, &mut output),
-                    RnnCellIr::Gru => {}
-                }
-                repr.input_weights.mark_read_only(nodes, &mut output);
-                repr.recurrent_weights.mark_read_only(nodes, &mut output);
-                repr.biases
-                    .as_mut()
-                    .map(|b| b.mark_read_only(nodes, &mut output));
-            }
-            ModuleOperationIr::RnnGatesBackward(repr) => {
-                repr.recurrent_weights.mark_read_only(nodes, &mut output);
-                repr.traj_grad.mark_read_only(nodes, &mut output);
-                for v in &mut repr.cache {
-                    v.mark_read_only(nodes, &mut output);
             ModuleOperationIr::Rfft(repr) => {
                 repr.signal.mark_read_only(nodes, &mut output);
             }
@@ -3175,6 +3255,23 @@ impl ModuleOperationIr {
                 if let Some(attn_bias) = &mut repr.attn_bias {
                     attn_bias.mark_read_only(nodes, &mut output);
                 }
+            }
+            ModuleOperationIr::RnnElemwise(repr) => {
+                // allow inplace ops on wx_rh
+                repr.c
+                    .as_mut()
+                    .map(|c| c.mark_read_only(nodes, &mut output));
+            }
+            ModuleOperationIr::RnnElemwiseBackward(repr) => {
+                repr.h_out_grad.mark_read_only(nodes, &mut output);
+                repr.h_int_grad.mark_read_only(nodes, &mut output);
+                repr.c
+                    .as_mut()
+                    .map(|c| c.mark_read_only(nodes, &mut output));
+                repr.c_out
+                    .as_mut()
+                    .map(|c| c.mark_read_only(nodes, &mut output));
+                // allow inplace ops on grads and c_int_grad
             }
         };
 

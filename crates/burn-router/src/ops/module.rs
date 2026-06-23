@@ -1,10 +1,12 @@
 use alloc::boxed::Box;
 
 use burn_backend::Element;
+use burn_backend::ops::rnn::{RnnOps, RnnOptions};
 use burn_backend::ops::{
     AttentionModuleOptions, ConvOptions, ConvTransposeOptions, DeformConv2dBackward,
     DeformConvOptions, InterpolateOptions, MaxPool1dBackward, MaxPool1dWithIndices,
     MaxPool2dBackward, MaxPool2dWithIndices, ModuleOps,
+    rnn::{RnnElemwise, RnnElemwiseBackward},
 };
 use burn_backend::tensor::{BoolTensor, FloatTensor, IntElem, IntTensor};
 use burn_ir::*;
@@ -809,5 +811,64 @@ impl<R: RunnerChannel> ModuleOps<Self> for BackendRouter<R> {
         _n: Option<usize>,
     ) -> FloatTensor<Self> {
         todo!("irfft is not supported for backend-router")
+    }
+}
+
+impl<R: RunnerChannel> burn_backend::ops::rnn::lstm::LstmOps<Self> for BackendRouter<R> {}
+impl<R: RunnerChannel> RnnOps<Self> for BackendRouter<R> {
+    fn rnn_elemwise(
+        wx_rh: FloatTensor<Self>,
+        c: Option<FloatTensor<Self>>,
+        options: &RnnOptions,
+    ) -> RnnElemwise<Self> {
+        let c_is_some = c.is_some();
+        let client = wx_rh.client.clone();
+        let desc = RnnElemwiseOpIr::create(
+            wx_rh.into_ir(),
+            c.map(|c| c.into_ir()),
+            options.clone(),
+            || client.create_empty_handle(),
+        );
+        let mut outputs = client
+            .register(OperationIr::Module(ModuleOperationIr::RnnElemwise(desc)))
+            .into_iter();
+        let h = outputs.next().unwrap();
+        let (c, gates) = match (c_is_some, options.enable_backprop_cache) {
+            (true, true) => (Some(outputs.next().unwrap()), Some(outputs.next().unwrap())),
+            (true, false) => (Some(outputs.next().unwrap()), None),
+            (false, true) => (None, Some(outputs.next().unwrap())),
+            (false, false) => (None, None),
+        };
+        RnnElemwise::new(h, c, gates)
+    }
+
+    fn rnn_elemwise_backward(
+        h_out_grad: FloatTensor<Self>,
+        h_int_grad: FloatTensor<Self>,
+        c: Option<FloatTensor<Self>>,
+        c_out: Option<FloatTensor<Self>>,
+        c_int_grad: Option<FloatTensor<Self>>,
+        gates: FloatTensor<Self>,
+        options: &RnnOptions,
+    ) -> RnnElemwiseBackward<Self> {
+        let client = h_out_grad.client.clone();
+        let desc = RnnElemwiseBackwardOpIr::create(
+            h_out_grad.into_ir(),
+            h_int_grad.into_ir(),
+            c.map(|c| c.into_ir()),
+            c_out.map(|c_out| c_out.into_ir()),
+            c_int_grad.map(|c_grad| c_grad.into_ir()),
+            gates.into_ir(),
+            options.clone(),
+            || client.create_empty_handle(),
+        );
+        let mut outputs = client
+            .register(OperationIr::Module(ModuleOperationIr::RnnElemwiseBackward(
+                desc,
+            )))
+            .into_iter();
+        let gates_grad = outputs.next().unwrap();
+        let c_int_grad = outputs.next();
+        RnnElemwiseBackward::new(gates_grad, c_int_grad)
     }
 }

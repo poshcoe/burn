@@ -1517,52 +1517,6 @@ impl<B: BackendIr> RunnerClient for Runner<B> {
                     );
                     handles.register_float_tensor::<B>(&desc.out.id, output);
                 }
-                ModuleOperationIr::Rnn(desc) => {
-                    let out = B::rnn(
-                        handles.get_float_tensor::<B>(&desc.input),
-                        handles.get_float_tensor::<B>(&desc.hidden_state),
-                        handles.get_float_tensor::<B>(&desc.input_weights),
-                        handles.get_float_tensor::<B>(&desc.recurrent_weights),
-                        desc.biases.map(|b| handles.get_float_tensor::<B>(&b)),
-                        match &desc.cell {
-                            RnnCellIr::Lstm(c) => RnnCell::Lstm(handles.get_float_tensor::<B>(c)),
-                            RnnCellIr::Gru => RnnCell::Gru,
-                        },
-                        &desc.size,
-                    );
-                    handles.register_float_tensor::<B>(&desc.out.traj.id, out.traj);
-                    handles.register_float_tensor::<B>(&desc.out.hidden_state.id, out.hidden_state);
-                    match out.cell {
-                        RnnCell::Lstm(c_out) => match &desc.out.cell {
-                            RnnCellIr::Lstm(c_out_ir) => {
-                                handles.register_float_tensor::<B>(&c_out_ir.id, c_out);
-                            }
-                            _ => panic!("cell mismatch"),
-                        },
-                        RnnCell::Gru => {}
-                    }
-                    if let Some(cache) = out.cache {
-                        let desc_cache = desc.out.cache.expect("cache returned unexpectedly");
-                        for (v_desc, v_out) in desc_cache.iter().zip(cache) {
-                            handles.register_float_tensor::<B>(&v_desc.id, v_out);
-                        }
-                    }
-                }
-                ModuleOperationIr::RnnGatesBackward(desc) => {
-                    let gates_grad = B::rnn_gates_backward(
-                        handles.get_float_tensor::<B>(&desc.recurrent_weights),
-                        handles.get_float_tensor::<B>(&desc.traj_grad),
-                        desc.cache
-                            .iter()
-                            .map(|v_desc| handles.get_float_tensor::<B>(v_desc))
-                            .collect(),
-                        match &desc.cell {
-                            RnnCellIr::Lstm(c) => RnnCell::Lstm(handles.get_float_tensor::<B>(c)),
-                            RnnCellIr::Gru => RnnCell::Gru,
-                        },
-                        &desc.size,
-                    );
-                    handles.register_float_tensor::<B>(&desc.gates_grad.id, gates_grad);
                 ModuleOperationIr::Rfft(desc) => {
                     let signal = handles.get_float_tensor::<B>(&desc.signal);
                     let (out_re, out_im) = B::rfft(signal, desc.dim, desc.n);
@@ -1597,6 +1551,51 @@ impl<B: BackendIr> RunnerClient for Runner<B> {
                     );
 
                     handles.register_float_tensor::<B>(&desc.out.id, output);
+                }
+                ModuleOperationIr::RnnElemwise(desc) => {
+                    // fetch inputs
+                    let wx_rh = handles.get_float_tensor::<B>(&desc.wx_rh);
+                    let c = desc.c.as_ref().map(|c| handles.get_float_tensor::<B>(c));
+                    // run rnn elemwise forward
+                    let out = B::rnn_elemwise(wx_rh, c, &desc.options);
+                    // register outputs
+                    handles.register_float_tensor::<B>(&desc.h_out.id, out.h);
+                    desc.c_out.as_ref().map(|c_out_ir| {
+                        handles.register_float_tensor::<B>(&c_out_ir.id, out.c.unwrap())
+                    });
+                    desc.gates_out.as_ref().map(|gates_out_ir| {
+                        handles.register_float_tensor::<B>(&gates_out_ir.id, out.gates.unwrap())
+                    });
+                }
+                ModuleOperationIr::RnnElemwiseBackward(desc) => {
+                    // fetch inputs
+                    let h_out_grad = handles.get_float_tensor::<B>(&desc.h_out_grad);
+                    let h_int_grad = handles.get_float_tensor::<B>(&desc.h_int_grad);
+                    let c = desc.c.as_ref().map(|c| handles.get_float_tensor::<B>(c));
+                    let c_out = desc
+                        .c_out
+                        .as_ref()
+                        .map(|c| handles.get_float_tensor::<B>(c));
+                    let c_int_grad = desc
+                        .c_int_grad
+                        .as_ref()
+                        .map(|c| handles.get_float_tensor::<B>(c));
+                    let gates = handles.get_float_tensor::<B>(&desc.gates);
+                    // run rnn elemwise backward
+                    let out = B::rnn_elemwise_backward(
+                        h_out_grad,
+                        h_int_grad,
+                        c,
+                        c_out,
+                        c_int_grad,
+                        gates,
+                        &desc.options,
+                    );
+                    // register outputs
+                    handles.register_float_tensor::<B>(&desc.gates_grad.id, out.gates_grad);
+                    desc.c_int_grad_out.as_ref().map(|c| {
+                        handles.register_float_tensor::<B>(&c.id, out.c_int_grad.unwrap())
+                    });
                 }
             },
             OperationIr::Custom(_) => {

@@ -369,8 +369,8 @@ pub trait ActivationOps<B: Backend> {
             grad,
             // tanh'(x) = 1 - tanh^2(x)
             B::float_add_scalar(
-                B::float_neg(B::float_powi_scalar(output, 2.elem())),
-                1.0.elem(),
+                B::float_neg(B::float_mul(output.clone(), output)),
+                1.0.into(),
             ),
         )
     }

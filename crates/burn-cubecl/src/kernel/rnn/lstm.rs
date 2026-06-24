@@ -1,11 +1,14 @@
 use crate::CubeRuntime;
+use crate::kernel::into_contiguous_aligned;
 use crate::kernel::utils::address_type;
 use crate::tensor::CubeTensor;
 use burn_backend::TensorMetadata;
+use burn_backend::cubecl::dtype_to_storage_type;
 use burn_backend::ops::rnn::RnnSize;
 use burn_std::Shape;
 use cubecl::num_traits::One;
 use cubecl::prelude::*;
+use cubecl::std::tensor::layout::linear::{LinearView, LinearViewMut};
 
 /// sigmoid (logistic function) helper
 ///
@@ -43,30 +46,25 @@ fn _d_tanh<E: Float, N: Size>(tanh: Vector<E, N>, one: Vector<E, N>) -> Vector<E
 /// If tracked, gate results will be stored in cache for efficient backprop
 #[cube(launch_unchecked, address_type = "dynamic")]
 fn lstm_elemwise_kernel<E: Float, N: Size>(
-    h_out: &mut Array<Vector<E, N>>,
-    c_out: &mut Array<Vector<E, N>>,
-    gates: &mut ComptimeOption<Array<Vector<E, N>>>,
-    wx_rh: &Array<Vector<E, N>>,
-    c: &Array<Vector<E, N>>,
-    #[comptime] bat_d: usize,
+    mut h_out: LinearViewMut<'_, Vector<E, N>>,
+    mut c_out: LinearViewMut<'_, Vector<E, N>>,
+    gates: ComptimeOption<&mut Tensor<Vector<E, N>>>,
+    wx_rh: &Tensor<Vector<E, N>>,
+    c: LinearView<'_, Vector<E, N>>,
     #[comptime] hid_d: usize,
     #[define(E)] _dtype: StorageType,
 ) {
-    let row = ABSOLUTE_POS_X as usize;
-    let col = ABSOLUTE_POS_Y as usize;
-    let vector_size = N::value().comptime();
-    let bat_stride = comptime!(hid_d / vector_size);
     // terminate extra units
-    if row >= bat_stride || col >= bat_d {
+    if !c.is_in_bounds(ABSOLUTE_POS) {
         terminate!()
     }
-    let s_idx = col * bat_stride + row;
     // get indices of combined-gate inputs
-    let g_base_idx = col * comptime!(4 * bat_stride) + row;
-    let ig_idx = g_base_idx;
-    let fg_idx = ig_idx + bat_stride;
-    let cg_idx = fg_idx + bat_stride;
-    let og_idx = cg_idx + bat_stride;
+    let vector_size = N::value().comptime();
+    let gate_stride = comptime!(hid_d / vector_size);
+    let ig_idx = ABSOLUTE_POS;
+    let fg_idx = ig_idx + gate_stride;
+    let cg_idx = fg_idx + gate_stride;
+    let og_idx = cg_idx + gate_stride;
     // calculate gate activations
     let one = Vector::one();
     let ig = _sigmoid(wx_rh[ig_idx], one);
@@ -85,9 +83,9 @@ fn lstm_elemwise_kernel<E: Float, N: Size>(
         ComptimeOption::None => {}
     }
     // transition and store states
-    let c_out_t = fg * c[s_idx] + ig * cg;
-    h_out[s_idx] = og * Vector::tanh(c_out_t);
-    c_out[s_idx] = c_out_t;
+    let c_out_t = fg * c.read(ABSOLUTE_POS) + ig * cg;
+    h_out.write(ABSOLUTE_POS, og * Vector::tanh(c_out_t));
+    c_out.write(ABSOLUTE_POS, c_out_t);
 }
 
 /// Accelerated LSTM forward
@@ -97,7 +95,6 @@ pub fn lstm_elemwise<R: CubeRuntime>(
     size: &RnnSize,
     tracked: bool,
 ) -> ([CubeTensor<R>; 2], Option<CubeTensor<R>>) {
-    println!("cubecl elemwise");
     // check shape compat
     let RnnSize {
         seq_d: _,
@@ -109,6 +106,8 @@ pub fn lstm_elemwise<R: CubeRuntime>(
     let gate_shape = Shape::new([1, bat_d, hid_d * 4]);
     assert_eq!(state_shape, c.shape(), "incompatible shape of cell state");
     assert_eq!(gate_shape, wx_rh.shape(), "incompatible shape of input");
+    // tensor args require contiguous
+    let wx_rh = into_contiguous_aligned(wx_rh);
     // prepare output tensors (modified inplace by elemwise kernel)
     let client = &c.client.clone();
     let dtype = c.dtype();
@@ -118,7 +117,7 @@ pub fn lstm_elemwise<R: CubeRuntime>(
     let h_out = new_empty();
     let c_out = new_empty();
     // prepare cube params for elemwise kernel
-    let vector_size = crate::ops::max_vector_size(&c).min(bat_d);
+    let vector_size = crate::ops::max_vector_size(&c);
     let working_units = (bat_d * hid_d) / vector_size;
     let cube_dim = CubeDim::new(client, working_units);
     let cube_count = cubecl::calculate_cube_count_elemwise(client, working_units, cube_dim);
@@ -131,15 +130,14 @@ pub fn lstm_elemwise<R: CubeRuntime>(
             address_type!(wx_rh, c),
             vector_size,
             // inplace outputs (reuse wx_rh for gates)
-            h_out.clone().into_array_arg(),
-            c_out.clone().into_array_arg(),
-            tracked.then_some(wx_rh.clone().into_array_arg()).into(),
+            h_out.clone().into_linear_view(),
+            c_out.clone().into_linear_view(),
+            tracked.then_some(wx_rh.clone().into_tensor_arg()).into(),
             // inputs
-            wx_rh.clone().into_array_arg(),
-            c.into_array_arg(),
-            bat_d,
+            wx_rh.clone().into_tensor_arg(),
+            c.into_linear_view(),
             hid_d,
-            dtype.into(),
+            dtype_to_storage_type(dtype),
         );
     }
     // return outputs
@@ -150,45 +148,39 @@ pub fn lstm_elemwise<R: CubeRuntime>(
 /// LSTM accelerator for backward element-wise calculations
 #[cube(launch_unchecked, address_type = "dynamic")]
 fn lstm_backward_elemwise_kernel<E: Float, N: Size>(
-    gates_grad: &mut Array<Vector<E, N>>,
-    c_int_grad_out: &mut Array<Vector<E, N>>,
-    h_out_grad: &Array<Vector<E, N>>,
-    h_int_grad: &Array<Vector<E, N>>,
-    c: &Array<Vector<E, N>>,
-    c_out: &Array<Vector<E, N>>,
-    c_int_grad: &Array<Vector<E, N>>,
-    gates: &Array<Vector<E, N>>,
-    #[comptime] bat_d: usize,
+    gates_grad: &mut Tensor<Vector<E, N>>,
+    mut c_int_grad_out: LinearViewMut<'_, Vector<E, N>>,
+    h_out_grad: LinearView<'_, Vector<E, N>>,
+    h_int_grad: LinearView<'_, Vector<E, N>>,
+    c: LinearView<'_, Vector<E, N>>,
+    c_out: LinearView<'_, Vector<E, N>>,
+    c_int_grad: LinearView<'_, Vector<E, N>>,
+    gates: &Tensor<Vector<E, N>>,
     #[comptime] hid_d: usize,
     #[define(E)] _dtype: StorageType,
 ) {
-    let row = ABSOLUTE_POS_X as usize;
-    let col = ABSOLUTE_POS_Y as usize;
-    let vector_size = N::value().comptime();
-    let bat_stride = comptime!(hid_d / vector_size);
-    let one = Vector::one();
     // terminate extra units
-    if row >= bat_stride || col >= bat_d {
+    if !c.is_in_bounds(ABSOLUTE_POS) {
         terminate!()
     }
-    // get indices of states
-    let s_idx = col * bat_stride + row;
     // get indices of combined-gate inputs
-    let g_base_idx = col * comptime!(4 * bat_stride) + row;
-    let ig_idx = g_base_idx;
-    let fg_idx = ig_idx + bat_stride;
-    let cg_idx = fg_idx + bat_stride;
-    let og_idx = cg_idx + bat_stride;
+    let vector_size = N::value().comptime();
+    let gate_stride = comptime!(hid_d / vector_size);
+    let ig_idx = ABSOLUTE_POS;
+    let fg_idx = ig_idx + gate_stride;
+    let cg_idx = fg_idx + gate_stride;
+    let og_idx = cg_idx + gate_stride;
     // calculate cell state grad
-    let c_out_tanh = Vector::tanh(c_out[s_idx]);
-    let h_grad_total = h_int_grad[s_idx] + h_out_grad[s_idx];
+    let c_out_tanh = Vector::tanh(c_out.read(ABSOLUTE_POS));
+    let h_grad_total = h_int_grad.read(ABSOLUTE_POS) + h_out_grad.read(ABSOLUTE_POS);
     let (ig, fg, cg, og) = (gates[ig_idx], gates[fg_idx], gates[cg_idx], gates[og_idx]);
     let c_tanh_grad = og * h_grad_total;
-    let c_grad_total = c_int_grad[s_idx] + c_tanh_grad * _d_tanh(c_out_tanh, one);
-    c_int_grad_out[s_idx] = fg * c_grad_total;
+    let one = Vector::one();
+    let c_grad_total = c_int_grad.read(ABSOLUTE_POS) + c_tanh_grad * _d_tanh(c_out_tanh, one);
+    c_int_grad_out.write(ABSOLUTE_POS, fg * c_grad_total);
     // calculate & write gate gradients
     gates_grad[ig_idx] = _d_sigmoid(ig, one) * cg * c_grad_total;
-    gates_grad[fg_idx] = _d_sigmoid(fg, one) * c[s_idx] * c_grad_total;
+    gates_grad[fg_idx] = _d_sigmoid(fg, one) * c.read(ABSOLUTE_POS) * c_grad_total;
     gates_grad[cg_idx] = _d_tanh(cg, one) * ig * c_grad_total;
     gates_grad[og_idx] = _d_sigmoid(og, one) * h_grad_total * c_out_tanh;
 }
@@ -218,10 +210,12 @@ pub fn lstm_elemwise_backward<R: CubeRuntime>(
     assert_eq!(shape.clone(), c_out.shape());
     assert_eq!(shape, c_int_grad.shape());
     assert_eq!(gates_shape, gates.shape());
+    // tensor args require contiguous
+    let gates = into_contiguous_aligned(gates);
     // prepare cube params for elemwise kernel
     let client = &h_out_grad.client.clone();
     let dtype = h_out_grad.dtype();
-    let vector_size = crate::ops::max_vector_size(&h_out_grad).min(bat_d);
+    let vector_size = crate::ops::max_vector_size(&h_out_grad);
     let working_units = (bat_d * hid_d) / vector_size;
     let cube_dim = CubeDim::new(client, working_units);
     let cube_count = cubecl::calculate_cube_count_elemwise(client, working_units, cube_dim);
@@ -234,18 +228,17 @@ pub fn lstm_elemwise_backward<R: CubeRuntime>(
             address_type!(h_out_grad, h_int_grad, c, c_out, c_int_grad, gates),
             vector_size,
             // outputs (reuse gates as gates_grad, write c_int_grad inplace)
-            gates.clone().into_array_arg(),
-            c_int_grad.clone().into_array_arg(),
+            gates.clone().into_tensor_arg(),
+            c_int_grad.clone().into_linear_view(),
             // inputs...
-            h_out_grad.into_array_arg(),
-            h_int_grad.into_array_arg(),
-            c.into_array_arg(),
-            c_out.into_array_arg(),
-            c_int_grad.clone().into_array_arg(),
-            gates.clone().into_array_arg(),
-            bat_d,
+            h_out_grad.into_linear_view(),
+            h_int_grad.into_linear_view(),
+            c.into_linear_view(),
+            c_out.into_linear_view(),
+            c_int_grad.clone().into_linear_view(),
+            gates.clone().into_tensor_arg(),
             hid_d,
-            dtype.into(),
+            dtype_to_storage_type(dtype),
         );
     }
     let (gates_grad, c_int_grad_out) = (gates, c_int_grad);

@@ -395,17 +395,5 @@ impl ModuleOps<Self> for NdArray {
     }
 }
 
-impl<E: FloatNdArrayElement, I: IntNdArrayElement, Q: QuantElement> rnn::lstm::LstmOps<Self>
-    for NdArray<E, I, Q>
-where
-    NdArrayTensor: From<SharedArray<E>>,
-    NdArrayTensor: From<SharedArray<I>>,
-{
-}
-impl<E: FloatNdArrayElement, I: IntNdArrayElement, Q: QuantElement> rnn::RnnOps<Self>
-    for NdArray<E, I, Q>
-where
-    NdArrayTensor: From<SharedArray<E>>,
-    NdArrayTensor: From<SharedArray<I>>,
-{
-}
+impl rnn::lstm::LstmOps<Self> for NdArray {}
+impl rnn::RnnOps<Self> for NdArray {}

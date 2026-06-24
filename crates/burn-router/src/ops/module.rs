@@ -1068,8 +1068,8 @@ impl<R: RouterChannel> ModuleOps<Self> for BackendRouter<R> {
     }
 }
 
-impl<R: RunnerChannel> burn_backend::ops::rnn::lstm::LstmOps<Self> for BackendRouter<R> {}
-impl<R: RunnerChannel> RnnOps<Self> for BackendRouter<R> {
+impl<R: RouterChannel> burn_backend::ops::rnn::lstm::LstmOps<Self> for BackendRouter<R> {}
+impl<R: RouterChannel> RnnOps<Self> for BackendRouter<R> {
     fn rnn_elemwise(
         wx_rh: FloatTensor<Self>,
         c: Option<FloatTensor<Self>>,

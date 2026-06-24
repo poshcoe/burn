@@ -609,8 +609,8 @@ impl ModuleOps<Self> for LibTorch {
     }
 }
 
-impl<E: TchElement> burn_backend::ops::rnn::lstm::LstmOps<Self> for LibTorch<E> {}
-impl<E: TchElement> burn_backend::ops::rnn::RnnOps<Self> for LibTorch<E> {}
+impl burn_backend::ops::rnn::lstm::LstmOps<Self> for LibTorch {}
+impl burn_backend::ops::rnn::RnnOps<Self> for LibTorch {}
 
 #[cfg(test)]
 mod tests {

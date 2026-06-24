@@ -2,13 +2,14 @@ use crate::{
     CubeBackend, CubeRuntime,
     kernel::{self, conv::ConvTranspose2dStrategy},
 };
+use burn_backend::tensor::{BoolTensor, FloatTensor, IntTensor};
 use burn_backend::{
     TensorMetadata,
     ops::{
         AttentionModuleOptions, ConvOptions, ConvTransposeOptions, DeformConv2dBackward,
         DeformConvOptions, InterpolateOptions, MaxPool2dBackward, MaxPool2dWithIndices, ModuleOps,
         rnn::{
-            RnnSize,
+            RnnOps, RnnSize,
             lstm::{LstmElemwise, LstmElemwiseBackward, LstmOps},
         },
     },

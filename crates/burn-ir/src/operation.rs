@@ -3983,6 +3983,7 @@ impl ModuleOperationIr {
             }
             ModuleOperationIr::ConvTranspose3dBiasBackward(repr) => {
                 Box::new([&repr.x, &repr.bias, &repr.output_grad].into_iter())
+            }
             ModuleOperationIr::RnnElemwise(repr) => {
                 if let Some(c) = &repr.c {
                     Box::new([&repr.wx_rh, c].into_iter())
@@ -4776,6 +4777,23 @@ impl ModuleOperationIr {
                 v.visit_tensor_mut(&mut repr.bias);
                 v.visit_tensor_mut(&mut repr.output_grad);
                 v.visit_tensor_mut(&mut repr.out);
+            }
+            ModuleOperationIr::RnnElemwise(repr) => {
+                v.visit_tensor_mut(&mut repr.wx_rh);
+                repr.c.as_mut().map(|c| v.visit_tensor_mut(c));
+                v.visit_tensor_mut(&mut repr.h_out);
+                repr.c_out.as_mut().map(|c| v.visit_tensor_mut(c));
+                repr.gates_out.as_mut().map(|g| v.visit_tensor_mut(g));
+            }
+            ModuleOperationIr::RnnElemwiseBackward(repr) => {
+                v.visit_tensor_mut(&mut repr.h_out_grad);
+                v.visit_tensor_mut(&mut repr.h_int_grad);
+                repr.c.as_mut().map(|c| v.visit_tensor_mut(c));
+                repr.c_out.as_mut().map(|c| v.visit_tensor_mut(c));
+                repr.c_int_grad.as_mut().map(|c| v.visit_tensor_mut(c));
+                v.visit_tensor_mut(&mut repr.gates);
+                v.visit_tensor_mut(&mut repr.gates_grad);
+                repr.c_int_grad_out.as_mut().map(|c| v.visit_tensor_mut(c));
             }
         }
     }

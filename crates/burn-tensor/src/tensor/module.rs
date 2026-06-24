@@ -1,11 +1,10 @@
-use burn_backend::ops::rnn::Rnn;
 use burn_backend::ops::ModuleOps;
+use burn_backend::ops::rnn::{Rnn, RnnMode, RnnOps, RnnOptions, RnnSize};
 use burn_dispatch::Dispatch;
 
 use crate::{
     Bool, Int, Tensor, check,
     check::TensorCheck,
-    ops::rnn::{RnnMode, RnnOptions, RnnSize},
     ops::{
         AttentionModuleOptions, BridgeTensor, ConvOptions, ConvTransposeOptions, DeformConvOptions,
         InterpolateOptions, PadMode, PaddedConvOptions, UnfoldOptions,
@@ -519,48 +518,6 @@ pub fn attention(
     )))
 }
 
-/// Run an [RNN forward](crate::ops::ModuleOps::rnn) in LSTM mode
-///
-/// # Returns:
-///
-/// Tuple of `(output, hidden_state, cell_state)`
-pub fn lstm<B: Backend>(
-    input: Tensor<B, 3>,
-    hidden_state: Tensor<B, 3>,
-    cell_state: Tensor<B, 3>,
-    input_weights: Tensor<B, 3>,
-    recurrent_weights: Tensor<B, 3>,
-    biases: Option<Tensor<B, 3>>,
-    size: RnnSize,
-) -> (Tensor<B, 3>, Tensor<B, 3>, Tensor<B, 3>) {
-    let options = RnnOptions {
-        mode: RnnMode::Lstm,
-        size,
-        enable_backprop_cache: false,
-    };
-    // RNN forward in LSTM mode
-    let Rnn {
-        out,
-        hidden_state: h,
-        cell_state: c,
-        ..
-    } = B::rnn(
-        input.primitive.tensor(),
-        hidden_state.primitive.tensor(),
-        Some(cell_state.primitive.tensor()),
-        input_weights.primitive.tensor(),
-        recurrent_weights.primitive.tensor(),
-        biases.map(|b| b.primitive.tensor()),
-        &options,
-    );
-    (
-        // output excludes first state in the trajectory (initial state)
-        Tensor::new(TensorPrimitive::Float(out)),
-        Tensor::new(TensorPrimitive::Float(h)),
-        Tensor::new(TensorPrimitive::Float(c.unwrap())),
-    )
-}
-
 /// Exports attention fallback to test backend's attention against.
 pub fn attention_fallback(
     query: Tensor<4>,
@@ -680,4 +637,46 @@ fn layer_norm_impl(
         beta.map(|b| b.into_float()),
         epsilon,
     ))
+}
+
+/// Run an [RNN forward](crate::ops::ModuleOps::rnn) in LSTM mode
+///
+/// # Returns:
+///
+/// Tuple of `(output, hidden_state, cell_state)`
+pub fn lstm(
+    input: Tensor<3>,
+    hidden_state: Tensor<3>,
+    cell_state: Tensor<3>,
+    input_weights: Tensor<3>,
+    recurrent_weights: Tensor<3>,
+    biases: Option<Tensor<3>>,
+    size: RnnSize,
+) -> (Tensor<3>, Tensor<3>, Tensor<3>) {
+    let options = RnnOptions {
+        mode: RnnMode::Lstm,
+        size,
+        enable_backprop_cache: false,
+    };
+    // RNN forward in LSTM mode
+    let Rnn {
+        out,
+        hidden_state: h,
+        cell_state: c,
+        ..
+    } = Dispatch::rnn(
+        input.primitive.into_float(),
+        hidden_state.primitive.into_float(),
+        Some(cell_state.primitive.into_float()),
+        input_weights.primitive.into_float(),
+        recurrent_weights.primitive.into_float(),
+        biases.map(|b| b.primitive.into_float()),
+        &options,
+    );
+    (
+        // output excludes first state in the trajectory (initial state)
+        Tensor::new(BridgeTensor::float(out)),
+        Tensor::new(BridgeTensor::float(h)),
+        Tensor::new(BridgeTensor::float(c.unwrap())),
+    )
 }

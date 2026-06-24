@@ -1,19 +1,25 @@
-use burn_core as burn;
-
 use crate::activation::{Activation, ActivationConfig};
+use burn::backend::ops::rnn::RnnSize;
 use burn::config::Config;
 use burn::module::{Initializer, Module, Param};
+use burn::tensor::Device;
 use burn::tensor::Tensor;
-use burn::tensor::backend::Backend;
-use burn::tensor::ops::rnn::RnnSize;
+use burn_core as burn;
 
 /// An LstmState is used to store cell state and hidden state in LSTM.
 #[derive(Debug)]
-pub struct LstmState<B: Backend> {
+pub struct LstmState {
     /// The hidden state `[1, d_batch, d_hidden]`
-    pub hidden: Tensor<B, 3>,
+    pub hidden: Tensor<3>,
     /// The cell state `[1, d_batch, d_hidden]`
-    pub cell: Tensor<B, 3>,
+    pub cell: Tensor<3>,
+}
+
+impl LstmState {
+    /// Create a new [LstmState] from individual state tensors
+    pub fn new(hidden: Tensor<3>, cell: Tensor<3>) -> Self {
+        Self { hidden, cell }
+    }
 }
 
 /// Configuration to create a [LSTM](Lstm) module using the [init function](LstmConfig::init).
@@ -69,7 +75,7 @@ pub struct LstmConfig {
 
 impl LstmConfig {
     /// Initialize a new [LSTM](Lstm) module
-    pub fn init<B: Backend>(&self, device: &B::Device) -> Lstm<B> {
+    pub fn init(&self, device: &Device) -> Lstm {
         // init input weight params
         let input_weights = self.input_weight_init.init_with(
             [1, self.d_input, self.d_hidden * 4],
@@ -123,7 +129,7 @@ impl LstmConfig {
     }
 
     /// Initialize a new [Bidirectional LSTM](BiLstm) module
-    pub fn init_bilstm<B: Backend>(&self, device: &B::Device) -> BiLstm<B> {
+    pub fn init_bilstm(&self, device: &Device) -> BiLstm {
         BiLstm {
             forward: self.init(device),
             reverse: self.clone().with_reverse(true).init(device),
@@ -141,13 +147,13 @@ impl LstmConfig {
 ///
 /// The combined-gate weights are flattened in `(input, forget, cell, output)` gate order.
 #[derive(Module, Debug)]
-pub struct Lstm<B: Backend> {
+pub struct Lstm {
     /// Combined-gate input weights (W) ``[1, d_input, d_hidden * 4]``
-    pub input_weights: Param<Tensor<B, 3>>,
+    pub input_weights: Param<Tensor<3>>,
     /// Combined-gate recurrent weights (R) ``[1, d_hidden, d_hidden * 4]``
-    pub recurrent_weights: Param<Tensor<B, 3>>,
+    pub recurrent_weights: Param<Tensor<3>>,
     /// Combined-gate biases (b) ``[1, 1, d_hidden * 4]``
-    pub biases: Option<Param<Tensor<B, 3>>>,
+    pub biases: Option<Param<Tensor<3>>>,
     /// The input dimension of the LSTM
     pub d_input: usize,
     /// The hidden dimension of the LSTM
@@ -169,7 +175,7 @@ pub struct Lstm<B: Backend> {
     pub hidden_activation: Activation,
 }
 
-impl<B: Backend> Lstm<B> {
+impl Lstm {
     /// Applies the forward pass on the input tensor. This LSTM implementation
     /// returns the state for each element in a sequence (i.e., across d_sequence) and a final state.
     ///
@@ -185,9 +191,9 @@ impl<B: Backend> Lstm<B> {
     ///   `[1, d_batch, d_hidden]`.
     pub fn forward(
         &self,
-        mut input: Tensor<B, 3>,
-        state: Option<LstmState<B>>,
-    ) -> (Tensor<B, 3>, LstmState<B>) {
+        mut input: Tensor<3>,
+        state: Option<LstmState>,
+    ) -> (Tensor<3>, LstmState) {
         // convert from batch first representation
         if self.batch_first {
             input = input.swap_dims(0, 1);
@@ -235,11 +241,11 @@ impl<B: Backend> Lstm<B> {
 
 /// An LstmState is used to store cell state and hidden state in LSTM.
 #[derive(Debug)]
-pub struct BiLstmState<B: Backend> {
+pub struct BiLstmState {
     /// The forward LSTM state
-    pub forward: LstmState<B>,
+    pub forward: LstmState,
     /// The reverse LSTM state
-    pub reverse: LstmState<B>,
+    pub reverse: LstmState,
 }
 
 /// The BiLstm module. This implementation is for Bidirectional LSTM.
@@ -248,11 +254,11 @@ pub struct BiLstmState<B: Backend> {
 ///
 /// Wraps [Lstm] modules
 #[derive(Module, Debug)]
-pub struct BiLstm<B: Backend> {
+pub struct BiLstm {
     /// LSTM for the forward direction.
     pub forward: Lstm,
     /// LSTM for the reverse direction.
-    pub reverse: Lstm<B>,
+    pub reverse: Lstm,
 }
 
 impl BiLstm {
@@ -271,9 +277,9 @@ impl BiLstm {
     ///   have the shape `[1, d_batch, d_hidden]`.
     pub fn forward(
         &self,
-        input: Tensor<B, 3>,
-        state: Option<BiLstmState<B>>,
-    ) -> (Tensor<B, 3>, BiLstmState<B>) {
+        input: Tensor<3>,
+        state: Option<BiLstmState>,
+    ) -> (Tensor<3>, BiLstmState) {
         // split states
         let (forward_state, reverse_state) = if let Some(state) = state {
             (Some(state.forward), Some(state.reverse))
@@ -297,17 +303,11 @@ impl BiLstm {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::TestBackend;
     use burn::module::Param;
     use burn::tensor::Tolerance;
-    use burn::tensor::{Distribution, TensorData, ops::FloatElem};
+    use burn::tensor::{Distribution, TensorData};
 
-    #[cfg(feature = "std")]
-    type B = crate::TestAutodiffBackend;
-    #[cfg(not(feature = "std"))]
-    type B = TestBackend;
-
-    type FT = FloatElem<TestBackend>;
+    type FT = f32;
 
     const SEQ_D: usize = 2;
     const BAT_D: usize = 4;
@@ -403,24 +403,24 @@ mod tests {
     fn test_lstm_against_known_values() {
         // create tensors from known values
         let device = Default::default();
-        let input = Tensor::<B, 3>::from_data(TensorData::from(INPUT), &device).require_grad();
-        let input_rev = Tensor::<B, 3>::from_data(TensorData::from([INPUT[1], INPUT[0]]), &device)
-            .require_grad();
+        let input = Tensor::from_data(TensorData::from(INPUT), &device).require_grad();
+        let input_rev =
+            Tensor::from_data(TensorData::from([INPUT[1], INPUT[0]]), &device).require_grad();
         let input_weights =
-            Tensor::<B, 3>::from_data(TensorData::from(INPUT_WEIGHTS_T), &device).transpose();
+            Tensor::from_data(TensorData::from(INPUT_WEIGHTS_T), &device).transpose();
         let recurrent_weights =
-            Tensor::<B, 3>::from_data(TensorData::from(RECURRENT_WEIGHTS_T), &device).transpose();
-        let biases = Tensor::<B, 3>::from_data(TensorData::from(BIASES), &device);
+            Tensor::from_data(TensorData::from(RECURRENT_WEIGHTS_T), &device).transpose();
+        let biases = Tensor::from_data(TensorData::from(BIASES), &device);
         let expected_output = TensorData::from(OUT);
         let expected_output_rev = TensorData::from([OUT[1], OUT[0]]);
         let expected_hidden = TensorData::from(HIDDEN);
         let expected_cell = TensorData::from(CELL);
         let expected_input_weights_grad =
-            Tensor::<B, 3>::from_data(TensorData::from(INPUT_WEIGHTS_G_T), &device)
+            Tensor::<3>::from_data(TensorData::from(INPUT_WEIGHTS_G_T), &device)
                 .transpose()
                 .to_data();
         let expected_recurrent_weights_grad =
-            Tensor::<B, 3>::from_data(TensorData::from(RECURRENT_WEIGHTS_G_T), &device)
+            Tensor::<3>::from_data(TensorData::from(RECURRENT_WEIGHTS_G_T), &device)
                 .transpose()
                 .to_data();
         let expected_biases_grad = TensorData::from(BIASES_G);
@@ -492,7 +492,7 @@ mod tests {
     #[test]
     fn test_lstm_init() {
         let [d_input, d_hidden, d_sequence, d_batch] = [2, 3, 4, 5];
-        let bilstm = LstmConfig::new(d_input, d_hidden, true).init_bilstm::<B>(&Default::default());
+        let bilstm = LstmConfig::new(d_input, d_hidden, true).init_bilstm(&Default::default());
         // check biases are properly initialized
         assert!(
             bilstm
@@ -501,15 +501,15 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .val()
-                .equal(Tensor::<B, 3>::from_floats(
+                .equal(Tensor::from_floats(
                     [[[0., 0., 0., 1., 1., 1., 0., 0., 0., 0., 0., 0.]]],
                     &Default::default()
                 ))
                 .all()
-                .into_scalar()
+                .into_scalar::<bool>()
         );
         // prepare random input and run
-        let input = Tensor::<B, 3>::random(
+        let input = Tensor::random(
             [d_sequence, d_batch, d_input],
             Distribution::Normal(0., 1.),
             &Default::default(),
@@ -530,7 +530,7 @@ mod tests {
                     .unwrap()
                     .equal_elem(0.)
                     .all()
-                    .into_scalar()
+                    .into_scalar::<bool>()
                     != true
             );
             assert!(
@@ -541,7 +541,7 @@ mod tests {
                     .unwrap()
                     .equal_elem(0.)
                     .all()
-                    .into_scalar()
+                    .into_scalar::<bool>()
                     != true
             );
         }

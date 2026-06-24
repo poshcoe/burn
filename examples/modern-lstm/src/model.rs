@@ -99,7 +99,7 @@ impl LstmCell {
     ///     state: Tuple of (h_{t-1}, c_{t-1}) each of shape (batch_size, hidden_size)
     /// Returns:
     ///  Tuple of (h_t, c_t) representing new hidden and cell states
-    pub fn forward(&self, x: Tensor<2>, state: LstmState<2>) -> LstmState<2> {
+    pub fn forward(&self, x: Tensor<2>, state: LstmState) -> LstmState {
         let (h_prev, c_prev) = (state.hidden, state.cell);
         let h_prev = h_prev.squeeze();
         let c_prev = c_prev.squeeze();
@@ -145,7 +145,7 @@ impl LstmCell {
     }
 
     // Initialize cell state and hidden state if provided or with zeros
-    pub fn init_state(&self, batch_size: usize, device: &B::Device) -> LstmState<B> {
+    pub fn init_state(&self, batch_size: usize, device: &Device) -> LstmState {
         let cell = Tensor::zeros([1, batch_size, self.hidden_size], device);
         let hidden = Tensor::zeros([1, batch_size, self.hidden_size], device);
         LstmState { hidden, cell }
@@ -213,14 +213,14 @@ impl StackedLstm {
     pub fn forward(
         &self,
         x: Tensor<3>,
-        states: Option<Vec<LstmState<2>>>,
-    ) -> (Tensor<3>, Vec<LstmState<2>>) {
+        states: Option<Vec<LstmState>>,
+    ) -> (Tensor<3>, Vec<LstmState>) {
         let [batch_size, seq_length, _] = x.dims();
         let device = x.device();
 
         let mut states = match states {
             None => {
-                let mut temp: Vec<LstmState<2>> = vec![];
+                let mut temp: Vec<LstmState> = vec![];
                 for layer in self.layers.iter() {
                     temp.push(layer.init_state(batch_size, &device));
                 }
@@ -233,7 +233,7 @@ impl StackedLstm {
         for t in 0..seq_length {
             let mut input_t = x.clone().slice(s![.., t..t + 1, ..]).squeeze_dim::<2>(1);
             for (i, lstm_cell) in self.layers.iter().enumerate() {
-                let mut state: LstmState<2> =
+                let mut state: LstmState =
                     LstmState::new(states[i].cell.clone(), states[i].hidden.clone());
                 state = lstm_cell.forward(input_t, state);
                 input_t = state.hidden.clone().squeeze();
@@ -333,7 +333,7 @@ impl LstmNetwork {
     ///
     /// Returns:
     ///     Output tensor of shape (batch_size, output_size)
-    pub fn forward(&self, x: Tensor<3>, states: Option<Vec<LstmState<2>>>) -> Tensor<2> {
+    pub fn forward(&self, x: Tensor<3>, states: Option<Vec<LstmState>>) -> Tensor<2> {
         let seq_length = x.dims()[1];
         // Forward direction
         let (mut output, _states) = self.stacked_lstm.forward(x.clone(), states);

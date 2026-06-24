@@ -1,6 +1,6 @@
 use super::*;
+use burn_backend::ops::rnn::RnnSize;
 use burn_tensor::TensorData;
-use burn_tensor::ops::rnn::RnnSize;
 
 pub const SEQ_D: usize = 2;
 const BAT_D: usize = 4;

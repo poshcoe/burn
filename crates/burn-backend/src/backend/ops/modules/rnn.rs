@@ -218,18 +218,18 @@ pub trait RnnOps<B: Backend>: LstmOps<B> {
         mut cache: Vec<FloatTensor<B>>,
         options: &RnnOptions,
     ) -> FloatTensor<B> {
-        let device = B::float_device(&recurrent_weights);
+        let device = &recurrent_weights.device();
         let size = &options.size;
         let mut gates_grads_vec = Vec::with_capacity(size.seq_d);
         // prepare transpose of recurrent weights
         let r_t = B::float_transpose(recurrent_weights);
         // init intermediate grads (learnable states not supported)
         let dtype: FloatDType = out_grad.dtype().into();
-        let mut h_int_grad = B::float_zeros(size.state_shape(), &device, dtype);
+        let mut h_int_grad = B::float_zeros(size.state_shape(), device, dtype);
         let mut c_int_grad =
             c_out
                 .is_some()
-                .then_some(B::float_zeros(size.state_shape(), &device, dtype));
+                .then_some(B::float_zeros(size.state_shape(), device, dtype));
         // perform in-sequence operations backward
         for i in (0..size.seq_d).rev() {
             let h_out_grad = B::float_slice(

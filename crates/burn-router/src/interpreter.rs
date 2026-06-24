@@ -1886,52 +1886,6 @@ impl<B: BackendIr> TensorInterpreter<B> {
 
                     handles.register_float_tensor::<B>(&desc.out.id, output);
                 }
-<<<<<<< HEAD:crates/burn-router/src/runner.rs
-                ModuleOperationIr::RnnElemwise(desc) => {
-                    // fetch inputs
-                    let wx_rh = handles.get_float_tensor::<B>(&desc.wx_rh);
-                    let c = desc.c.as_ref().map(|c| handles.get_float_tensor::<B>(c));
-                    // run rnn elemwise forward
-                    let out = B::rnn_elemwise(wx_rh, c, &desc.options);
-                    // register outputs
-                    handles.register_float_tensor::<B>(&desc.h_out.id, out.h);
-                    desc.c_out.as_ref().map(|c_out_ir| {
-                        handles.register_float_tensor::<B>(&c_out_ir.id, out.c.unwrap())
-                    });
-                    desc.gates_out.as_ref().map(|gates_out_ir| {
-                        handles.register_float_tensor::<B>(&gates_out_ir.id, out.gates.unwrap())
-                    });
-                }
-                ModuleOperationIr::RnnElemwiseBackward(desc) => {
-                    // fetch inputs
-                    let h_out_grad = handles.get_float_tensor::<B>(&desc.h_out_grad);
-                    let h_int_grad = handles.get_float_tensor::<B>(&desc.h_int_grad);
-                    let c = desc.c.as_ref().map(|c| handles.get_float_tensor::<B>(c));
-                    let c_out = desc
-                        .c_out
-                        .as_ref()
-                        .map(|c| handles.get_float_tensor::<B>(c));
-                    let c_int_grad = desc
-                        .c_int_grad
-                        .as_ref()
-                        .map(|c| handles.get_float_tensor::<B>(c));
-                    let gates = handles.get_float_tensor::<B>(&desc.gates);
-                    // run rnn elemwise backward
-                    let out = B::rnn_elemwise_backward(
-                        h_out_grad,
-                        h_int_grad,
-                        c,
-                        c_out,
-                        c_int_grad,
-                        gates,
-                        &desc.options,
-                    );
-                    // register outputs
-                    handles.register_float_tensor::<B>(&desc.gates_grad.id, out.gates_grad);
-                    desc.c_int_grad_out.as_ref().map(|c| {
-                        handles.register_float_tensor::<B>(&c.id, out.c_int_grad.unwrap())
-                    });
-=======
                 ModuleOperationIr::CtcLoss(desc) => {
                     let log_probs = handles.get_float_tensor::<B>(&desc.log_probs);
                     let targets = handles.get_int_tensor::<B>(&desc.targets);
@@ -2040,6 +1994,51 @@ impl<B: BackendIr> TensorInterpreter<B> {
                     let output = B::conv_transpose3d_bias_backward(x, bias, output_grad);
                     handles.register_float_tensor::<B>(&desc.out.id, output);
                 }
+                ModuleOperationIr::RnnElemwise(desc) => {
+                    // fetch inputs
+                    let wx_rh = handles.get_float_tensor::<B>(&desc.wx_rh);
+                    let c = desc.c.as_ref().map(|c| handles.get_float_tensor::<B>(c));
+                    // run rnn elemwise forward
+                    let out = B::rnn_elemwise(wx_rh, c, &desc.options);
+                    // register outputs
+                    handles.register_float_tensor::<B>(&desc.h_out.id, out.h);
+                    desc.c_out.as_ref().map(|c_out_ir| {
+                        handles.register_float_tensor::<B>(&c_out_ir.id, out.c.unwrap())
+                    });
+                    desc.gates_out.as_ref().map(|gates_out_ir| {
+                        handles.register_float_tensor::<B>(&gates_out_ir.id, out.gates.unwrap())
+                    });
+                }
+                ModuleOperationIr::RnnElemwiseBackward(desc) => {
+                    // fetch inputs
+                    let h_out_grad = handles.get_float_tensor::<B>(&desc.h_out_grad);
+                    let h_int_grad = handles.get_float_tensor::<B>(&desc.h_int_grad);
+                    let c = desc.c.as_ref().map(|c| handles.get_float_tensor::<B>(c));
+                    let c_out = desc
+                        .c_out
+                        .as_ref()
+                        .map(|c| handles.get_float_tensor::<B>(c));
+                    let c_int_grad = desc
+                        .c_int_grad
+                        .as_ref()
+                        .map(|c| handles.get_float_tensor::<B>(c));
+                    let gates = handles.get_float_tensor::<B>(&desc.gates);
+                    // run rnn elemwise backward
+                    let out = B::rnn_elemwise_backward(
+                        h_out_grad,
+                        h_int_grad,
+                        c,
+                        c_out,
+                        c_int_grad,
+                        gates,
+                        &desc.options,
+                    );
+                    // register outputs
+                    handles.register_float_tensor::<B>(&desc.gates_grad.id, out.gates_grad);
+                    desc.c_int_grad_out.as_ref().map(|c| {
+                        handles.register_float_tensor::<B>(&c.id, out.c_int_grad.unwrap())
+                    });
+                }
             },
             OperationIr::Activation(op) => match op {
                 ActivationOperationIr::Relu(desc) => {
@@ -2116,7 +2115,6 @@ impl<B: BackendIr> TensorInterpreter<B> {
                     let input = handles.get_float_tensor::<B>(&desc.input);
                     let result = B::softmin(input, desc.axis);
                     handles.register_float_tensor::<B>(&desc.out.id, result);
->>>>>>> main:crates/burn-router/src/interpreter.rs
                 }
             },
             OperationIr::Custom(_) => {

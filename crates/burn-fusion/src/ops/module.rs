@@ -1736,11 +1736,9 @@ impl<B: FusionBackend> RnnOps<Fusion<B>> for Fusion<B> {
                 .map(|gates_out_args| handles.register_float_tensor::<B>(&gates_out_args.id, out.gates.unwrap()));
         });
 
-        // prepare inputs
-        let mut streams = OperationStreams::with_inputs([&wx_rh]);
-        c.as_ref().map(|c| streams.tensor(c));
-        // create desc
         let c_is_some = c.is_some();
+        // create desc
+        let streams = StreamId::current();
         let client = wx_rh.client.clone();
         let desc = RnnElemwiseOpIr::create(
             wx_rh.into_ir(),
@@ -1799,13 +1797,8 @@ impl<B: FusionBackend> RnnOps<Fusion<B>> for Fusion<B> {
                 );
         });
 
-        // prepare inputs
-        let mut streams = OperationStreams::with_inputs([&h_out_grad, &h_int_grad]);
-        c.as_ref().map(|c| streams.tensor(c));
-        c_out.as_ref().map(|c_out| streams.tensor(c_out));
-        c_int_grad.as_ref().map(|c_grad| streams.tensor(c_grad));
-        streams.tensor(&gates);
         // create desc
+        let streams = StreamId::current();
         let client = h_out_grad.client.clone();
         let desc = RnnElemwiseBackwardOpIr::create(
             h_out_grad.into_ir(),

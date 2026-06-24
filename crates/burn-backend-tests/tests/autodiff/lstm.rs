@@ -1,5 +1,5 @@
 use super::*;
-use burn_tensor::ops::rnn::RnnSize;
+use burn_backend::ops::rnn::RnnSize;
 use burn_tensor::{TensorData, Tolerance};
 
 const SEQ_D: usize = 2;

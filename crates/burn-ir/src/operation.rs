@@ -2087,29 +2087,24 @@ impl From<GridSampleOptions> for GridSampleOptionsIr {
 #[derive(Clone, Debug, Hash, PartialEq, Serialize, Deserialize)]
 #[allow(missing_docs)]
 pub struct RnnElemwiseOpIr {
-    pub wx_rh: TensorIr,
+    pub g: TensorIr,
     pub c: Option<TensorIr>,
     pub options: RnnOptions,
     pub h_out: TensorIr,
     pub c_out: Option<TensorIr>,
-    pub gates_out: Option<TensorIr>,
+    pub g_out: Option<TensorIr>,
 }
 
 #[allow(missing_docs)]
 impl RnnElemwiseOpIr {
-    pub fn create<F>(
-        wx_rh: TensorIr,
-        c: Option<TensorIr>,
-        options: RnnOptions,
-        mut new_id: F,
-    ) -> Self
+    pub fn create<F>(g: TensorIr, c: Option<TensorIr>, options: RnnOptions, mut new_id: F) -> Self
     where
         F: FnMut() -> TensorId,
     {
         // all input dtypes must match
-        let dtype = wx_rh.dtype;
+        let dtype = g.dtype;
         if let Some(c) = &c {
-            assert!(c.dtype == dtype, "dtype mismatch");
+            assert_eq!(c.dtype, dtype);
         }
         // build description manually, multiple outputs
         let size = &options.size;
@@ -2118,19 +2113,19 @@ impl RnnElemwiseOpIr {
             .is_some()
             .then_some(TensorIr::uninit(new_id(), shape.clone(), dtype));
         // gates out if backprop is enabled
-        let gates_out = options.enable_backprop_cache.then_some(TensorIr::uninit(
+        let g_out = options.enable_gate_output.then_some(TensorIr::uninit(
             new_id(),
             [1, size.bat_d, size.hid_d * options.mode.gate_count()].into(),
             dtype,
         ));
         let h_out = TensorIr::uninit(new_id(), shape, dtype);
         Self {
-            wx_rh,
+            g,
             c,
             options,
             h_out,
             c_out,
-            gates_out,
+            g_out,
         }
     }
 }
@@ -2139,25 +2134,23 @@ impl RnnElemwiseOpIr {
 #[allow(missing_docs)]
 pub struct RnnElemwiseBackwardOpIr {
     pub h_out_grad: TensorIr,
-    pub h_int_grad: TensorIr,
     pub c: Option<TensorIr>,
     pub c_out: Option<TensorIr>,
-    pub c_int_grad: Option<TensorIr>,
-    pub gates: TensorIr,
+    pub c_out_grad: Option<TensorIr>,
+    pub g_out: TensorIr,
     pub options: RnnOptions,
-    pub gates_grad: TensorIr,
-    pub c_int_grad_out: Option<TensorIr>,
+    pub g_grad: TensorIr,
+    pub c_grad: Option<TensorIr>,
 }
 
 #[allow(missing_docs)]
 impl RnnElemwiseBackwardOpIr {
     pub fn create<F>(
         h_out_grad: TensorIr,
-        h_int_grad: TensorIr,
         c: Option<TensorIr>,
         c_out: Option<TensorIr>,
-        c_int_grad: Option<TensorIr>,
-        gates: TensorIr,
+        c_out_grad: Option<TensorIr>,
+        g_out: TensorIr,
         options: RnnOptions,
         mut new_id: F,
     ) -> Self
@@ -2166,38 +2159,37 @@ impl RnnElemwiseBackwardOpIr {
     {
         // all input dtypes must match (cache unchecked)
         let dtype = h_out_grad.dtype;
-        assert!(h_int_grad.dtype == dtype, "dtype mismatch");
+        assert_eq!(g_out.dtype, dtype);
         if let Some(c) = &c {
-            assert!(c.dtype == dtype, "dtype mismatch");
+            assert_eq!(c.dtype, dtype);
         }
         if let Some(c_out) = &c_out {
-            assert!(c_out.dtype == dtype, "dtype mismatch");
+            assert_eq!(c_out.dtype, dtype);
         }
-        if let Some(c_grad) = &c_int_grad {
-            assert!(c_grad.dtype == dtype, "dtype mismatch");
+        if let Some(c_out_grad) = &c_out_grad {
+            assert_eq!(c_out_grad.dtype, dtype);
         }
         // build description manually, multiple outputs
         let size = &options.size;
         let shape = size.state_shape();
-        let gates_grad = TensorIr::uninit(
+        let g_grad = TensorIr::uninit(
             new_id(),
             [1, size.bat_d, size.seq_d * options.mode.gate_count()].into(),
             dtype,
         );
-        let c_int_grad_out =
-            c_int_grad
+        let c_grad =
+            c_out_grad
                 .is_some()
                 .then_some(TensorIr::uninit(new_id(), shape.clone(), dtype));
         Self {
             h_out_grad,
-            h_int_grad,
             c,
             c_out,
-            c_int_grad,
-            gates,
+            c_out_grad,
+            g_out,
             options,
-            gates_grad,
-            c_int_grad_out,
+            g_grad,
+            c_grad,
         }
     }
 }
@@ -3986,9 +3978,9 @@ impl ModuleOperationIr {
             }
             ModuleOperationIr::RnnElemwise(repr) => {
                 if let Some(c) = &repr.c {
-                    Box::new([&repr.wx_rh, c].into_iter())
+                    Box::new([&repr.g, c].into_iter())
                 } else {
-                    Box::new([&repr.wx_rh].into_iter())
+                    Box::new([&repr.g].into_iter())
                 }
             }
             ModuleOperationIr::RnnElemwiseBackward(repr) => {
@@ -3996,16 +3988,15 @@ impl ModuleOperationIr {
                     Box::new(
                         [
                             &repr.h_out_grad,
-                            &repr.h_int_grad,
                             c,
                             repr.c_out.as_ref().unwrap(),
-                            repr.c_int_grad.as_ref().unwrap(),
-                            &repr.gates,
+                            repr.c_out_grad.as_ref().unwrap(),
+                            &repr.g_out,
                         ]
                         .into_iter(),
                     )
                 } else {
-                    Box::new([&repr.h_out_grad, &repr.h_int_grad, &repr.gates].into_iter())
+                    Box::new([&repr.h_out_grad, &repr.g_out].into_iter())
                 }
             }
         }
@@ -4118,7 +4109,7 @@ impl ModuleOperationIr {
             ModuleOperationIr::ConvTranspose3dBiasBackward(repr) => {
                 Box::new([&repr.out].into_iter())
             }
-            ModuleOperationIr::RnnElemwise(repr) => match (&repr.c_out, &repr.gates_out) {
+            ModuleOperationIr::RnnElemwise(repr) => match (&repr.c_out, &repr.g_out) {
                 (Some(c_out), Some(gates_out)) => {
                     Box::new([&repr.h_out, c_out, gates_out].into_iter())
                 }
@@ -4127,10 +4118,10 @@ impl ModuleOperationIr {
                 (None, None) => Box::new([&repr.h_out].into_iter()),
             },
             ModuleOperationIr::RnnElemwiseBackward(repr) => {
-                if let Some(c_int_grad_out) = &repr.c_int_grad_out {
-                    Box::new([&repr.gates_grad, c_int_grad_out].into_iter())
+                if let Some(c_grad) = &repr.c_grad {
+                    Box::new([&repr.g_grad, c_grad].into_iter())
                 } else {
-                    Box::new([&repr.gates_grad].into_iter())
+                    Box::new([&repr.g_grad].into_iter())
                 }
             }
         }
@@ -4420,21 +4411,20 @@ impl ModuleOperationIr {
                 repr.output_grad.mark_read_only(nodes, &mut output);
             }
             ModuleOperationIr::RnnElemwise(repr) => {
-                // allow inplace ops on wx_rh
+                // allow inplace ops on g (gate inputs)
                 repr.c
                     .as_mut()
                     .map(|c| c.mark_read_only(nodes, &mut output));
             }
             ModuleOperationIr::RnnElemwiseBackward(repr) => {
                 repr.h_out_grad.mark_read_only(nodes, &mut output);
-                repr.h_int_grad.mark_read_only(nodes, &mut output);
                 repr.c
                     .as_mut()
                     .map(|c| c.mark_read_only(nodes, &mut output));
                 repr.c_out
                     .as_mut()
                     .map(|c| c.mark_read_only(nodes, &mut output));
-                // allow inplace ops on grads and c_int_grad
+                // allow inplace ops on g_out and c_out_grad
             }
         };
 
@@ -4779,21 +4769,20 @@ impl ModuleOperationIr {
                 v.visit_tensor_mut(&mut repr.out);
             }
             ModuleOperationIr::RnnElemwise(repr) => {
-                v.visit_tensor_mut(&mut repr.wx_rh);
+                v.visit_tensor_mut(&mut repr.g);
                 repr.c.as_mut().map(|c| v.visit_tensor_mut(c));
                 v.visit_tensor_mut(&mut repr.h_out);
                 repr.c_out.as_mut().map(|c| v.visit_tensor_mut(c));
-                repr.gates_out.as_mut().map(|g| v.visit_tensor_mut(g));
+                repr.g_out.as_mut().map(|g| v.visit_tensor_mut(g));
             }
             ModuleOperationIr::RnnElemwiseBackward(repr) => {
                 v.visit_tensor_mut(&mut repr.h_out_grad);
-                v.visit_tensor_mut(&mut repr.h_int_grad);
                 repr.c.as_mut().map(|c| v.visit_tensor_mut(c));
                 repr.c_out.as_mut().map(|c| v.visit_tensor_mut(c));
-                repr.c_int_grad.as_mut().map(|c| v.visit_tensor_mut(c));
-                v.visit_tensor_mut(&mut repr.gates);
-                v.visit_tensor_mut(&mut repr.gates_grad);
-                repr.c_int_grad_out.as_mut().map(|c| v.visit_tensor_mut(c));
+                repr.c_out_grad.as_mut().map(|c| v.visit_tensor_mut(c));
+                v.visit_tensor_mut(&mut repr.g_out);
+                v.visit_tensor_mut(&mut repr.g_grad);
+                repr.c_grad.as_mut().map(|c| v.visit_tensor_mut(c));
             }
         }
     }

@@ -1712,7 +1712,7 @@ impl<B: FusionBackend> ModuleOps<Fusion<B>> for Fusion<B> {
 impl<B: FusionBackend> burn_backend::ops::rnn::lstm::LstmOps<Fusion<B>> for Fusion<B> {}
 impl<B: FusionBackend> RnnOps<Fusion<B>> for Fusion<B> {
     fn rnn_elemwise(
-        wx_rh: FloatTensor<Self>,
+        g: FloatTensor<Self>,
         c: Option<FloatTensor<Self>>,
         options: &RnnOptions,
     ) -> RnnElemwise<Self> {
@@ -1723,29 +1723,27 @@ impl<B: FusionBackend> RnnOps<Fusion<B>> for Fusion<B> {
             |args: &RnnElemwiseOpIr, handles: &mut HandleContainer<B::Handle>|
         {
             let out = B::rnn_elemwise(
-                handles.get_float_tensor::<B>(&args.wx_rh),
+                handles.get_float_tensor::<B>(&args.g),
                 args.c.as_ref().map(|c| handles.get_float_tensor::<B>(c)),
                 &args.options,
             );
-            handles.register_float_tensor::<B>(&args.h_out.id, out.h);
+            handles.register_float_tensor::<B>(&args.h_out.id, out.h_out);
             args.c_out
                 .as_ref()
-                .map(|c_out_args| handles.register_float_tensor::<B>(&c_out_args.id, out.c.unwrap()));
-            args.gates_out
+                .map(|c_out_args| handles.register_float_tensor::<B>(&c_out_args.id, out.c_out.unwrap()));
+            args.g_out
                 .as_ref()
-                .map(|gates_out_args| handles.register_float_tensor::<B>(&gates_out_args.id, out.gates.unwrap()));
+                .map(|gates_out_args| handles.register_float_tensor::<B>(&gates_out_args.id, out.g_out.unwrap()));
         });
 
         let c_is_some = c.is_some();
         // create desc
         let streams = StreamId::current();
-        let client = wx_rh.client.clone();
-        let desc = RnnElemwiseOpIr::create(
-            wx_rh.into_ir(),
-            c.map(|c| c.into_ir()),
-            options.clone(),
-            || client.create_empty_handle(),
-        );
+        let client = g.client.clone();
+        let desc =
+            RnnElemwiseOpIr::create(g.into_ir(), c.map(|c| c.into_ir()), options.clone(), || {
+                client.create_empty_handle()
+            });
         // register op
         let mut outputs = client
             .register(
@@ -1755,22 +1753,21 @@ impl<B: FusionBackend> RnnOps<Fusion<B>> for Fusion<B> {
             )
             .into_iter();
         // split outputs
-        let h = outputs.next().unwrap();
-        let (c, gates) = match (c_is_some, options.enable_backprop_cache) {
+        let h_out = outputs.next().unwrap();
+        let (c_out, g_out) = match (c_is_some, options.enable_gate_output) {
             (true, true) => (Some(outputs.next().unwrap()), Some(outputs.next().unwrap())),
             (true, false) => (Some(outputs.next().unwrap()), None),
             (false, true) => (None, Some(outputs.next().unwrap())),
             (false, false) => (None, None),
         };
-        RnnElemwise::new(h, c, gates)
+        RnnElemwise::new(h_out, c_out, g_out)
     }
 
     fn rnn_elemwise_backward(
         h_out_grad: FloatTensor<Self>,
-        h_int_grad: FloatTensor<Self>,
         c: Option<FloatTensor<Self>>,
         c_out: Option<FloatTensor<Self>>,
-        c_int_grad: Option<FloatTensor<Self>>,
+        c_out_grad: Option<FloatTensor<Self>>,
         gates: FloatTensor<Self>,
         options: &RnnOptions,
     ) -> RnnElemwiseBackward<Self> {
@@ -1782,18 +1779,17 @@ impl<B: FusionBackend> RnnOps<Fusion<B>> for Fusion<B> {
         {
             let out = B::rnn_elemwise_backward(
                 handles.get_float_tensor::<B>(&args.h_out_grad),
-                handles.get_float_tensor::<B>(&args.h_int_grad),
                 args.c.as_ref().map(|c| handles.get_float_tensor::<B>(c)),
                 args.c_out.as_ref().map(|c_out| handles.get_float_tensor::<B>(c_out)),
-                args.c_int_grad.as_ref().map(|c_grad| handles.get_float_tensor::<B>(c_grad)),
-                handles.get_float_tensor::<B>(&args.gates),
+                args.c_out_grad.as_ref().map(|c_out_grad| handles.get_float_tensor::<B>(c_out_grad)),
+                handles.get_float_tensor::<B>(&args.g_out),
                 &args.options
             );
-            handles.register_float_tensor::<B>(&args.gates_grad.id, out.gates_grad);
-            args.c_int_grad_out
+            handles.register_float_tensor::<B>(&args.g_grad.id, out.g_grad);
+            args.c_grad
                 .as_ref()
-                .map(|c_int_grad_out_args|
-                    handles.register_float_tensor::<B>(&c_int_grad_out_args.id, out.c_int_grad.unwrap())
+                .map(|c_grad_args|
+                    handles.register_float_tensor::<B>(&c_grad_args.id, out.c_grad.unwrap())
                 );
         });
 
@@ -1802,10 +1798,9 @@ impl<B: FusionBackend> RnnOps<Fusion<B>> for Fusion<B> {
         let client = h_out_grad.client.clone();
         let desc = RnnElemwiseBackwardOpIr::create(
             h_out_grad.into_ir(),
-            h_int_grad.into_ir(),
             c.map(|c| c.into_ir()),
             c_out.map(|c_out| c_out.into_ir()),
-            c_int_grad.map(|c_grad| c_grad.into_ir()),
+            c_out_grad.map(|c_out_grad| c_out_grad.into_ir()),
             gates.into_ir(),
             options.clone(),
             || client.create_empty_handle(),
@@ -1820,7 +1815,7 @@ impl<B: FusionBackend> RnnOps<Fusion<B>> for Fusion<B> {
             .into_iter();
         // split outputs
         let gates_grad = outputs.next().unwrap();
-        let c_int_grad = outputs.next();
-        RnnElemwiseBackward::new(gates_grad, c_int_grad)
+        let c_grad = outputs.next();
+        RnnElemwiseBackward::new(gates_grad, c_grad)
     }
 }

@@ -669,7 +669,7 @@ impl RelativeOps for ModuleOperationIr {
             }
             ModuleOperationIr::RnnElemwise(desc) => {
                 ModuleOperationIr::RnnElemwise(RnnElemwiseOpIr {
-                    wx_rh: desc.wx_rh.to_relative(converter),
+                    g: desc.g.to_relative(converter),
                     c: desc.c.as_ref().map(|c| c.to_relative(converter)),
                     options: desc.options.clone(),
                     h_out: desc.h_out.to_relative(converter),
@@ -677,32 +677,31 @@ impl RelativeOps for ModuleOperationIr {
                         .c_out
                         .as_ref()
                         .map(|c_out| c_out.to_relative(converter)),
-                    gates_out: desc
-                        .gates_out
+                    g_out: desc
+                        .g_out
                         .as_ref()
-                        .map(|gates_out| gates_out.to_relative(converter)),
+                        .map(|g_out| g_out.to_relative(converter)),
                 })
             }
             ModuleOperationIr::RnnElemwiseBackward(desc) => {
                 ModuleOperationIr::RnnElemwiseBackward(RnnElemwiseBackwardOpIr {
                     h_out_grad: desc.h_out_grad.to_relative(converter),
-                    h_int_grad: desc.h_int_grad.to_relative(converter),
                     c: desc.c.as_ref().map(|c| c.to_relative(converter)),
                     c_out: desc
                         .c_out
                         .as_ref()
                         .map(|c_out| c_out.to_relative(converter)),
-                    c_int_grad: desc
-                        .c_int_grad
+                    c_out_grad: desc
+                        .c_out_grad
                         .as_ref()
-                        .map(|c_int_grad| c_int_grad.to_relative(converter)),
-                    gates: desc.gates.to_relative(converter),
+                        .map(|c_out_grad| c_out_grad.to_relative(converter)),
+                    g_out: desc.g_out.to_relative(converter),
                     options: desc.options.clone(),
-                    gates_grad: desc.gates_grad.to_relative(converter),
-                    c_int_grad_out: desc
-                        .c_int_grad_out
+                    g_grad: desc.g_grad.to_relative(converter),
+                    c_grad: desc
+                        .c_grad
                         .as_ref()
-                        .map(|c_int_grad_out| c_int_grad_out.to_relative(converter)),
+                        .map(|c_grad| c_grad.to_relative(converter)),
                 })
             }
         }

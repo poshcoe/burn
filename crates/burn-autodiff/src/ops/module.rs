@@ -11,11 +11,11 @@ use crate::tensor::AutodiffTensor;
 use burn_backend::TensorMetadata;
 use burn_backend::ops::attention::attention_fallback;
 use burn_backend::ops::rnn::lstm::LstmOps;
-use burn_backend::ops::rnn::{Rnn, RnnOps, RnnOptions};
+use burn_backend::ops::rnn::{RnnElemwise, RnnOps, RnnOptions};
 use burn_backend::ops::*;
 use burn_backend::tensor::{FloatTensor, IntTensor};
 use burn_backend::{Backend, get_device_settings};
-use burn_std::{IntDType, Slice};
+use burn_std::{IntDType, Slice, s};
 
 use super::OpsKind;
 
@@ -2251,151 +2251,125 @@ impl<B: Backend> Backward<B, 1> for MaxPool2D {
 
 impl<B: Backend, C: CheckpointStrategy> LstmOps<Autodiff<B, C>> for Autodiff<B, C> {}
 impl<B: Backend, C: CheckpointStrategy> RnnOps<Autodiff<B, C>> for Autodiff<B, C> {
-    fn rnn(
-        input: FloatTensor<Autodiff<B, C>>,
-        hidden_state: FloatTensor<Autodiff<B, C>>,
-        cell_state: Option<FloatTensor<Autodiff<B, C>>>,
-        input_weights: FloatTensor<Autodiff<B, C>>,
-        recurrent_weights: FloatTensor<Autodiff<B, C>>,
-        biases: Option<FloatTensor<Autodiff<B, C>>>,
+    fn rnn_elemwise(
+        g: FloatTensor<Autodiff<B, C>>,
+        c: Option<FloatTensor<Autodiff<B, C>>>,
         options: &RnnOptions,
-    ) -> Rnn<Autodiff<B, C>> {
+    ) -> RnnElemwise<Autodiff<B, C>> {
         #[derive(Debug)]
-        struct RnnBackward;
+        struct RnnElemwiseBackward;
         #[derive(Clone, Debug)]
-        struct RnnBackwardState<B: Backend> {
-            checkpoints: [NodeId; 3],
-            out: FloatTensor<B>,
+        struct RnnElemwiseBackwardState<B: Backend> {
+            c_id: Option<NodeId>,
             c_out: Option<FloatTensor<B>>,
-            cache: Vec<FloatTensor<B>>,
+            g_out: FloatTensor<B>,
             options: RnnOptions,
         }
 
-        impl<B: Backend> Backward<B, 4> for RnnBackward {
-            type State = RnnBackwardState<B>;
+        impl<B: Backend> Backward<B, 2> for RnnElemwiseBackward {
+            type State = RnnElemwiseBackwardState<B>;
 
             fn backward(
                 self,
-                ops: Ops<Self::State, 4>,
+                ops: Ops<Self::State, 2>,
                 grads: &mut Gradients,
                 checkpointer: &mut Checkpointer,
             ) {
-                let [
-                    input_node,
-                    input_weights_node,
-                    recurrent_weights_node,
-                    biases_node,
-                ] = ops.parents;
-                let RnnBackwardState {
-                    checkpoints: [x, w, r],
-                    out,
+                let [g_node, c_node] = ops.parents;
+                let RnnElemwiseBackwardState {
+                    c_id,
                     c_out,
-                    cache,
+                    g_out,
                     options,
                 } = ops.state;
-                // get output trajectory grad (stacked hidden states)
+                let c = c_id.map(|c_id| checkpointer.retrieve_node_output(c_id));
+                // get state grads (and separate if necessary)
                 let out_grad = grads.consume::<B>(&ops.node);
-                // calculate base gate activation gradients
-                let recurrent_weights =
-                    checkpointer.retrieve_node_output::<B::FloatTensorPrimitive>(r);
-                let gates_grads =
-                    B::rnn_backward(recurrent_weights, c_out, out_grad, cache, &options);
-                // finalize input gradient
-                if let Some(node) = input_node {
-                    let input_weights =
-                        checkpointer.retrieve_node_output::<B::FloatTensorPrimitive>(w);
-                    let input_grad = B::rnn_input_backward(input_weights, gates_grads.clone());
-                    grads.register::<B>(node.id, input_grad);
+                let mut h_out_grad = out_grad.clone();
+                let mut c_out_grad = None;
+                if c.is_some() {
+                    h_out_grad = B::float_slice(out_grad.clone(), &s![0, .., ..]);
+                    c_out_grad = Some(B::float_slice(out_grad, &s![1, .., ..]));
                 }
-                // finalize input weights gradient
-                if let Some(node) = input_weights_node {
-                    let input = checkpointer.retrieve_node_output::<B::FloatTensorPrimitive>(x);
-                    let input_weights_grad =
-                        B::rnn_input_weights_backward(input, gates_grads.clone(), &options.size);
-                    grads.register::<B>(node.id, input_weights_grad)
+                // run elemwise backward
+                let out =
+                    B::rnn_elemwise_backward(h_out_grad, c, c_out, c_out_grad, g_out, &options);
+                // register grads upstream
+                if let Some(g_node) = g_node {
+                    grads.register::<B>(g_node.id, out.g_grad);
                 }
-                // finalize recurrent weights gradient
-                if let Some(node) = recurrent_weights_node {
-                    let recurrent_weights_grad =
-                        B::rnn_recurrent_weights_backward(out, gates_grads.clone(), &options.size);
-                    grads.register::<B>(node.id, recurrent_weights_grad);
-                }
-                // finalize biases gradient
-                if let Some(node) = biases_node {
-                    let biases_grad = B::rnn_biases_backward(gates_grads);
-                    grads.register::<B>(node.id, biases_grad);
+                if let Some(c_node) = c_node {
+                    grads.register::<B>(c_node.id, out.c_grad.unwrap());
                 }
             }
         }
 
-        let out_hidden_state;
-        let out_cell_state;
-        let out = match RnnBackward
+        fn maybe_combine<B: Backend>(
+            h_out: B::FloatTensorPrimitive,
+            c_out: Option<B::FloatTensorPrimitive>,
+            options: &RnnOptions,
+        ) -> B::FloatTensorPrimitive {
+            if let Some(c_out) = c_out {
+                let shape = [2, options.size.bat_d, options.size.hid_d].into();
+                let mut combined = B::float_empty(shape, &h_out.device(), h_out.dtype().into());
+                combined = B::float_slice_assign(combined, &s![0, .., ..], h_out);
+                combined = B::float_slice_assign(combined, &s![1, .., ..], c_out);
+                combined
+            } else {
+                h_out
+            }
+        }
+
+        let has_c = c.is_some();
+        let (out, g_out) = match RnnElemwiseBackward
             .prepare::<C>([
-                input.node.clone(),
-                input_weights.node.clone(),
-                recurrent_weights.node.clone(),
-                biases.as_ref().map(|b| b.node.clone()).unwrap_or_default(),
+                g.node.clone(),
+                c.as_ref().map(|c| c.node.clone()).unwrap_or_default(),
             ])
             .compute_bound()
             .stateful()
         {
             OpsKind::Tracked(mut prep) => {
-                // checkpoint inputs
-                let x = prep.checkpoint(&input);
-                let w = prep.checkpoint(&input_weights);
-                let r = prep.checkpoint(&recurrent_weights);
+                // checkpoint cell state
+                let c_id = c.as_ref().map(|c| prep.checkpoint(c));
                 // run forward with tracking
-                let out;
-                let cache;
-                let options = options.with_backprop_cache();
-                Rnn {
-                    out,
-                    hidden_state: out_hidden_state,
-                    cell_state: out_cell_state,
-                    cache,
-                } = B::rnn(
-                    input.primitive,
-                    hidden_state.primitive,
-                    cell_state.map(|c| c.primitive),
-                    input_weights.primitive,
-                    recurrent_weights.primitive,
-                    biases.map(|b| b.primitive),
-                    &options,
-                );
-                // collect checkpoints and outputs to backprop state
-                let state = RnnBackwardState {
-                    checkpoints: [x, w, r],
-                    out: out.clone(),
-                    c_out: out_cell_state.clone(),
-                    cache: cache.unwrap(),
-                    options: options,
+                let options = options.with_gate_output();
+                let RnnElemwise {
+                    h_out,
+                    c_out,
+                    g_out,
+                } = B::rnn_elemwise(g.primitive, c.map(|c| c.primitive), &options);
+                // combine output states (if required) and build state
+                let out = maybe_combine::<B>(h_out, c_out.clone(), &options);
+                let state = RnnElemwiseBackwardState {
+                    c_id,
+                    c_out,
+                    g_out: g_out.clone().unwrap(),
+                    options,
                 };
-                prep.finish(state, out)
+                (prep.finish(state, out), g_out)
             }
             OpsKind::UnTracked(prep) => {
-                // run forward without tracking
-                let out;
-                Rnn {
-                    out,
-                    hidden_state: out_hidden_state,
-                    cell_state: out_cell_state,
-                    cache: _,
-                } = B::rnn(
-                    input.primitive,
-                    hidden_state.primitive,
-                    cell_state.map(|c| c.primitive),
-                    input_weights.primitive,
-                    recurrent_weights.primitive,
-                    biases.map(|b| b.primitive),
-                    options,
-                );
-                prep.finish(out)
+                // forward without tracking
+                let RnnElemwise {
+                    h_out,
+                    c_out,
+                    g_out,
+                } = B::rnn_elemwise(g.primitive, c.map(|c| c.primitive), &options);
+                // combine output states (if required)
+                let out = maybe_combine::<B>(h_out, c_out, &options);
+                (prep.finish(out), g_out)
             }
         };
-        // final states as leaf tensors
-        let out_hidden_state = AutodiffTensor::new(out_hidden_state);
-        let out_cell_state = out_cell_state.map(|c| AutodiffTensor::new(c));
-        Rnn::new(out, out_hidden_state, out_cell_state, None)
+        // gates as a leaf tensor
+        let g_out = g_out.map(|g_out| AutodiffTensor::new(g_out));
+        if has_c {
+            // separate the output states
+            let h_out = Self::float_slice(out.clone(), &s![0, .., ..]);
+            let c_out = Self::float_slice(out, &s![1, .., ..]);
+            RnnElemwise::new(h_out, Some(c_out), g_out)
+        } else {
+            RnnElemwise::new(out, None, g_out)
+        }
     }
 }

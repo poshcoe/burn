@@ -656,13 +656,13 @@ pub fn lstm(
     let options = RnnOptions {
         mode: RnnMode::Lstm,
         size,
-        enable_backprop_cache: false,
+        enable_gate_output: false,
     };
     // RNN forward in LSTM mode
     let Rnn {
         out,
-        hidden_state: h,
-        cell_state: c,
+        hidden_state,
+        cell_state,
         ..
     } = Dispatch::rnn(
         input.primitive.into_float(),
@@ -674,9 +674,8 @@ pub fn lstm(
         &options,
     );
     (
-        // output excludes first state in the trajectory (initial state)
         Tensor::new(BridgeTensor::float(out)),
-        Tensor::new(BridgeTensor::float(h)),
-        Tensor::new(BridgeTensor::float(c.unwrap())),
+        Tensor::new(BridgeTensor::float(hidden_state)),
+        Tensor::new(BridgeTensor::float(cell_state.unwrap())),
     )
 }

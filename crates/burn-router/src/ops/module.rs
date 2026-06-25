@@ -1071,48 +1071,44 @@ impl<R: RouterChannel> ModuleOps<Self> for BackendRouter<R> {
 impl<R: RouterChannel> burn_backend::ops::rnn::lstm::LstmOps<Self> for BackendRouter<R> {}
 impl<R: RouterChannel> RnnOps<Self> for BackendRouter<R> {
     fn rnn_elemwise(
-        wx_rh: FloatTensor<Self>,
+        g: FloatTensor<Self>,
         c: Option<FloatTensor<Self>>,
         options: &RnnOptions,
     ) -> RnnElemwise<Self> {
         let c_is_some = c.is_some();
-        let client = wx_rh.client.clone();
-        let desc = RnnElemwiseOpIr::create(
-            wx_rh.into_ir(),
-            c.map(|c| c.into_ir()),
-            options.clone(),
-            || client.create_empty_handle(),
-        );
+        let client = g.client.clone();
+        let desc =
+            RnnElemwiseOpIr::create(g.into_ir(), c.map(|c| c.into_ir()), options.clone(), || {
+                client.create_empty_handle()
+            });
         let mut outputs = client
             .register(OperationIr::Module(ModuleOperationIr::RnnElemwise(desc)))
             .into_iter();
-        let h = outputs.next().unwrap();
-        let (c, gates) = match (c_is_some, options.enable_backprop_cache) {
+        let h_out = outputs.next().unwrap();
+        let (c_out, g_out) = match (c_is_some, options.enable_gate_output) {
             (true, true) => (Some(outputs.next().unwrap()), Some(outputs.next().unwrap())),
             (true, false) => (Some(outputs.next().unwrap()), None),
             (false, true) => (None, Some(outputs.next().unwrap())),
             (false, false) => (None, None),
         };
-        RnnElemwise::new(h, c, gates)
+        RnnElemwise::new(h_out, c_out, g_out)
     }
 
     fn rnn_elemwise_backward(
         h_out_grad: FloatTensor<Self>,
-        h_int_grad: FloatTensor<Self>,
         c: Option<FloatTensor<Self>>,
         c_out: Option<FloatTensor<Self>>,
-        c_int_grad: Option<FloatTensor<Self>>,
-        gates: FloatTensor<Self>,
+        c_out_grad: Option<FloatTensor<Self>>,
+        g_out: FloatTensor<Self>,
         options: &RnnOptions,
     ) -> RnnElemwiseBackward<Self> {
         let client = h_out_grad.client.clone();
         let desc = RnnElemwiseBackwardOpIr::create(
             h_out_grad.into_ir(),
-            h_int_grad.into_ir(),
             c.map(|c| c.into_ir()),
             c_out.map(|c_out| c_out.into_ir()),
-            c_int_grad.map(|c_grad| c_grad.into_ir()),
-            gates.into_ir(),
+            c_out_grad.map(|c_grad| c_grad.into_ir()),
+            g_out.into_ir(),
             options.clone(),
             || client.create_empty_handle(),
         );
@@ -1121,8 +1117,8 @@ impl<R: RouterChannel> RnnOps<Self> for BackendRouter<R> {
                 desc,
             )))
             .into_iter();
-        let gates_grad = outputs.next().unwrap();
-        let c_int_grad = outputs.next();
-        RnnElemwiseBackward::new(gates_grad, c_int_grad)
+        let g_grad = outputs.next().unwrap();
+        let c_grad = outputs.next();
+        RnnElemwiseBackward::new(g_grad, c_grad)
     }
 }

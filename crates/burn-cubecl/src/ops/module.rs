@@ -404,28 +404,27 @@ where
 
 impl<R: CubeRuntime> LstmOps<Self> for CubeBackend<R> {
     fn lstm_elemwise(
-        wx_rh: FloatTensor<Self>,
+        g: FloatTensor<Self>,
         c: FloatTensor<Self>,
         size: &RnnSize,
         tracked: bool,
     ) -> LstmElemwise<Self> {
-        let ([h, c], gates) = kernel::rnn::lstm::lstm_elemwise::<R>(wx_rh, c, size, tracked);
-        LstmElemwise::new(h, c, gates)
+        let ([h_out, c_out], g_out) = kernel::rnn::lstm::lstm_elemwise::<R>(g, c, size, tracked);
+        LstmElemwise::new(h_out, c_out, g_out)
     }
 
     fn lstm_elemwise_backward(
         h_out_grad: FloatTensor<Self>,
-        h_int_grad: FloatTensor<Self>,
         c: FloatTensor<Self>,
         c_out: FloatTensor<Self>,
-        c_int_grad: FloatTensor<Self>,
-        gates: FloatTensor<Self>,
+        c_out_grad: FloatTensor<Self>,
+        g_out: FloatTensor<Self>,
         size: &RnnSize,
     ) -> LstmElemwiseBackward<Self> {
-        let (gates_grad, c_int_grad) = kernel::rnn::lstm::lstm_elemwise_backward::<R>(
-            h_out_grad, h_int_grad, c, c_out, c_int_grad, gates, size,
+        let (g_grad, c_grad) = kernel::rnn::lstm::lstm_elemwise_backward::<R>(
+            h_out_grad, c, c_out, c_out_grad, g_out, size,
         );
-        LstmElemwiseBackward::new(gates_grad, c_int_grad)
+        LstmElemwiseBackward::new(g_grad, c_grad)
     }
 }
 impl<R: CubeRuntime> RnnOps<Self> for CubeBackend<R> {}

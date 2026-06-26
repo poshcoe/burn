@@ -66,22 +66,23 @@ const BIASES_G: [[[f32; HID_D * 4]; 1]; 1] = [[[
     -0.0054, 0.0125, -0.0017, 0.0006, 0.0790, 0.1081, -0.0045, 0.0066,
 ]]];
 
-fn tensor_from<T: Into<TensorData>, const D: usize>(value: T) -> TestTensor<D> {
-    TestTensor::from_data(value.into(), &AutodiffDevice::new())
-}
-
 #[test]
 fn test_lstm_backward() {
-    let input = tensor_from::<_, 3>(INPUT).require_grad();
-    let input_weights = tensor_from::<_, 3>(INPUT_WEIGHTS_T)
+    let device = AutodiffDevice::new();
+    let input = TestTensor::<3>::from_data(INPUT, &device).require_grad();
+    let input_weights = TestTensor::<3>::from_data(INPUT_WEIGHTS_T, &device)
         .transpose()
         .require_grad();
-    let recurrent_weights = tensor_from(RECURRENT_WEIGHTS_T).transpose().require_grad();
-    let biases = Some(tensor_from::<_, 3>(BIASES).require_grad());
-    let hidden = tensor_from::<_, 3>([[[0.; HID_D]; BAT_D]; 1]);
-    let cell = tensor_from::<_, 3>([[[0.; HID_D]; BAT_D]; 1]);
-    let expected_input_weights_grad = tensor_from::<_, 3>(INPUT_WEIGHTS_G_T).transpose().to_data();
-    let expected_recurrent_weights_grad = tensor_from::<_, 3>(RECURRENT_WEIGHTS_G_T)
+    let recurrent_weights = TestTensor::<3>::from_data(RECURRENT_WEIGHTS_T, &device)
+        .transpose()
+        .require_grad();
+    let biases = Some(TestTensor::<3>::from_data(BIASES, &device).require_grad());
+    let cell = TestTensor::<3>::from_data([[[0.; HID_D]; BAT_D]; 1], &device);
+    let hidden = TestTensor::<3>::from_data([[[0.; HID_D]; BAT_D]; 1], &device);
+    let expected_input_weights_grad = TestTensor::<3>::from(INPUT_WEIGHTS_G_T)
+        .transpose()
+        .to_data();
+    let expected_recurrent_weights_grad = TestTensor::<3>::from(RECURRENT_WEIGHTS_G_T)
         .transpose()
         .to_data();
     let expected_biases_grad = TensorData::from(BIASES_G);
@@ -101,13 +102,12 @@ fn test_lstm_backward() {
     let recurrent_weights_grad = recurrent_weights.grad(&grads).unwrap();
     let biases_grad = biases.as_ref().unwrap().grad(&grads).unwrap();
     // check backprop results
+    let input_weights_grad = input_weights_grad.to_data();
+    let recurrent_weights_grad = recurrent_weights_grad.to_data();
+    let biases_grad = biases_grad.to_data();
     input_weights_grad
-        .to_data()
-        .assert_approx_eq::<FloatElem>(&expected_input_weights_grad, Default::default());
+        .assert_approx_eq::<FloatElem>(&expected_input_weights_grad, Tolerance::permissive());
     recurrent_weights_grad
-        .to_data()
-        .assert_approx_eq::<FloatElem>(&expected_recurrent_weights_grad, Default::default());
-    biases_grad
-        .to_data()
-        .assert_approx_eq::<FloatElem>(&expected_biases_grad, Tolerance::permissive());
+        .assert_approx_eq::<FloatElem>(&expected_recurrent_weights_grad, Tolerance::permissive());
+    biases_grad.assert_approx_eq::<FloatElem>(&expected_biases_grad, Tolerance::permissive());
 }

@@ -90,17 +90,11 @@ fn test_lstm_forward() {
         biases.clone(),
         RnnSize::new(SEQ_D, BAT_D, INP_D, HID_D),
     );
-
-    println!("cell_state: {cell_state}");
-    println!("hidden_state: {hidden_state}");
-
-    // check forward results
-    out.to_data()
-        .assert_approx_eq::<FloatElem>(&expected_output, Default::default());
-    hidden_state
-        .to_data()
-        .assert_approx_eq::<FloatElem>(&expected_hidden, Default::default());
-    cell_state
-        .to_data()
-        .assert_approx_eq::<FloatElem>(&expected_cell, Default::default());
+    // check results
+    let hidden_state = hidden_state.to_data();
+    let cell_state = cell_state.to_data();
+    let out = out.to_data();
+    hidden_state.assert_approx_eq::<FloatElem>(&expected_hidden, Default::default());
+    cell_state.assert_approx_eq::<FloatElem>(&expected_cell, Default::default());
+    out.assert_approx_eq::<FloatElem>(&expected_output, Default::default());
 }

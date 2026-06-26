@@ -30,11 +30,11 @@ fn _sigmoid<E: Float, N: Size>(x: Vector<E, N>, one: Vector<E, N>) -> Vector<E, 
 /// If tracked, gate results will be stored in cache for efficient backprop
 #[cube(launch_unchecked, address_type = "dynamic")]
 fn lstm_elemwise_kernel<E: Float, N: Size>(
+    g: &Tensor<Vector<E, N>>,
+    c: LinearView<'_, Vector<E, N>>,
     mut ho: LinearViewMut<'_, Vector<E, N>>,
     mut co: LinearViewMut<'_, Vector<E, N>>,
     go: ComptimeOption<&mut Tensor<Vector<E, N>>>,
-    g: &Tensor<Vector<E, N>>,
-    c: LinearView<'_, Vector<E, N>>,
     #[comptime] hid_d: usize,
     #[define(E)] _dtype: StorageType,
 ) {
@@ -45,7 +45,7 @@ fn lstm_elemwise_kernel<E: Float, N: Size>(
     // get indices of combined-gate inputs
     let vector_size = N::value().comptime();
     let gate_stride = comptime!(hid_d / vector_size);
-    let ig_idx = ABSOLUTE_POS;
+    let ig_idx = ABSOLUTE_POS * 4;
     let fg_idx = ig_idx + gate_stride;
     let cg_idx = fg_idx + gate_stride;
     let og_idx = cg_idx + gate_stride;
@@ -113,13 +113,13 @@ pub fn lstm_elemwise<R: CubeRuntime>(
             cube_dim,
             address_type!(g, c),
             vector_size,
-            // inplace outputs (reuse g for g_out)
-            h_out.clone().into_linear_view(),
-            c_out.clone().into_linear_view(),
-            tracked.then_some(g.clone().into_tensor_arg()).into(),
             // inputs
             g.clone().into_tensor_arg(),
             c.into_linear_view(),
+            // inplace outputs (reuse g for g_out)
+            h_out.clone().into_linear_view(),
+            c_out.clone().into_linear_view(),
+            tracked.then_some(g.as_tensor_alias(0)).into(),
             hid_d,
             dtype_to_storage_type(dtype),
         );
@@ -132,13 +132,13 @@ pub fn lstm_elemwise<R: CubeRuntime>(
 /// LSTM accelerator for backward element-wise calculations
 #[cube(launch_unchecked, address_type = "dynamic")]
 fn lstm_backward_elemwise_kernel<E: Float, N: Size>(
-    g_grad: &mut Tensor<Vector<E, N>>,
-    mut c_grad: LinearViewMut<'_, Vector<E, N>>,
     ho_grad: LinearView<'_, Vector<E, N>>,
     c: LinearView<'_, Vector<E, N>>,
     co: LinearView<'_, Vector<E, N>>,
     co_grad: LinearView<'_, Vector<E, N>>,
     go: &Tensor<Vector<E, N>>,
+    g_grad: &mut Tensor<Vector<E, N>>,
+    mut c_grad: LinearViewMut<'_, Vector<E, N>>,
     #[comptime] hid_d: usize,
     #[define(E)] _dtype: StorageType,
 ) {
@@ -149,7 +149,7 @@ fn lstm_backward_elemwise_kernel<E: Float, N: Size>(
     // get indices of combined-gate inputs
     let vector_size = N::value().comptime();
     let gate_stride = comptime!(hid_d / vector_size);
-    let ig_idx = ABSOLUTE_POS;
+    let ig_idx = ABSOLUTE_POS * 4;
     let fg_idx = ig_idx + gate_stride;
     let cg_idx = fg_idx + gate_stride;
     let og_idx = cg_idx + gate_stride;
@@ -220,15 +220,15 @@ pub fn lstm_elemwise_backward<R: CubeRuntime>(
             cube_dim,
             address_type!(h_out_grad, c, c_out, c_out_grad, g_out),
             vector_size,
-            // outputs (reuse g_out as g_grad, reuse c_out_grad as c_grad)
-            g_out.clone().into_tensor_arg(),
-            c_out_grad.clone().into_linear_view(),
             // inputs...
             h_out_grad.into_linear_view(),
             c.into_linear_view(),
             c_out.into_linear_view(),
             c_out_grad.clone().into_linear_view(),
             g_out.clone().into_tensor_arg(),
+            // outputs (reuse g_out as g_grad, reuse c_out_grad as c_grad)
+            g_out.as_tensor_alias(4),
+            c_out_grad.as_linear_view_alias(3),
             hid_d,
             dtype_to_storage_type(dtype),
         );

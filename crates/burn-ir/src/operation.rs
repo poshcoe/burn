@@ -4411,7 +4411,10 @@ impl ModuleOperationIr {
                 repr.output_grad.mark_read_only(nodes, &mut output);
             }
             ModuleOperationIr::RnnElemwise(repr) => {
-                // allow inplace ops on g (gate inputs)
+                // allow inplace ops on g (gate inputs) if using gate outputs
+                if !repr.options.enable_gate_output {
+                    repr.g.mark_read_only(nodes, &mut output);
+                }
                 repr.c
                     .as_mut()
                     .map(|c| c.mark_read_only(nodes, &mut output));

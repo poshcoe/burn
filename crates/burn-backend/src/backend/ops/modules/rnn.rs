@@ -181,7 +181,6 @@ pub trait RnnOps<B: Backend>: LstmOps<B> {
         c: Option<FloatTensor<B>>,
         options: &RnnOptions,
     ) -> RnnElemwise<B> {
-        // run elemwise cell forward
         let tracked = options.enable_gate_output;
         match &options.mode {
             RnnMode::Lstm => {

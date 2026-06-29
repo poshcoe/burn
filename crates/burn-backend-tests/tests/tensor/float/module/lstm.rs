@@ -1,6 +1,5 @@
 use super::*;
-use burn_backend::ops::rnn::RnnSize;
-use burn_tensor::TensorData;
+use burn_tensor::{TensorData, ops::RnnSize};
 
 pub const SEQ_D: usize = 2;
 const BAT_D: usize = 4;
@@ -21,7 +20,7 @@ const INPUT: [[[f32; INP_D]; BAT_D]; SEQ_D] = [
         [3.4535e-2, 8.7611e-2, 8.1984e-1],
     ],
 ];
-const INPUT_WEIGHTS_T: [[[f32; INP_D]; HID_D * 4]; 1] = [[
+const INPUT_WEIGHTS_T: [[f32; INP_D]; HID_D * 4] = [
     [0.5515, -1.0005, -0.9981],
     [-0.3744, -0.6567, -0.8902],
     [-0.7804, 0.5981, -0.9637],
@@ -30,8 +29,8 @@ const INPUT_WEIGHTS_T: [[[f32; INP_D]; HID_D * 4]; 1] = [[
     [-0.5157, -0.5139, 0.8493],
     [0.3309, -0.5226, -0.1362],
     [0.3765, 0.5327, 0.7626],
-]];
-const RECURRENT_WEIGHTS_T: [[[f32; HID_D]; HID_D * 4]; 1] = [[
+];
+const RECURRENT_WEIGHTS_T: [[f32; HID_D]; HID_D * 4] = [
     [-0.4148, -0.1351],
     [0.2090, 0.4742],
     [-0.6913, 0.0456],
@@ -40,8 +39,8 @@ const RECURRENT_WEIGHTS_T: [[[f32; HID_D]; HID_D * 4]; 1] = [[
     [0.3370, -0.3085],
     [-0.2517, 0.0471],
     [-0.2644, 0.4771],
-]];
-const BIASES: [[[f32; HID_D * 4]; 1]; 1] = [[[0., 0., 1., 1., 0., 0., 0., 0.]]];
+];
+const BIASES: [f32; HID_D * 4] = [0., 0., 1., 1., 0., 0., 0., 0.];
 const OUT: [[[f32; HID_D]; BAT_D]; SEQ_D] = [
     [
         [0.0246, 0.0696],
@@ -56,27 +55,27 @@ const OUT: [[[f32; HID_D]; BAT_D]; SEQ_D] = [
         [-0.01095, 0.0446],
     ],
 ];
-const CELL: [[[f32; HID_D]; BAT_D]; 1] = [[
+const CELL: [[f32; HID_D]; BAT_D] = [
     [-0.1090, 0.0169],
     [0.0968, 0.2190],
     [-0.0332, 0.0779],
     [-0.0234, 0.0676],
-]];
-const HIDDEN: [[[f32; HID_D]; BAT_D]; 1] = [[
+];
+const HIDDEN: [[f32; HID_D]; BAT_D] = [
     [-0.0465, 0.0120],
     [0.0436, 0.1391],
     [-0.0161, 0.0557],
     [-0.01095, 0.0446],
-]];
+];
 
 #[test]
 fn test_lstm_forward() {
     let input = TestTensor::<3>::from(INPUT);
-    let input_weights = TestTensor::<3>::from(INPUT_WEIGHTS_T).transpose();
-    let recurrent_weights = TestTensor::<3>::from(RECURRENT_WEIGHTS_T).transpose();
-    let biases = Some(TestTensor::<3>::from(BIASES));
-    let cell_state = TestTensor::<3>::from([[[0.; HID_D]; BAT_D]; 1]);
-    let hidden_state = TestTensor::<3>::from([[[0.; HID_D]; BAT_D]; 1]);
+    let input_weights = TestTensor::<2>::from(INPUT_WEIGHTS_T).transpose();
+    let recurrent_weights = TestTensor::<2>::from(RECURRENT_WEIGHTS_T).transpose();
+    let biases = Some(TestTensor::<1>::from(BIASES));
+    let cell_state = TestTensor::<2>::from([[0.; HID_D]; BAT_D]);
+    let hidden_state = TestTensor::<2>::from([[0.; HID_D]; BAT_D]);
     let expected_output = TensorData::from(OUT);
     let expected_cell = TensorData::from(CELL);
     let expected_hidden = TensorData::from(HIDDEN);

@@ -1,6 +1,7 @@
 //! Configuration types for tensor operations.
 
 use crate::ElementConversion;
+use crate::{Shape, Slice, s, shape};
 use core::num::NonZeroUsize;
 
 /// Check that the parameter value is non-zero.
@@ -400,6 +401,31 @@ pub enum IndexingUpdateOp {
     Min,
     /// Take element-wise maximum.
     Max,
+}
+
+/// Struct describing the size of an RNN problem
+#[derive(new, Debug, Clone, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RnnSize {
+    /// Sequence size
+    pub seq_d: usize,
+    /// Batch size
+    pub bat_d: usize,
+    /// Input size
+    pub inp_d: usize,
+    /// Hidden size
+    pub hid_d: usize,
+}
+
+impl RnnSize {
+    /// Shape of a single RNN state
+    pub fn state_shape(&self) -> Shape {
+        shape!(1, self.bat_d, self.hid_d)
+    }
+
+    /// Gate range within a trajectory of flattened transitions
+    pub fn gate_range(&self, j: usize) -> [Slice; 3] {
+        s![0, .., self.hid_d * j..self.hid_d * (j + 1)]
+    }
 }
 
 #[cfg(test)]

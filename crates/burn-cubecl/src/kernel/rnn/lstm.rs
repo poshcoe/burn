@@ -4,8 +4,7 @@ use crate::kernel::utils::address_type;
 use crate::tensor::CubeTensor;
 use burn_backend::TensorMetadata;
 use burn_backend::cubecl::dtype_to_storage_type;
-use burn_backend::ops::rnn::RnnSize;
-use burn_std::Shape;
+use burn_std::{RnnSize, Shape};
 use cubecl::num_traits::One;
 use cubecl::prelude::*;
 use cubecl::std::tensor::layout::linear::{LinearView, LinearViewMut};
@@ -77,7 +76,7 @@ pub fn lstm_elemwise<R: CubeRuntime>(
     g: CubeTensor<R>,
     c: CubeTensor<R>,
     size: &RnnSize,
-    tracked: bool,
+    with_gate_output: bool,
 ) -> ([CubeTensor<R>; 2], Option<CubeTensor<R>>) {
     // check shape compat
     let RnnSize {
@@ -88,8 +87,8 @@ pub fn lstm_elemwise<R: CubeRuntime>(
     } = size.clone();
     let state_shape = size.state_shape();
     let gates_shape = Shape::new([1, bat_d, hid_d * 4]);
-    assert_eq!(state_shape, c.shape(), "incompatible shape of cell state");
-    assert_eq!(gates_shape, g.shape(), "incompatible shape of gates input");
+    assert_eq!(state_shape, c.shape());
+    assert_eq!(gates_shape, g.shape());
     // tensor args require contiguous
     let g = into_contiguous_aligned(g);
     // prepare output tensors (modified inplace by elemwise kernel)
@@ -119,13 +118,13 @@ pub fn lstm_elemwise<R: CubeRuntime>(
             // inplace outputs (reuse g for g_out)
             h_out.clone().into_linear_view(),
             c_out.clone().into_linear_view(),
-            tracked.then_some(g.as_tensor_alias(0)).into(),
+            with_gate_output.then_some(g.as_tensor_alias(0)).into(),
             hid_d,
             dtype_to_storage_type(dtype),
         );
     }
     // return outputs
-    let g_out = tracked.then_some(g);
+    let g_out = with_gate_output.then_some(g);
     ([h_out, c_out], g_out)
 }
 

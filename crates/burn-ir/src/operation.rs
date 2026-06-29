@@ -2174,7 +2174,7 @@ impl RnnElemwiseBackwardOpIr {
         let shape = size.state_shape();
         let g_grad = TensorIr::uninit(
             new_id(),
-            [1, size.bat_d, size.seq_d * options.mode.gate_count()].into(),
+            [1, size.bat_d, size.hid_d * options.mode.gate_count()].into(),
             dtype,
         );
         let c_grad =

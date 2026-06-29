@@ -1,23 +1,24 @@
+use burn_core as burn;
+
 use crate::activation::{Activation, ActivationConfig};
-use burn::backend::ops::rnn::RnnSize;
 use burn::config::Config;
 use burn::module::{Initializer, Module, Param};
 use burn::tensor::Device;
 use burn::tensor::Tensor;
-use burn_core as burn;
+use burn::tensor::ops::RnnSize;
 
 /// An LstmState is used to store cell state and hidden state in LSTM.
 #[derive(Debug)]
 pub struct LstmState {
-    /// The hidden state `[1, d_batch, d_hidden]`
-    pub hidden: Tensor<3>,
-    /// The cell state `[1, d_batch, d_hidden]`
-    pub cell: Tensor<3>,
+    /// The hidden state `[d_batch, d_hidden]`
+    pub hidden: Tensor<2>,
+    /// The cell state `[d_batch, d_hidden]`
+    pub cell: Tensor<2>,
 }
 
 impl LstmState {
     /// Create a new [LstmState] from individual state tensors
-    pub fn new(hidden: Tensor<3>, cell: Tensor<3>) -> Self {
+    pub fn new(hidden: Tensor<2>, cell: Tensor<2>) -> Self {
         Self { hidden, cell }
     }
 }
@@ -78,21 +79,21 @@ impl LstmConfig {
     pub fn init(&self, device: &Device) -> Lstm {
         // init input weight params
         let input_weights = self.input_weight_init.init_with(
-            [1, self.d_input, self.d_hidden * 4],
+            [self.d_input, self.d_hidden * 4],
             Some(self.d_input),
             Some(self.d_hidden * 4),
             device,
         );
         // init recurrent weight params
         let recurrent_weights = self.recurrent_weight_init.init_with(
-            [1, self.d_hidden, self.d_hidden * 4],
+            [self.d_hidden, self.d_hidden * 4],
             Some(self.d_hidden),
             Some(self.d_hidden * 4),
             device,
         );
         // init bias params if configured
         let biases = self.bias.then_some(self.bias_init.init_with(
-            [1, 1, self.d_hidden * 4],
+            [self.d_hidden * 4],
             Some(self.d_input),
             Some(self.d_hidden * 4),
             device,
@@ -102,15 +103,13 @@ impl LstmConfig {
             let forget_bias = self
                 .forget_bias_init
                 .init_with(
-                    [1, 1, self.d_hidden],
+                    [self.d_hidden],
                     Some(self.d_input),
                     Some(self.d_hidden),
                     device,
                 )
                 .val();
-            b_param.map(|b| {
-                b.slice_assign([0..1, 0..1, self.d_hidden..self.d_hidden * 2], forget_bias)
-            })
+            b_param.map(|b| b.slice_assign([self.d_hidden..self.d_hidden * 2], forget_bias))
         });
         Lstm {
             input_weights,
@@ -130,9 +129,10 @@ impl LstmConfig {
 
     /// Initialize a new [Bidirectional LSTM](BiLstm) module
     pub fn init_bilstm(&self, device: &Device) -> BiLstm {
+        let reverse = self.reverse;
         BiLstm {
             forward: self.init(device),
-            reverse: self.clone().with_reverse(true).init(device),
+            reverse: self.clone().with_reverse(!reverse).init(device),
         }
     }
 }
@@ -148,12 +148,12 @@ impl LstmConfig {
 /// The combined-gate weights are flattened in `(input, forget, cell, output)` gate order.
 #[derive(Module, Debug)]
 pub struct Lstm {
-    /// Combined-gate input weights (W) ``[1, d_input, d_hidden * 4]``
-    pub input_weights: Param<Tensor<3>>,
-    /// Combined-gate recurrent weights (R) ``[1, d_hidden, d_hidden * 4]``
-    pub recurrent_weights: Param<Tensor<3>>,
-    /// Combined-gate biases (b) ``[1, 1, d_hidden * 4]``
-    pub biases: Option<Param<Tensor<3>>>,
+    /// Combined-gate input weights (W) ``[d_input, d_hidden * 4]``
+    pub input_weights: Param<Tensor<2>>,
+    /// Combined-gate recurrent weights (R) ``[d_hidden, d_hidden * 4]``
+    pub recurrent_weights: Param<Tensor<2>>,
+    /// Combined-gate biases (b) ``[d_hidden * 4]``
+    pub biases: Option<Param<Tensor<1>>>,
     /// The input dimension of the LSTM
     pub d_input: usize,
     /// The hidden dimension of the LSTM
@@ -176,6 +176,34 @@ pub struct Lstm {
 }
 
 impl Lstm {
+    fn check_sizes(&self, input: &Tensor<3>, state: &LstmState) -> RnnSize {
+        // check tensor shapes
+        let [seq_d, bat_d, inp_d_t] = input.shape().dims();
+        let [bat_d_t, hid_d_t] = state.hidden.shape().dims();
+        let [bat_d_t2, hid_d_t2] = state.cell.shape().dims();
+        assert_eq!(
+            inp_d_t, self.d_input,
+            "input tensor must be of shape [.., .., d_input]"
+        );
+        assert_eq!(
+            bat_d_t, bat_d,
+            "batch dimension mismatch between hidden state and input tensors"
+        );
+        assert_eq!(
+            hid_d_t, self.d_hidden,
+            "hidden state tensor must be of shape [, .., d_hidden]"
+        );
+        assert_eq!(
+            bat_d_t2, bat_d_t,
+            "batch dimension mismatch between cell and hidden state tensors"
+        );
+        assert_eq!(
+            hid_d_t2, hid_d_t,
+            "hidden dimension mismatch between cell and hidden state tensors"
+        );
+        RnnSize::new(seq_d, bat_d, self.d_input, self.d_hidden)
+    }
+
     /// Applies the forward pass on the input tensor. This LSTM implementation
     /// returns the state for each element in a sequence (i.e., across d_sequence) and a final state.
     ///
@@ -202,21 +230,16 @@ impl Lstm {
         if self.reverse {
             input = input.flip([0]);
         }
-        // check input shape
-        let [seq_d, bat_d, inp_d] = input.shape().dims();
-        assert_eq!(
-            inp_d, self.d_input,
-            "input tensor must be of shape [.., .., d_input]"
-        );
-        let size = RnnSize::new(seq_d, bat_d, inp_d, self.d_hidden);
         // unwrap or initialize state
+        let [_, bat_d, _] = input.shape().dims();
         let state = state.unwrap_or_else(|| {
             let device = input.device();
             LstmState {
-                hidden: Tensor::zeros([1, bat_d, self.d_hidden], &device),
-                cell: Tensor::zeros([1, bat_d, self.d_hidden], &device),
+                hidden: Tensor::zeros([bat_d, self.d_hidden], &device),
+                cell: Tensor::zeros([bat_d, self.d_hidden], &device),
             }
         });
+        let size = self.check_sizes(&input, &state);
         // forward RNN in LSTM mode
         let (mut out, hidden, cell) = burn::tensor::module::lstm(
             input,
@@ -328,7 +351,7 @@ mod tests {
             [3.4535e-2, 8.7611e-2, 8.1984e-1],
         ],
     ];
-    const INPUT_WEIGHTS_T: [[[f32; INP_D]; HID_D * 4]; 1] = [[
+    const INPUT_WEIGHTS_T: [[f32; INP_D]; HID_D * 4] = [
         [0.5515, -1.0005, -0.9981],
         [-0.3744, -0.6567, -0.8902],
         [-0.7804, 0.5981, -0.9637],
@@ -337,8 +360,8 @@ mod tests {
         [-0.5157, -0.5139, 0.8493],
         [0.3309, -0.5226, -0.1362],
         [0.3765, 0.5327, 0.7626],
-    ]];
-    const RECURRENT_WEIGHTS_T: [[[f32; HID_D]; HID_D * 4]; 1] = [[
+    ];
+    const RECURRENT_WEIGHTS_T: [[f32; HID_D]; HID_D * 4] = [
         [-0.4148, -0.1351],
         [0.2090, 0.4742],
         [-0.6913, 0.0456],
@@ -347,8 +370,8 @@ mod tests {
         [0.3370, -0.3085],
         [-0.2517, 0.0471],
         [-0.2644, 0.4771],
-    ]];
-    const BIASES: [[[f32; HID_D * 4]; 1]; 1] = [[[0., 0., 1., 1., 0., 0., 0., 0.]]];
+    ];
+    const BIASES: [f32; HID_D * 4] = [0., 0., 1., 1., 0., 0., 0., 0.];
     const OUT: [[[f32; HID_D]; BAT_D]; SEQ_D] = [
         [
             [0.0246, 0.0696],
@@ -363,19 +386,19 @@ mod tests {
             [-0.01095, 0.0446],
         ],
     ];
-    const HIDDEN: [[[f32; HID_D]; BAT_D]; 1] = [[
+    const HIDDEN: [[f32; HID_D]; BAT_D] = [
         [-0.0465, 0.0120],
         [0.0436, 0.1391],
         [-0.0161, 0.0557],
         [-0.01095, 0.0446],
-    ]];
-    const CELL: [[[f32; HID_D]; BAT_D]; 1] = [[
+    ];
+    const CELL: [[f32; HID_D]; BAT_D] = [
         [-0.1090, 0.0169],
         [0.0968, 0.2190],
         [-0.0332, 0.0779],
         [-0.0234, 0.0676],
-    ]];
-    const INPUT_WEIGHTS_G_T: [[[f32; INP_D]; HID_D * 4]; 1] = [[
+    ];
+    const INPUT_WEIGHTS_G_T: [[f32; INP_D]; HID_D * 4] = [
         [-7.1392e-3, -9.1484e-3, -8.3713e-5],
         [-1.8330e-3, -4.6515e-3, 1.3608e-2],
         [-2.5509e-4, 1.6488e-5, -1.5846e-3],
@@ -384,8 +407,8 @@ mod tests {
         [3.8327e-2, 4.1747e-2, 6.8519e-2],
         [-4.2946e-3, -5.0783e-3, -1.4337e-3],
         [1.2592e-4, 1.1887e-4, 5.2137e-3],
-    ]];
-    const RECURRENT_WEIGHTS_G_T: [[[f32; HID_D]; HID_D * 4]; 1] = [[
+    ];
+    const RECURRENT_WEIGHTS_G_T: [[f32; HID_D]; HID_D * 4] = [
         [-2.7388e-4, -3.0253e-4],
         [-5.5798e-4, -3.4758e-4],
         [2.1925e-4, 2.1652e-4],
@@ -394,15 +417,15 @@ mod tests {
         [-6.2271e-4, 9.5916e-4],
         [6.3325e-5, 5.1526e-5],
         [-3.4406e-5, 1.8998e-4],
-    ]];
-    const BIASES_G: [[[f32; HID_D * 4]; 1]; 1] = [[[
+    ];
+    const BIASES_G: [f32; HID_D * 4] = [
         -0.0054, 0.0125, -0.0017, 0.0006, 0.0790, 0.1081, -0.0045, 0.0066,
-    ]]];
+    ];
 
     #[test]
     fn test_lstm_against_known_values() {
         // create tensors from known values
-        let device = Default::default();
+        let device = Device::default().autodiff();
         let input = Tensor::from_data(TensorData::from(INPUT), &device).require_grad();
         let input_rev =
             Tensor::from_data(TensorData::from([INPUT[1], INPUT[0]]), &device).require_grad();
@@ -416,11 +439,11 @@ mod tests {
         let expected_hidden = TensorData::from(HIDDEN);
         let expected_cell = TensorData::from(CELL);
         let expected_input_weights_grad =
-            Tensor::<3>::from_data(TensorData::from(INPUT_WEIGHTS_G_T), &device)
+            Tensor::<2>::from_data(TensorData::from(INPUT_WEIGHTS_G_T), &device)
                 .transpose()
                 .to_data();
         let expected_recurrent_weights_grad =
-            Tensor::<3>::from_data(TensorData::from(RECURRENT_WEIGHTS_G_T), &device)
+            Tensor::<2>::from_data(TensorData::from(RECURRENT_WEIGHTS_G_T), &device)
                 .transpose()
                 .to_data();
         let expected_biases_grad = TensorData::from(BIASES_G);
@@ -432,10 +455,13 @@ mod tests {
         // run lstm under test
         let (output, state) = lstm.forward(input, None);
         // create bilstm under test with identical forward & reverse weights
-        let bilstm = BiLstm {
-            forward: lstm.clone(),
-            reverse: lstm.clone(),
-        };
+        let mut bilstm = LstmConfig::new(INP_D, HID_D, true).init_bilstm(&device);
+        bilstm.forward.input_weights = Param::from_tensor(input_weights.clone());
+        bilstm.forward.recurrent_weights = Param::from_tensor(recurrent_weights.clone());
+        bilstm.forward.biases = Some(Param::from_tensor(biases.clone()));
+        bilstm.reverse.input_weights = Param::from_tensor(input_weights.clone());
+        bilstm.reverse.recurrent_weights = Param::from_tensor(recurrent_weights.clone());
+        bilstm.reverse.biases = Some(Param::from_tensor(biases.clone()));
         // run bilstm under test
         let (output_bi, state_bi) = bilstm.forward(input_rev, None);
         let output_rev = output_bi
@@ -502,7 +528,7 @@ mod tests {
                 .unwrap()
                 .val()
                 .equal(Tensor::from_floats(
-                    [[[0., 0., 0., 1., 1., 1., 0., 0., 0., 0., 0., 0.]]],
+                    [0., 0., 0., 1., 1., 1., 0., 0., 0., 0., 0., 0.],
                     &Default::default()
                 ))
                 .all()

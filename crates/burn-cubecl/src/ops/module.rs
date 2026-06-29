@@ -9,12 +9,12 @@ use burn_backend::{
         AttentionModuleOptions, ConvOptions, ConvTransposeOptions, DeformConv2dBackward,
         DeformConvOptions, InterpolateOptions, MaxPool2dBackward, MaxPool2dWithIndices, ModuleOps,
         rnn::{
-            RnnOps, RnnSize,
+            RnnOps,
             lstm::{LstmElemwise, LstmElemwiseBackward, LstmOps},
         },
     },
 };
-use burn_std::IntDType;
+use burn_std::{IntDType, RnnSize};
 
 impl<R> ModuleOps<Self> for CubeBackend<R>
 where
@@ -407,9 +407,10 @@ impl<R: CubeRuntime> LstmOps<Self> for CubeBackend<R> {
         g: FloatTensor<Self>,
         c: FloatTensor<Self>,
         size: &RnnSize,
-        tracked: bool,
+        with_gate_outpt: bool,
     ) -> LstmElemwise<Self> {
-        let ([h_out, c_out], g_out) = kernel::rnn::lstm::lstm_elemwise::<R>(g, c, size, tracked);
+        let ([h_out, c_out], g_out) =
+            kernel::rnn::lstm::lstm_elemwise::<R>(g, c, size, with_gate_outpt);
         LstmElemwise::new(h_out, c_out, g_out)
     }
 

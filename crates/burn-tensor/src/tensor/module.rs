@@ -1,6 +1,7 @@
 use burn_backend::ops::ModuleOps;
-use burn_backend::ops::rnn::{Rnn, RnnMode, RnnOps, RnnOptions, RnnSize};
+use burn_backend::ops::rnn::{Rnn, RnnMode, RnnOps, RnnOptions};
 use burn_dispatch::Dispatch;
+use burn_std::RnnSize;
 
 use crate::{
     Bool, Int, Tensor, check,
@@ -646,19 +647,25 @@ fn layer_norm_impl(
 /// Tuple of `(output, hidden_state, cell_state)`
 pub fn lstm(
     input: Tensor<3>,
-    hidden_state: Tensor<3>,
-    cell_state: Tensor<3>,
-    input_weights: Tensor<3>,
-    recurrent_weights: Tensor<3>,
-    biases: Option<Tensor<3>>,
+    hidden_state: Tensor<2>,
+    cell_state: Tensor<2>,
+    input_weights: Tensor<2>,
+    recurrent_weights: Tensor<2>,
+    biases: Option<Tensor<1>>,
     size: RnnSize,
-) -> (Tensor<3>, Tensor<3>, Tensor<3>) {
+) -> (Tensor<3>, Tensor<2>, Tensor<2>) {
+    // unsqueeze all tensors to three dims
+    let hidden_state = hidden_state.unsqueeze::<3>();
+    let cell_state = cell_state.unsqueeze::<3>();
+    let input_weights = input_weights.unsqueeze::<3>();
+    let recurrent_weights = recurrent_weights.unsqueeze::<3>();
+    let biases = biases.map(|b| b.unsqueeze::<3>());
+    // RNN forward in LSTM mode
     let options = RnnOptions {
         mode: RnnMode::Lstm,
         size,
         enable_gate_output: false,
     };
-    // RNN forward in LSTM mode
     let Rnn {
         out,
         hidden_state,
@@ -675,7 +682,7 @@ pub fn lstm(
     );
     (
         Tensor::new(BridgeTensor::float(out)),
-        Tensor::new(BridgeTensor::float(hidden_state)),
-        Tensor::new(BridgeTensor::float(cell_state.unwrap())),
+        Tensor::<3>::new(BridgeTensor::float(hidden_state)).squeeze(),
+        Tensor::<3>::new(BridgeTensor::float(cell_state.unwrap())).squeeze(),
     )
 }

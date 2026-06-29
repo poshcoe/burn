@@ -30,7 +30,7 @@ pub trait LstmOps<B: Backend> {
         g: FloatTensor<B>,
         c: FloatTensor<B>,
         size: &RnnSize,
-        tracked: bool,
+        with_gate_output: bool,
     ) -> LstmElemwise<B> {
         // FALLBACK IMPLEMENTATION
         // split into gate inputs
@@ -49,7 +49,7 @@ pub trait LstmOps<B: Backend> {
         let h_out = B::float_mul(og.clone(), B::float_tanh(c_out.clone()));
         // store gate outputs required for accelerated backprop (reuse g)
         let mut g_out = g;
-        let g_out = tracked.then_some({
+        let g_out = with_gate_output.then_some({
             for (j, sg) in [ig, fg, cg, og].into_iter().enumerate() {
                 g_out = B::float_slice_assign(g_out, &size.gate_range(j), sg);
             }

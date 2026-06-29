@@ -1,36 +1,11 @@
 use crate::backend::Backend;
 use crate::tensor::FloatTensor;
-use burn_std::{Shape, Slice, s};
+use burn_std::{RnnSize, s};
 use serde::{Deserialize, Serialize};
 
 /// Long Short-Term Memory operations
 pub mod lstm;
 use lstm::{LstmElemwise, LstmElemwiseBackward, LstmOps};
-
-/// Struct describing the size of an RNN problem
-#[derive(new, Debug, Clone, Hash, PartialEq, Serialize, Deserialize)]
-pub struct RnnSize {
-    /// Sequence size
-    pub seq_d: usize,
-    /// Batch size
-    pub bat_d: usize,
-    /// Input size
-    pub inp_d: usize,
-    /// Hidden size
-    pub hid_d: usize,
-}
-
-impl RnnSize {
-    /// Shape of a single RNN state
-    pub fn state_shape(&self) -> Shape {
-        burn_std::shape!(1, self.bat_d, self.hid_d)
-    }
-
-    /// Gate range within a trajectory of flattened transitions
-    pub fn gate_range(&self, j: usize) -> [Slice; 3] {
-        s![0, .., self.hid_d * j..self.hid_d * (j + 1)]
-    }
-}
 
 /// Enum of RNN cell operating modes
 #[derive(new, Debug, Clone, Hash, PartialEq, Serialize, Deserialize)]
@@ -181,7 +156,7 @@ pub trait RnnOps<B: Backend>: LstmOps<B> {
         c: Option<FloatTensor<B>>,
         options: &RnnOptions,
     ) -> RnnElemwise<B> {
-        let tracked = options.enable_gate_output;
+        let with_gate_output = options.enable_gate_output;
         match &options.mode {
             RnnMode::Lstm => {
                 let c = c.expect("Initial LSTM cell state must be provided.");
@@ -189,7 +164,7 @@ pub trait RnnOps<B: Backend>: LstmOps<B> {
                     h_out: h,
                     c_out: c,
                     g_out: gates,
-                } = B::lstm_elemwise(g, c, &options.size, tracked);
+                } = B::lstm_elemwise(g, c, &options.size, with_gate_output);
                 RnnElemwise::new(h, Some(c), gates)
             }
             RnnMode::Gru => unimplemented!(),

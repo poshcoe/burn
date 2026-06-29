@@ -1,6 +1,5 @@
 use super::*;
-use burn_backend::ops::rnn::RnnSize;
-use burn_tensor::{TensorData, Tolerance};
+use burn_tensor::{TensorData, Tolerance, ops::RnnSize};
 
 const SEQ_D: usize = 2;
 const BAT_D: usize = 4;
@@ -21,7 +20,7 @@ const INPUT: [[[f32; INP_D]; BAT_D]; SEQ_D] = [
         [3.4535e-2, 8.7611e-2, 8.1984e-1],
     ],
 ];
-const INPUT_WEIGHTS_T: [[[f32; INP_D]; HID_D * 4]; 1] = [[
+const INPUT_WEIGHTS_T: [[f32; INP_D]; HID_D * 4] = [
     [0.5515, -1.0005, -0.9981],
     [-0.3744, -0.6567, -0.8902],
     [-0.7804, 0.5981, -0.9637],
@@ -30,8 +29,8 @@ const INPUT_WEIGHTS_T: [[[f32; INP_D]; HID_D * 4]; 1] = [[
     [-0.5157, -0.5139, 0.8493],
     [0.3309, -0.5226, -0.1362],
     [0.3765, 0.5327, 0.7626],
-]];
-const RECURRENT_WEIGHTS_T: [[[f32; HID_D]; HID_D * 4]; 1] = [[
+];
+const RECURRENT_WEIGHTS_T: [[f32; HID_D]; HID_D * 4] = [
     [-0.4148, -0.1351],
     [0.2090, 0.4742],
     [-0.6913, 0.0456],
@@ -40,9 +39,9 @@ const RECURRENT_WEIGHTS_T: [[[f32; HID_D]; HID_D * 4]; 1] = [[
     [0.3370, -0.3085],
     [-0.2517, 0.0471],
     [-0.2644, 0.4771],
-]];
-const BIASES: [[[f32; HID_D * 4]; 1]; 1] = [[[0., 0., 1., 1., 0., 0., 0., 0.]]];
-const INPUT_WEIGHTS_G_T: [[[f32; INP_D]; HID_D * 4]; 1] = [[
+];
+const BIASES: [f32; HID_D * 4] = [0., 0., 1., 1., 0., 0., 0., 0.];
+const INPUT_WEIGHTS_G_T: [[f32; INP_D]; HID_D * 4] = [
     [-7.1392e-3, -9.1484e-3, -8.3713e-5],
     [-1.8330e-3, -4.6515e-3, 1.3608e-2],
     [-2.5509e-4, 1.6488e-5, -1.5846e-3],
@@ -51,8 +50,8 @@ const INPUT_WEIGHTS_G_T: [[[f32; INP_D]; HID_D * 4]; 1] = [[
     [3.8327e-2, 4.1747e-2, 6.8519e-2],
     [-4.2946e-3, -5.0783e-3, -1.4337e-3],
     [1.2592e-4, 1.1887e-4, 5.2137e-3],
-]];
-const RECURRENT_WEIGHTS_G_T: [[[f32; HID_D]; HID_D * 4]; 1] = [[
+];
+const RECURRENT_WEIGHTS_G_T: [[f32; HID_D]; HID_D * 4] = [
     [-2.7388e-4, -3.0253e-4],
     [-5.5798e-4, -3.4758e-4],
     [2.1925e-4, 2.1652e-4],
@@ -61,28 +60,28 @@ const RECURRENT_WEIGHTS_G_T: [[[f32; HID_D]; HID_D * 4]; 1] = [[
     [-6.2271e-4, 9.5916e-4],
     [6.3325e-5, 5.1526e-5],
     [-3.4406e-5, 1.8998e-4],
-]];
-const BIASES_G: [[[f32; HID_D * 4]; 1]; 1] = [[[
+];
+const BIASES_G: [f32; HID_D * 4] = [
     -0.0054, 0.0125, -0.0017, 0.0006, 0.0790, 0.1081, -0.0045, 0.0066,
-]]];
+];
 
 #[test]
 fn test_lstm_backward() {
     let device = AutodiffDevice::new();
     let input = TestTensor::<3>::from_data(INPUT, &device).require_grad();
-    let input_weights = TestTensor::<3>::from_data(INPUT_WEIGHTS_T, &device)
+    let input_weights = TestTensor::<2>::from_data(INPUT_WEIGHTS_T, &device)
         .transpose()
         .require_grad();
-    let recurrent_weights = TestTensor::<3>::from_data(RECURRENT_WEIGHTS_T, &device)
+    let recurrent_weights = TestTensor::<2>::from_data(RECURRENT_WEIGHTS_T, &device)
         .transpose()
         .require_grad();
-    let biases = Some(TestTensor::<3>::from_data(BIASES, &device).require_grad());
-    let cell = TestTensor::<3>::from_data([[[0.; HID_D]; BAT_D]; 1], &device);
-    let hidden = TestTensor::<3>::from_data([[[0.; HID_D]; BAT_D]; 1], &device);
-    let expected_input_weights_grad = TestTensor::<3>::from(INPUT_WEIGHTS_G_T)
+    let biases = Some(TestTensor::<1>::from_data(BIASES, &device).require_grad());
+    let cell = TestTensor::<2>::from_data([[0.; HID_D]; BAT_D], &device);
+    let hidden = TestTensor::<2>::from_data([[0.; HID_D]; BAT_D], &device);
+    let expected_input_weights_grad = TestTensor::<2>::from(INPUT_WEIGHTS_G_T)
         .transpose()
         .to_data();
-    let expected_recurrent_weights_grad = TestTensor::<3>::from(RECURRENT_WEIGHTS_G_T)
+    let expected_recurrent_weights_grad = TestTensor::<2>::from(RECURRENT_WEIGHTS_G_T)
         .transpose()
         .to_data();
     let expected_biases_grad = TensorData::from(BIASES_G);
